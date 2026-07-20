@@ -1,0 +1,18 @@
+# GammaGrid brand theme — matches the tokens used on the gammagrid.io teaser
+# (near-black background, purple/green diverging accent pair, mono display
+# font). Keep in sync with the teaser's design tokens if either changes.
+[theme]
+base = "dark"
+primaryColor = "#B833E0"
+backgroundColor = "#0A0C0B"
+secondaryBackgroundColor = "#111614"
+textColor = "#EDEFEC"
+font = "monospace"
+
+[server]
+headless = true
+
+# "minimal" drops the "Deploy" button (Streamlit Community Cloud) from the
+# toolbar — that flow doesn't fit the project's own hosting/business plan.
+[client]
+toolbarMode = "minimal"

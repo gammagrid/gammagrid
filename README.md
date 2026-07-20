@@ -1,4 +1,7 @@
-# Options Flow Tracker
+# GammaGrid
+
+The open-source options positioning dashboard — dealer gamma exposure, max
+pain, open interest, and IV surface for your whole watchlist, not just SPY.
 
 A local dashboard for on-demand daily collection of option-chain data for a
 watchlist of tickers, computing positioning analytics: Put/Call Ratio, Max

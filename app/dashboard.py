@@ -14,7 +14,19 @@ from matplotlib.colors import LinearSegmentedColormap
 
 from app import collector, config, db, metrics
 
-st.set_page_config(page_title="Options Flow Tracker", layout="wide")
+# Same 2x2 diagonal "chip" mark used as the favicon on gammagrid.io — keep
+# this data URI in sync with the teaser site's <link rel="icon"> if the mark
+# ever changes.
+FAVICON = (
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E"
+    "%3Crect width='32' height='32' fill='%230A0C0B'/%3E"
+    "%3Crect x='4' y='4' width='10' height='10' fill='%23B833E0'/%3E"
+    "%3Crect x='18' y='4' width='10' height='10' fill='%23222'/%3E"
+    "%3Crect x='4' y='18' width='10' height='10' fill='%23222'/%3E"
+    "%3Crect x='18' y='18' width='10' height='10' fill='%2322C55E'/%3E%3C/svg%3E"
+)
+
+st.set_page_config(page_title="GammaGrid", page_icon=FAVICON, layout="wide")
 
 
 def format_date(value: pd.Timestamp) -> str:
@@ -216,11 +228,36 @@ def render_tradingview_widget(ticker: str, height: int = 300) -> str:
 
 conn = db.get_connection()
 
-st.title("Options Flow Tracker")
+# Header wordmark: the same 2x2 diagonal chip mark as the favicon, at the
+# "large instance" size documented for the brand (34px cells, 4px gap) next
+# to the title text, matching the teaser site's wordmark treatment.
+st.markdown(
+    """
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:0.25rem;">
+      <div style="display:grid;grid-template-columns:34px 34px;grid-template-rows:34px 34px;gap:4px;flex-shrink:0;">
+        <div style="background:#B833E0;"></div>
+        <div style="background:#2A332E;"></div>
+        <div style="background:#2A332E;"></div>
+        <div style="background:#22C55E;"></div>
+      </div>
+      <h1 style="margin:0;font-family:inherit;font-weight:700;">GammaGrid</h1>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.caption(
+    "Open-source options positioning dashboard — dealer gamma exposure, max pain, "
+    "open interest, and IV surface for your whole watchlist."
+)
 
 with st.sidebar:
     st.header("Watchlist")
-    new_ticker = st.text_input("Add ticker", placeholder="AAPL").strip().upper()
+    new_ticker = st.text_input(
+        "Add ticker",
+        placeholder="AAPL",
+        help="Data comes from Yahoo Finance (yfinance) — not every ticker or every "
+        "options chain is available there.",
+    ).strip().upper()
     if st.button("Add") and new_ticker:
         db.add_ticker(conn, new_ticker)
         st.rerun()
@@ -280,6 +317,9 @@ with st.sidebar:
             "considered suspect and is not saved (status=failed, reason in `error_message`), "
             "even if the request to the data source itself completed without a network error."
         )
+
+    st.divider()
+    st.caption("Questions or feedback: [hello@gammagrid.io](mailto:hello@gammagrid.io)")
 
 if not watchlist:
     st.info("Add a ticker to the watchlist on the left to get started.")
