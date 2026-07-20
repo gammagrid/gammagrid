@@ -22,7 +22,7 @@ commitment or a timeline. Priorities shift based on real usage; see
   no extra process to manage). An optional scheduled mode is the most
   requested type of feature for a tool like this — open to it if there's
   real interest.
-- **Neutral example screenshots and a short product tour** in the README.
+- **A short product tour GIF** in the README (screenshots are already there).
 - **A published Docker image** (`docker run` without cloning the repo first).
 
 ## Bigger picture

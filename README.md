@@ -11,6 +11,8 @@ open source, built on free market data.
 > into a terminal, you can run GammaGrid. No Python, no config files, no
 > programming experience needed — see [Quick start](#quick-start-no-coding-required) below.
 
+![GEX Heatmap: strike × expiry gamma exposure matrix, with Call Wall, Put Wall, Gamma Flip, and Replay](docs/img/gex-heatmap.png)
+
 ## Quick start (no coding required)
 
 1. **Install Docker Desktop** — [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/).
@@ -71,8 +73,14 @@ Most history-based metrics (other than Put/Call Ratio, average IV, and OI
 Delta) need several days of collection — some charts require at least two
 snapshots. Click **Collect data** daily (or a few times a day) to build up history.
 
-> Screenshots are on the way — for now, the fastest way to see it is to run
-> the Quick start above; it takes about two minutes.
+## Screenshots
+
+| IV surface | Options screener |
+| --- | --- |
+| ![3D implied volatility surface across the option chain](docs/img/iv-surface.png) | ![Options screener with the full set of greeks and range filters](docs/img/screener.png) |
+
+All screenshots above are real GammaGrid output — SPY/QQQ/MSFT via a live
+collection, no mockups.
 
 ## FAQ
 
