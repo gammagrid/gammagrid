@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Initial public release in progress — see the [Roadmap](ROADMAP.md) for what's next.
+## [0.1.0] - 2026-07-20
+
+Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 
 ### Added
 
@@ -25,4 +27,5 @@ Initial public release in progress — see the [Roadmap](ROADMAP.md) for what's 
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/commits/main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.1.0...main
+[0.1.0]: https://github.com/gammagrid/gammagrid/releases/tag/v0.1.0
