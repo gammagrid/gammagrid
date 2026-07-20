@@ -1,0 +1,6 @@
+data/
+tests/
+docs/
+.git/
+__pycache__/
+*.pyc

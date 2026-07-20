@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    ports:
+      # Порт публикуется только на localhost — приложение не должно быть
+      # доступно из локальной сети (ТЗ, раздел 5.3).
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - OPTIONS_TRACKER_DB=data/options.db
