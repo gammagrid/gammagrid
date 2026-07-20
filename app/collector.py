@@ -1,5 +1,5 @@
-"""Единственный модуль, обращающийся к внешнему источнику данных (yfinance).
-Ничего, кроме этого модуля, не делает сетевых запросов."""
+"""The only module that talks to the external data source (yfinance).
+Nothing outside this module makes network requests."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def _with_retry(fn, *args, **kwargs):
     for attempt in range(config.MAX_FETCH_RETRIES):
         try:
             return fn(*args, **kwargs)
-        except Exception as exc:  # yfinance/requests кидают разные типы ошибок и рейт-лимитов
+        except Exception as exc:  # yfinance/requests raise assorted error and rate-limit types
             last_error = exc
             if attempt < config.MAX_FETCH_RETRIES - 1:
                 time.sleep(config.BACKOFF_BASE_SECONDS * (2 ** attempt))
@@ -54,7 +54,7 @@ def _with_retry(fn, *args, **kwargs):
 
 
 def fetch_ticker_snapshot(ticker: str) -> tuple[float, pd.DataFrame]:
-    """Возвращает (цена базового актива, вся опционная цепочка по всем экспирациям)."""
+    """Returns (underlying price, the full option chain across all expiries)."""
     ticker_obj = yf.Ticker(ticker)
     underlying_price = _with_retry(_fetch_underlying_price, ticker_obj)
     expiries = _with_retry(lambda: ticker_obj.options)
@@ -65,10 +65,11 @@ def fetch_ticker_snapshot(ticker: str) -> tuple[float, pd.DataFrame]:
 
 
 def fetch_price_history(ticker: str, period: str = "6mo") -> pd.DataFrame:
-    """Дневная история закрытий БА напрямую от yfinance — для реализованной
-    волатильности (ТЗ, FR24). Отдельный лёгкий read-only запрос, не связанный
-    с collect_watchlist: не пишет в БД, не участвует в проверке качества
-    снэпшота, не завязан на то, сколько дней мы уже собираем опционные цепочки."""
+    """Daily close history of the underlying, straight from yfinance — for
+    realized volatility (spec FR24). A separate lightweight read-only request,
+    unrelated to collect_watchlist: it doesn't write to the DB, doesn't take
+    part in snapshot quality checks, and doesn't depend on how many days of
+    option chains we have already collected."""
     history = _with_retry(lambda: yf.Ticker(ticker).history(period=period))
     if history.empty:
         return pd.DataFrame(columns=["close"])
@@ -76,33 +77,35 @@ def fetch_price_history(ticker: str, period: str = "6mo") -> pd.DataFrame:
 
 
 def _now_utc() -> datetime:
-    """Naive datetime, UTC по соглашению. Без tzinfo — чтобы не ловить
-    tz-aware/tz-naive конфликты при арифметике с датами экспирации в metrics.py,
-    которые приходят из БД как naive (даты без времени)."""
+    """Naive datetime, UTC by convention. No tzinfo — avoids tz-aware/tz-naive
+    conflicts in date arithmetic with expiry dates in metrics.py, which come
+    from the DB as naive (dates without time)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _oi_zero_fraction(chain_df: pd.DataFrame) -> float:
-    """Доля контрактов с open_interest=0 в свежесобранной цепочке. Реальный
-    источник шума для обнаружения повреждённых ответов источника данных —
-    см. `config.MAX_ZERO_OI_FRACTION`."""
+    """Fraction of contracts with open_interest=0 in a freshly collected
+    chain. The real-world signal for detecting corrupted data-source
+    responses — see `config.MAX_ZERO_OI_FRACTION`."""
     if chain_df.empty:
         return 1.0
     return float((chain_df["open_interest"].fillna(0) == 0).mean())
 
 
 def collect_watchlist(conn, tickers: list[str]) -> dict[str, str]:
-    """Собирает снэпшот по каждому тикеру из watchlist. Сбой одного тикера
-    не прерывает сбор по остальным (ТЗ, FR12). Возвращает статус по каждому тикеру.
+    """Collects a snapshot for every ticker in the watchlist. One ticker
+    failing does not interrupt collection for the rest (spec FR12). Returns
+    a status per ticker.
 
-    Перед сохранением проверяется доля контрактов с open_interest=0 (ТЗ, FR23):
-    источник данных иногда отвечает "успешно" (нет исключения, структура
-    цепочки на месте — те же strike/expiry, volume и цены выглядят нормально),
-    но open_interest и implied_volatility приходят почти сплошь нулевыми/около
-    нулевыми. Такой снэпшот выглядит как обычный, но ломает GEX Heatmap
-    (гамма считается от OI) и OI Delta (день-в-день сравнение). Проверка
-    отсекает это до записи в БД — лучше пропустить сбор тикера в этом цикле,
-    чем один раз тихо испортить историю."""
+    Before saving, the fraction of contracts with open_interest=0 is checked
+    (spec FR23): the data source sometimes responds "successfully" (no
+    exception, chain structure intact — same strikes/expiries, volume and
+    prices look normal) but open_interest and implied_volatility come back
+    almost entirely zero/near-zero. Such a snapshot looks ordinary but breaks
+    the GEX Heatmap (gamma is computed from OI) and OI Delta (day-over-day
+    comparison). The check rejects it before it reaches the DB — better to
+    skip one collection cycle for a ticker than to silently corrupt the
+    history once."""
     results: dict[str, str] = {}
     for ticker in tickers:
         started_at = _now_utc()
@@ -111,14 +114,14 @@ def collect_watchlist(conn, tickers: list[str]) -> dict[str, str]:
         try:
             underlying_price, chain_df = fetch_ticker_snapshot(ticker)
             if chain_df.empty:
-                raise ValueError("Пустая опционная цепочка")
+                raise ValueError("Empty option chain")
             rows_fetched = len(chain_df)
             oi_zero_fraction = _oi_zero_fraction(chain_df)
             if oi_zero_fraction > config.MAX_ZERO_OI_FRACTION:
                 raise ValueError(
-                    f"{oi_zero_fraction:.0%} контрактов с open_interest=0 (порог "
-                    f"{config.MAX_ZERO_OI_FRACTION:.0%}) — источник данных, похоже, "
-                    "вернул повреждённый/неполный снэпшот, не сохраняем"
+                    f"{oi_zero_fraction:.0%} of contracts have open_interest=0 "
+                    f"(threshold {config.MAX_ZERO_OI_FRACTION:.0%}) — the data source "
+                    "likely returned a corrupted/incomplete snapshot, not saving"
                 )
             db.insert_snapshot(conn, ticker, started_at, underlying_price, chain_df)
             db.log_run(

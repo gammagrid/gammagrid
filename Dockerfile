@@ -2,8 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Streamlit добавляет в sys.path директорию самого скрипта (app/dashboard.py),
-# а не рабочую директорию — без этого `from app import ...` не резолвится.
+# Streamlit adds the script's own directory (app/dashboard.py) to sys.path,
+# not the working directory — without this, `from app import ...` doesn't resolve.
 ENV PYTHONPATH=/app
 
 COPY requirements.txt .

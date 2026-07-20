@@ -1,5 +1,5 @@
-"""Единственная точка доступа к SQLite. Ничего, кроме этого модуля,
-не открывает соединение с БД напрямую."""
+"""The single access point to SQLite. Nothing outside this module
+opens a database connection directly."""
 
 from __future__ import annotations
 
@@ -57,10 +57,10 @@ CREATE TABLE IF NOT EXISTS tracked_contracts (
 """
 
 
-# Аддитивные миграции для уже существующих БД — CREATE TABLE IF NOT EXISTS
-# в SCHEMA не добавляет колонки в таблицу, которая уже была создана раньше
-# без них. ADD COLUMN не поддерживает IF NOT EXISTS во всех версиях SQLite,
-# поэтому идемпотентность — через отлов OperationalError на повторный запуск.
+# Additive migrations for pre-existing databases — CREATE TABLE IF NOT EXISTS
+# in SCHEMA does not add columns to a table that was created earlier without
+# them. ADD COLUMN does not support IF NOT EXISTS in all SQLite versions,
+# so idempotency is achieved by catching OperationalError on re-runs.
 MIGRATIONS = [
     "ALTER TABLE collection_runs ADD COLUMN rows_fetched INTEGER",
     "ALTER TABLE collection_runs ADD COLUMN oi_zero_fraction REAL",
@@ -77,7 +77,7 @@ def get_connection() -> sqlite3.Connection:
         try:
             conn.execute(migration)
         except sqlite3.OperationalError:
-            pass  # колонка уже добавлена в предыдущем запуске
+            pass  # column already added in a previous run
     conn.commit()
     return conn
 
@@ -108,8 +108,8 @@ def insert_snapshot(
     underlying_price: float,
     chain_df: pd.DataFrame,
 ) -> None:
-    """chain_df: колонки expiry, strike, option_type, last_price, bid, ask,
-    volume, open_interest, implied_volatility, in_the_money (см. collector.py)."""
+    """chain_df: columns expiry, strike, option_type, last_price, bid, ask,
+    volume, open_interest, implied_volatility, in_the_money (see collector.py)."""
     rows = [
         (
             ticker,
@@ -167,10 +167,11 @@ def log_run(
     rows_fetched: int | None = None,
     oi_zero_fraction: float | None = None,
 ) -> None:
-    """`rows_fetched`/`oi_zero_fraction` — диагностика для лога сборов (сайдбар
-    дашборда): сколько строк цепочки реально пришло и какая доля open_interest
-    оказалась нулевой. Пишутся независимо от статуса — по ним видно не только
-    явные сбои, но и "успешные", но подозрительные сборы (см. FR23, ТЗ)."""
+    """`rows_fetched`/`oi_zero_fraction` — diagnostics for the collection log
+    (dashboard sidebar): how many chain rows actually arrived and what fraction
+    of open_interest came back as zero. Written regardless of status — they
+    reveal not just outright failures but also "successful" yet suspect
+    collections (see spec FR23)."""
     conn.execute(
         """INSERT INTO collection_runs
            (started_at, finished_at, ticker, status, error_message, rows_fetched, oi_zero_fraction)
@@ -196,7 +197,7 @@ def get_recent_runs(conn: sqlite3.Connection, limit: int = 50) -> pd.DataFrame:
     )
 
 
-# --- tracked contracts (ТЗ, FR14) ---
+# --- tracked contracts (spec FR14) ---
 
 def add_tracked_contract(
     conn: sqlite3.Connection, ticker: str, expiry, strike: float, option_type: str

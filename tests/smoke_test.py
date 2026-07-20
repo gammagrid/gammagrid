@@ -1,6 +1,6 @@
-"""Ручная проверка плюмбинга db.py + metrics.py на синтетических данных,
-без сети и без реального yfinance. Не часть pytest-сюиты — просто быстрый
-прогон при разработке. Запуск: python tests/smoke_test.py"""
+"""Manual check of the db.py + metrics.py plumbing on synthetic data, with no
+network and no real yfinance. Not part of a pytest suite — just a quick run
+during development. Usage: python tests/smoke_test.py"""
 
 import os
 import sys
@@ -19,8 +19,8 @@ STRIKES = [90, 95, 100, 105, 110]
 
 
 def make_chain(iv_shift: float, strike_100_volume: int, strike_100_oi: int) -> pd.DataFrame:
-    """strike_100_volume/oi varies per snapshot to exercise дневную нормализацию;
-    остальные страйки держим стабильными, чтобы не путать с общим ростом активности."""
+    """strike_100_volume/oi varies per snapshot to exercise daily normalization;
+    the other strikes are kept stable to avoid confusion with a general rise in activity."""
     rows = []
     for strike in STRIKES:
         for option_type, base_iv in [("call", 0.30), ("put", 0.35)]:
@@ -50,9 +50,9 @@ def main():
     assert db.get_watchlist(conn) == ["TEST"]
 
     base_day = datetime(2026, 7, 1, 21, 0)
-    # Дни 1-5: один сбор в день, OI растёт понемногу день ото дня (95..100, OI 50..61).
-    # День 6: ДВА сбора (утро и вечер) — тот самый сценарий из бага: OI внутри дня
-    # не меняется (65->65), а volume растёт как накопленный дневной объём (200->500).
+    # Days 1-5: one collection per day, OI grows a little day over day (95..100, OI 50..61).
+    # Day 6: TWO collections (morning and evening) — the exact scenario from the bug: OI
+    # doesn't change intraday (65->65) while volume grows as cumulative daily volume (200->500).
     daily_snapshots = [
         # (offset_hours_from_base, volume, open_interest)
         (0, 95, 50),
@@ -60,8 +60,8 @@ def main():
         (48, 90, 55),
         (72, 110, 58),
         (96, 100, 61),
-        (120 - 12, 200, 65),  # день 6, утро
-        (120, 500, 65),       # день 6, вечер — та же OI, что и утром
+        (120 - 12, 200, 65),  # day 6, morning
+        (120, 500, 65),       # day 6, evening — same OI as the morning
     ]
 
     for i, (offset_hours, volume, oi) in enumerate(daily_snapshots):
@@ -99,11 +99,11 @@ def main():
     assert (unusual["strike"] == 100.0).any(), "strike 100 had a clear volume spike on day 6 evening, should be flagged"
     assert len(unusual) <= 4, f"expected only strike-100 call/put flagged (z-score), got {len(unusual)} rows"
     flagged_call = unusual[(unusual["strike"] == 100.0) & (unusual["option_type"] == "call")].iloc[0]
-    # день 6 утро (volume=200) не должен попасть в историю дважды — история
-    # должна схлопнуться до 6 календарных дней (1-5 + утро дня 6), не 6 сырых строк с дублем
+    # day 6 morning (volume=200) must not enter the history twice — the history
+    # must collapse to 6 calendar days (1-5 + day 6 morning), not 6 raw rows with a dupe
     assert flagged_call["avg_volume"] < 200, (
-        f"история должна включать день 6 (утро, volume=200) только один раз, "
-        f"avg_volume={flagged_call['avg_volume']} выглядит нетронутым схлопыванием"
+        f"history should include day 6 (morning, volume=200) only once, "
+        f"avg_volume={flagged_call['avg_volume']} looks untouched by the collapse"
     )
 
     iv_avg = metrics.iv_weighted_average(df)
@@ -127,8 +127,8 @@ def main():
     print("OI delta (day-over-day, collapsed):\n", delta, "\n")
     assert not delta.empty
     strike_100_row = delta[(delta["strike"] == 100.0) & (delta["option_type"] == "call")].iloc[0]
-    # Без схлопывания старый код сравнил бы два сегодняшних сбора (OI 65 vs 65) => 0.
-    # С фиксом сравниваются день 6 (65) и день 5 (61) => +4.
+    # Without the collapse, the old code would compare today's two collections (OI 65 vs 65) => 0.
+    # With the fix, day 6 (65) is compared against day 5 (61) => +4.
     assert strike_100_row["oi_delta"] == 4, f"expected day-over-day OI delta of +4 (65-61), got {strike_100_row['oi_delta']}"
     assert strike_100_row["open_interest"] == 65, f"expected latest OI of 65, got {strike_100_row['open_interest']}"
     expected_pct = 4 / 61 * 100
@@ -145,31 +145,32 @@ def main():
 
     net_by_expiry = metrics.net_gex_by_expiry(df)
     print("Net GEX by expiry:\n", net_by_expiry, "\n")
-    assert len(net_by_expiry) == 1  # синтетика содержит только одну expiry
+    assert len(net_by_expiry) == 1  # the synthetic data contains only one expiry
     assert abs(net_by_expiry["net_gex"].iloc[0] - net_gex) < 1e-6, "should match net_gamma_exposure for the same expiry"
 
     walls = metrics.dealer_walls(df)
     print("Dealer walls:", walls, "\n")
-    # strike 100 держит самый высокий OI (65) из всех страйков синтетики (у остальных - 50)
+    # strike 100 holds the highest OI (65) of all synthetic strikes (the rest have 50)
     assert walls["call_wall"] == 100.0, f"expected call wall at strike 100, got {walls['call_wall']}"
     assert walls["put_wall"] == 100.0, f"expected put wall at strike 100, got {walls['put_wall']}"
 
     flip = metrics.gamma_flip_price(df)
     print("Gamma flip price:", flip, "\n")
-    # синтетика не гарантирует смену знака (весь профиль может остаться одного
-    # знака) — важно, что функция не падает и возвращает либо None, либо float
+    # the synthetic data doesn't guarantee a sign change (the whole profile may
+    # stay one sign) — what matters is the function doesn't crash and returns
+    # either None or a float
     assert flip is None or isinstance(flip, float)
 
-    # Replay: as_of на более раннюю дату должен воспроизводить исторический снэпшот,
-    # а не тихо падать обратно на последний
+    # Replay: as_of set to an earlier date must reproduce the historical
+    # snapshot, not silently fall back to the latest one
     earlier_date = pd.Timestamp(base_day)
     matrix_earlier = metrics.gex_matrix(df, as_of=earlier_date)
     assert not matrix_earlier.empty
     assert not matrix_earlier.equals(matrix), "historical snapshot should differ from the latest one"
 
-    # iv_surface/iv_surface_grid — отдельный небольшой синтетический снэпшот с
-    # двумя экспирациями (основная синтетика выше использует только одну, а для
-    # поверхности нужно минимум 2x2 разных strike/expiry)
+    # iv_surface/iv_surface_grid — a separate small synthetic snapshot with two
+    # expiries (the main synthetic data above uses only one, and a surface
+    # needs at least 2x2 distinct strikes/expiries)
     iv_snapshot = pd.DataFrame([
         {"collected_at": latest_moment, "underlying_price": 100.0, "expiry": pd.Timestamp("2026-08-01"),
          "strike": 90.0, "option_type": "put", "implied_volatility": 0.35},
@@ -191,10 +192,10 @@ def main():
     assert grid_iv.shape == (5, 5)
     assert not np.isnan(grid_iv).any(), "gaps at the grid edges should be filled by nearest-neighbor fallback"
 
-    # меньше 2 разных strike или expiry — не поверхность, а линия; должно вернуть None, не упасть
+    # fewer than 2 distinct strikes or expiries — a line, not a surface; must return None, not crash
     assert metrics.iv_surface_grid(iv_surface_points[iv_surface_points["strike"] == 90.0]) is None
 
-    # screener_table (ТЗ, FR25) — плоская таблица последнего снэпшота с греками
+    # screener_table (spec FR25) — flat table of the latest snapshot with greeks
     screener = metrics.screener_table(df)
     assert len(screener) == 10, f"latest snapshot has 5 strikes x 2 types = 10 rows, got {len(screener)}"
     assert set(screener.columns) == {
@@ -202,14 +203,14 @@ def main():
         "implied_volatility", "delta", "gamma", "theta", "vega", "rho", "vanna", "charm",
     }
     screener_call_100 = screener[(screener["strike"] == 100.0) & (screener["option_type"] == "call")].iloc[0]
-    # тот же контракт на ту же дату должен давать те же греки, что и по вкладке «Опцион»
+    # the same contract on the same date must yield the same greeks as the Contract tab
     matching_history_row = greeks_history[greeks_history["collected_at"] == latest_moment].iloc[0]
     assert abs(screener_call_100["delta"] - matching_history_row["delta"]) < 1e-9
     assert abs(screener_call_100["gamma"] - matching_history_row["gamma"]) < 1e-9
     assert screener_call_100["dte"] == (expiry - latest_moment).days
 
-    # realized_volatility (ТЗ, FR24) — синтетическая дневная история с
-    # постоянным лог-доходом на шаг, чтобы годовая vol считалась предсказуемо
+    # realized_volatility (spec FR24) — synthetic daily history with a constant
+    # per-step log return so the annualized vol computes predictably
     rng = np.random.default_rng(42)
     daily_log_returns = rng.normal(loc=0.0, scale=0.02, size=40)
     closes = 100.0 * np.exp(np.cumsum(daily_log_returns))
@@ -218,26 +219,26 @@ def main():
     assert set(rv.keys()) == {10, 20, 30}, f"all three windows should fit in 40 days, got {rv.keys()}"
     for value in rv.values():
         assert 0 < value < 2, f"annualized RV out of sane range: {value}"
-    # окно больше доступной истории просто не попадает в результат, не падает
+    # a window larger than the available history simply doesn't appear in the result, no crash
     rv_short = metrics.realized_volatility(price_history.head(15), windows=(10, 20, 30))
     assert set(rv_short.keys()) == {10}, f"only the 10d window fits in 15 days, got {rv_short.keys()}"
 
-    # collector._oi_zero_fraction + лог сборов (ТЗ, FR23) — реальный инцидент
-    # 2026-07-17: источник данных вернул "успешный" ответ с рабочими volume/
-    # ценами, но open_interest почти сплошь нулевым. Доля нулей должна
-    # считаться верно и попадать в лог независимо от исхода.
+    # collector._oi_zero_fraction + collection log (spec FR23) — real incident
+    # 2026-07-17: the data source returned a "successful" response with working
+    # volume/prices but open_interest almost entirely zero. The zero fraction
+    # must compute correctly and reach the log regardless of the outcome.
     healthy_chain = pd.DataFrame({"open_interest": [10, 0, 50, 200, 0]})
     corrupted_chain = pd.DataFrame({"open_interest": [0, 0, 0, 0, 12]})
     assert collector._oi_zero_fraction(healthy_chain) == 0.4
     assert collector._oi_zero_fraction(corrupted_chain) == 0.8
     assert collector._oi_zero_fraction(pd.DataFrame({"open_interest": []})) == 1.0
 
-    # заведомо позже всех остальных log_run в этом прогоне — иначе при равном
-    # started_at порядок среди них для ORDER BY ... DESC не гарантирован
+    # deliberately later than every other log_run in this pass — otherwise with
+    # equal started_at their order under ORDER BY ... DESC is not guaranteed
     log_moment = latest_moment + timedelta(hours=1)
     db.log_run(
         conn, log_moment, log_moment + timedelta(seconds=1), "TEST", "failed",
-        error_message="80% контрактов с open_interest=0 (порог 50%) — не сохраняем",
+        error_message="80% of contracts have open_interest=0 (threshold 50%) — not saving",
         rows_fetched=5, oi_zero_fraction=0.8,
     )
     recent_runs = db.get_recent_runs(conn, limit=1)
