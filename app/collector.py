@@ -120,8 +120,11 @@ def collect_watchlist(conn, tickers: list[str]) -> dict[str, str]:
             if oi_zero_fraction > config.MAX_ZERO_OI_FRACTION:
                 raise ValueError(
                     f"{oi_zero_fraction:.0%} of contracts have open_interest=0 "
-                    f"(threshold {config.MAX_ZERO_OI_FRACTION:.0%}) — the data source "
-                    "likely returned a corrupted/incomplete snapshot, not saving"
+                    f"(threshold {config.MAX_ZERO_OI_FRACTION:.0%}) — either the data "
+                    "source returned a corrupted/incomplete snapshot, or the market is "
+                    "closed right now (Yahoo Finance commonly reports open_interest=0 "
+                    "across the whole chain outside regular trading hours); not saving. "
+                    "Try again while the market is open."
                 )
             db.insert_snapshot(conn, ticker, started_at, underlying_price, chain_df)
             db.log_run(

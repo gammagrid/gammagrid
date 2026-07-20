@@ -283,7 +283,14 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    if st.button("Collect data", type="primary", disabled=not watchlist):
+    if st.button(
+        "Collect data",
+        type="primary",
+        disabled=not watchlist,
+        help="Best run while the US options market is open. Outside market "
+        "hours, Yahoo Finance often reports open_interest=0 across the whole "
+        "chain, which fails the collection for that ticker.",
+    ):
         with st.spinner("Collecting data..."):
             results = collector.collect_watchlist(conn, watchlist)
         for ticker, status in results.items():
@@ -315,7 +322,10 @@ with st.sidebar:
             "`oi_zero_fraction` — the fraction of contracts with open_interest=0 in the "
             f"collected chain. Above {config.MAX_ZERO_OI_FRACTION:.0%} the snapshot is "
             "considered suspect and is not saved (status=failed, reason in `error_message`), "
-            "even if the request to the data source itself completed without a network error."
+            "even if the request to the data source itself completed without a network error. "
+            "The most common cause is collecting outside regular market hours — Yahoo Finance "
+            "often reports open_interest=0 across the whole chain while the market is closed. "
+            "If a ticker keeps failing, try again during market hours."
         )
 
     st.divider()
