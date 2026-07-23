@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-23
+
 ### Changed
 
 - Dashboard visuals aligned with the GammaGrid brand: grid background, mono display
@@ -34,5 +36,6 @@ Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.1.0...main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.1.1...main
+[0.1.1]: https://github.com/gammagrid/gammagrid/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/gammagrid/gammagrid/releases/tag/v0.1.0
