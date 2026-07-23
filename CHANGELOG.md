@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-24
+
+### Fixed
+
+- `StreamlitColorLengthError` on the Volatility (IV) tab's chain-slice chart: it
+  crashed whenever the latest snapshot for a given expiry had only calls or only
+  puts (a fixed 2-color list no longer matched the actual column count). Colors
+  are now built from the chart's real columns, and an empty slice shows an info
+  message instead of reaching the chart at all.
+
 ## [0.1.1] - 2026-07-23
 
 ### Changed
@@ -36,6 +46,7 @@ Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.1.1...main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.1.2...main
+[0.1.2]: https://github.com/gammagrid/gammagrid/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/gammagrid/gammagrid/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/gammagrid/gammagrid/releases/tag/v0.1.0

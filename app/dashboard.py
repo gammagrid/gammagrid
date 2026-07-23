@@ -724,7 +724,16 @@ with tab_iv:
     skew_pivot = skew_snapshot.pivot_table(
         index="strike", columns="option_type", values="implied_volatility"
     )
-    st.line_chart(skew_pivot, color=[BRAND_PURPLE, BRAND_GREEN])
+    if skew_pivot.empty:
+        st.info("No data for this expiry in the latest snapshot.")
+    else:
+        # A fixed 2-color list crashes (StreamlitColorLengthError, found live
+        # on real illiquid tickers) whenever the latest snapshot for this
+        # expiry only has calls or only puts — pivot_table then produces a
+        # single column, not two. Built to match skew_pivot's actual columns
+        # instead of assuming both are always present.
+        option_type_colors = {"call": BRAND_PURPLE, "put": BRAND_GREEN}
+        st.line_chart(skew_pivot, color=[option_type_colors[c] for c in skew_pivot.columns])
     with st.expander("ℹ️ How to read this"):
         st.write(
             "The curve's shape shows which strikes the market prices as riskier (higher "
