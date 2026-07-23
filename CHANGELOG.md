@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Dashboard visuals aligned with the GammaGrid brand: grid background, mono display
+  font on headings/tabs, purple/green chart palette, and a sign-colored GEX-by-strike
+  bar chart (Altair). The IV surface deliberately keeps Viridis — a perceptually-uniform
+  scale reads better on a continuous 3-D surface.
+
 ## [0.1.0] - 2026-07-20
 
 Initial public release — see the [Roadmap](ROADMAP.md) for what's next.

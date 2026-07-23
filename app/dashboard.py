@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -78,7 +79,7 @@ def render_option_detail(
         return
 
     st.subheader("Option price")
-    st.line_chart(greeks_history.set_index("collected_at")["last_price"])
+    st.line_chart(greeks_history.set_index("collected_at")["last_price"], color=BRAND_PURPLE)
     with st.expander("ℹ️ How to read this"):
         st.write(
             "Price history of this specific contract (last price at each collection). "
@@ -88,7 +89,7 @@ def render_option_detail(
         )
 
     st.subheader("Contract implied volatility")
-    st.line_chart(greeks_history.set_index("collected_at")["implied_volatility"])
+    st.line_chart(greeks_history.set_index("collected_at")["implied_volatility"], color=BRAND_GREEN)
 
     latest_iv = greeks_history.iloc[-1]["implied_volatility"]
     rv = _cached_realized_volatility(selected_ticker)
@@ -114,7 +115,10 @@ def render_option_detail(
     for i, greek in enumerate(greek_cols):
         target = left if i % 2 == 0 else right
         target.caption(greek.capitalize())
-        target.line_chart(greeks_history.set_index("collected_at")[greek])
+        target.line_chart(
+            greeks_history.set_index("collected_at")[greek],
+            color=BRAND_PURPLE if i % 2 == 0 else BRAND_GREEN,
+        )
 
     with st.expander("📊 Interpreting current values and their trend"):
         for note in metrics.interpret_greeks(greeks_history):
@@ -136,6 +140,15 @@ def format_compact(value: float) -> str:
 
 
 GEX_CMAP = LinearSegmentedColormap.from_list("gex_dark", ["#b833e0", "#0d0d0d", "#22c55e"])
+
+# Brand accent pair, reused across every chart below instead of Streamlit's
+# default blue palette — purple as the primary series, green as the
+# secondary/comparison one, so the color language stays consistent with the
+# heatmap and the gammagrid.io teaser. The IV surface deliberately stays on
+# Viridis rather than a brand gradient: a perceptually-uniform scale reads
+# far better on a continuous 3-D surface.
+BRAND_PURPLE = "#B833E0"
+BRAND_GREEN = "#22C55E"
 
 
 def style_gex_matrix(matrix: pd.DataFrame, atm_strike: float | None = None):
@@ -227,6 +240,35 @@ def render_tradingview_widget(ticker: str, height: int = 300) -> str:
 
 
 conn = db.get_connection()
+
+# The teaser's grid background and mono display type, applied globally so
+# the app shares the gammagrid.io visual language instead of reading as bare
+# default Streamlit. Deliberately NOT touching st.dataframe/st.data_editor
+# styling: dense tables need to stay plain and readable, not branded —
+# over-styling them would visually overload the page.
+st.markdown(
+    """
+    <style>
+      .stApp {
+        background-image:
+          linear-gradient(#1C2320 1px, transparent 1px),
+          linear-gradient(90deg, #1C2320 1px, transparent 1px);
+        background-size: 64px 64px;
+        background-position: center -1px;
+      }
+      [data-testid="stHeading"] h1,
+      [data-testid="stHeading"] h2,
+      [data-testid="stHeading"] h3 {
+        font-family: "SF Mono","JetBrains Mono","IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+      }
+      [data-testid="stTab"] p {
+        font-family: "SF Mono","JetBrains Mono","IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+        letter-spacing: .02em;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # Header wordmark: the same 2x2 diagonal chip mark as the favicon, at the
 # "large instance" size documented for the brand (34px cells, 4px gap) next
@@ -355,7 +397,7 @@ with tab_overview:
     st.caption(f"Latest collection: {latest_date}")
     st.subheader("Put/Call Ratio")
     pcr = metrics.put_call_ratio(df)
-    st.line_chart(pcr.set_index("collected_at")[["pcr_volume", "pcr_oi"]])
+    st.line_chart(pcr.set_index("collected_at")[["pcr_volume", "pcr_oi"]], color=[BRAND_PURPLE, BRAND_GREEN])
     with st.expander("ℹ️ How to read this"):
         st.write(
             "The ratio of put to call volume/open interest. A value noticeably above "
@@ -482,7 +524,25 @@ with tab_pain_gex:
             st.success(f"Net GEX: {net_gex:,.0f} — positive gamma: dealers dampen price moves")
         else:
             st.warning(f"Net GEX: {net_gex:,.0f} — negative gamma: dealers amplify price moves")
-        st.bar_chart(gex.set_index("strike")["gex"])
+        # Colored by sign (green/purple), matching the same diverging language
+        # as the GEX Heatmap — st.bar_chart can't condition color on a row's
+        # own value, so this one chart uses Altair directly instead of the
+        # thin st.bar_chart wrapper.
+        gex_chart_data = gex.assign(sign=np.where(gex["gex"] >= 0, "Positive", "Negative"))
+        st.altair_chart(
+            alt.Chart(gex_chart_data)
+            .mark_bar()
+            .encode(
+                x=alt.X("strike:O", title="Strike"),
+                y=alt.Y("gex:Q", title="GEX"),
+                color=alt.Color(
+                    "sign:N",
+                    scale=alt.Scale(domain=["Positive", "Negative"], range=[BRAND_GREEN, BRAND_PURPLE]),
+                    legend=None,
+                ),
+            ),
+            use_container_width=True,
+        )
     else:
         st.info("No data to compute GEX for the selected expiry.")
     st.caption(
@@ -647,7 +707,7 @@ with tab_heatmap:
 with tab_iv:
     st.subheader("IV: volume-weighted average for the ticker")
     iv_avg = metrics.iv_weighted_average(df)
-    st.line_chart(iv_avg.set_index("collected_at")["iv_weighted_avg"])
+    st.line_chart(iv_avg.set_index("collected_at")["iv_weighted_avg"], color=BRAND_PURPLE)
     with st.expander("ℹ️ How to read this"):
         st.write(
             "Rising average IV usually precedes an anticipated move (earnings, news) or "
@@ -664,7 +724,7 @@ with tab_iv:
     skew_pivot = skew_snapshot.pivot_table(
         index="strike", columns="option_type", values="implied_volatility"
     )
-    st.line_chart(skew_pivot)
+    st.line_chart(skew_pivot, color=[BRAND_PURPLE, BRAND_GREEN])
     with st.expander("ℹ️ How to read this"):
         st.write(
             "The curve's shape shows which strikes the market prices as riskier (higher "

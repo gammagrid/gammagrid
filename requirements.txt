@@ -3,5 +3,6 @@ pandas>=2.2
 numpy>=1.26
 scipy>=1.13
 streamlit>=1.35
+altair>=5.0
 matplotlib>=3.8
 plotly>=5.20
