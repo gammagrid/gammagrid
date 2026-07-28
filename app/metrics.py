@@ -97,6 +97,46 @@ def _black_scholes_greeks(
     return {"delta": delta, "gamma": gamma, "theta": theta, "vega": vega, "rho": rho, "vanna": vanna, "charm": charm}
 
 
+def _black_scholes_price(
+    spot: float, strike: float, years_to_expiry: float, iv: float, risk_free_rate: float, option_type: str
+) -> float:
+    """Black-Scholes theoretical price (q=0, same simplifying assumption as
+    _black_scholes_greeks) — used only as an internal-consistency check
+    against a contract's reported last_price (see IV_PRICE_CONSISTENCY_*
+    in config.py), never shown to the user directly."""
+    if years_to_expiry <= 0 or iv <= 0 or spot <= 0:
+        return 0.0
+    sqrt_t = np.sqrt(years_to_expiry)
+    d1 = (np.log(spot / strike) + (risk_free_rate + iv ** 2 / 2) * years_to_expiry) / (iv * sqrt_t)
+    d2 = d1 - iv * sqrt_t
+    discount = np.exp(-risk_free_rate * years_to_expiry)
+    if option_type == "call":
+        return spot * norm.cdf(d1) - strike * discount * norm.cdf(d2)
+    return strike * discount * norm.cdf(-d2) - spot * norm.cdf(-d1)
+
+
+def _reliable_iv(
+    iv: float, last_price: float, spot: float, strike: float,
+    years_to_expiry: float, risk_free_rate: float, option_type: str,
+) -> float:
+    """Returns iv unchanged if it reconciles with the reported last_price via
+    Black-Scholes, otherwise NaN. NaN (not 0 or the raw value) is deliberate:
+    it propagates through every downstream greek calculation the same way an
+    already-missing IV from the data source does (see config.py), so the
+    chart shows a gap at that point instead of a fabricated flat value or a
+    spike through nonsense math."""
+    if iv is None or not (iv > 0) or years_to_expiry <= 0:
+        return iv
+    theoretical_price = _black_scholes_price(spot, strike, years_to_expiry, iv, risk_free_rate, option_type)
+    tolerance = max(
+        config.IV_PRICE_CONSISTENCY_ABS_TOLERANCE,
+        config.IV_PRICE_CONSISTENCY_REL_TOLERANCE * last_price,
+    )
+    if abs(theoretical_price - last_price) > tolerance:
+        return np.nan
+    return iv
+
+
 def _black_scholes_greeks_batch(
     spot: pd.Series, strike: pd.Series, years_to_expiry: pd.Series, iv: pd.Series,
     risk_free_rate: float, option_type: pd.Series,
@@ -419,13 +459,20 @@ def contract_greeks_history(
     records = []
     for row in contract.itertuples():
         years_to_expiry = (expiry - row.collected_at).days / 365
-        greeks = _black_scholes_greeks(
-            row.underlying_price, strike, years_to_expiry, row.implied_volatility, risk_free_rate, option_type
+        # Data-quality guard (see config.IV_PRICE_CONSISTENCY_*): a reported
+        # IV that doesn't reproduce the reported last_price via Black-Scholes
+        # is untrustworthy for this one snapshot — every greek below is
+        # derived from `iv`, not the raw row value, so the whole row's worth
+        # of derived numbers gaps out together rather than one field lying.
+        iv = _reliable_iv(
+            row.implied_volatility, row.last_price, row.underlying_price,
+            strike, years_to_expiry, risk_free_rate, option_type,
         )
+        greeks = _black_scholes_greeks(row.underlying_price, strike, years_to_expiry, iv, risk_free_rate, option_type)
         records.append({
             "collected_at": row.collected_at,
             "last_price": row.last_price,
-            "implied_volatility": row.implied_volatility,
+            "implied_volatility": iv,
             **greeks,
         })
     return pd.DataFrame(records)
@@ -445,6 +492,13 @@ def interpret_greeks(history: pd.DataFrame) -> list[str]:
         if prior is None:
             return ""
         diff = latest[col] - prior[col]
+        # An untrustworthy IV (see contract_greeks_history's data-quality
+        # guard) makes this and/or the prior row's greeks NaN — diff is then
+        # NaN too, and NaN comparisons are always False, which would silently
+        # fall through to claiming "down" for what's actually just missing
+        # data. Say so plainly instead of guessing a direction.
+        if pd.isna(diff):
+            return " (not enough reliable data to compare with the previous snapshot)"
         if abs(diff) < 1e-6:
             return " (unchanged since the previous snapshot)"
         return f" ({'up' if diff > 0 else 'down'} since the previous snapshot)"

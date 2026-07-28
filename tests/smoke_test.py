@@ -12,30 +12,44 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ["OPTIONS_TRACKER_DB"] = "/tmp/options_tracker_smoke_test.db"
 
-from app import collector, db, metrics  # noqa: E402
+from app import collector, config, db, metrics  # noqa: E402
 
 EXPIRY = "2026-09-18"
 STRIKES = [90, 95, 100, 105, 110]
 
 
-def make_chain(iv_shift: float, strike_100_volume: int, strike_100_oi: int) -> pd.DataFrame:
+def make_chain(
+    iv_shift: float, strike_100_volume: int, strike_100_oi: int,
+    underlying_price: float, years_to_expiry: float,
+) -> pd.DataFrame:
     """strike_100_volume/oi varies per snapshot to exercise daily normalization;
-    the other strikes are kept stable to avoid confusion with a general rise in activity."""
+    the other strikes are kept stable to avoid confusion with a general rise in activity.
+    Strike 100's last_price is Black-Scholes-derived from its own IV rather than a flat
+    placeholder like the other strikes: it's the one contract cross-checked below between
+    contract_greeks_history and screener_table, and needs to reconcile with its IV the way
+    real good data would to survive metrics._reliable_iv's consistency guard."""
     rows = []
     for strike in STRIKES:
         for option_type, base_iv in [("call", 0.30), ("put", 0.35)]:
             volume = strike_100_volume if strike == 100 else (20 + strike % 3)
             oi = strike_100_oi if strike == 100 else 50
+            iv = base_iv + iv_shift
+            if strike == 100:
+                last_price = metrics._black_scholes_price(
+                    underlying_price, 100.0, years_to_expiry, iv, config.RISK_FREE_RATE, option_type
+                )
+            else:
+                last_price = 2.5
             rows.append({
                 "expiry": EXPIRY,
                 "strike": float(strike),
                 "option_type": option_type,
-                "last_price": 2.5,
-                "bid": 2.4,
-                "ask": 2.6,
+                "last_price": last_price,
+                "bid": last_price - 0.1,
+                "ask": last_price + 0.1,
                 "volume": volume,
                 "open_interest": oi,
-                "implied_volatility": base_iv + iv_shift,
+                "implied_volatility": iv,
                 "in_the_money": strike < 100 if option_type == "call" else strike > 100,
             })
     return pd.DataFrame(rows)
@@ -66,9 +80,14 @@ def main():
 
     for i, (offset_hours, volume, oi) in enumerate(daily_snapshots):
         moment = base_day + timedelta(hours=offset_hours)
+        underlying_price = 100.0 + i * 0.1
+        years_to_expiry = (pd.Timestamp(EXPIRY) - moment).days / 365
         db.insert_snapshot(
-            conn, "TEST", moment, underlying_price=100.0 + i * 0.1,
-            chain_df=make_chain(iv_shift=i * 0.01, strike_100_volume=volume, strike_100_oi=oi),
+            conn, "TEST", moment, underlying_price=underlying_price,
+            chain_df=make_chain(
+                iv_shift=i * 0.01, strike_100_volume=volume, strike_100_oi=oi,
+                underlying_price=underlying_price, years_to_expiry=years_to_expiry,
+            ),
         )
     latest_moment = base_day + timedelta(hours=daily_snapshots[-1][0])
     db.log_run(conn, latest_moment, latest_moment + timedelta(seconds=1), "TEST", "success")
@@ -122,6 +141,39 @@ def main():
         print(" -", note)
     print()
     assert len(notes) == 7
+
+    # IV/price consistency guard (found live on the SaaS sibling repo, real
+    # user report 2026-07-24): a reported IV that doesn't reconcile with the
+    # reported last_price via Black-Scholes must not silently produce
+    # garbage greeks — treated as unreliable for that one snapshot instead
+    # of feeding the math.
+    guard_expiry = pd.Timestamp("2026-12-18")
+    guard_years = (guard_expiry - pd.Timestamp("2026-07-01")).days / 365
+    guard_iv = 0.30
+    guard_price = metrics._black_scholes_price(
+        100.0, 100.0, guard_years, guard_iv, config.RISK_FREE_RATE, "call"
+    )
+    guard_df = pd.DataFrame([
+        {  # good day: last_price and implied_volatility reconcile
+            "collected_at": pd.Timestamp("2026-07-01"), "expiry": guard_expiry,
+            "strike": 100.0, "option_type": "call",
+            "underlying_price": 100.0, "last_price": guard_price, "implied_volatility": guard_iv,
+        },
+        {  # bad day: same last_price, but IV wildly inconsistent with it —
+           # the exact live pattern (flat option price, jagged IV/greeks)
+            "collected_at": pd.Timestamp("2026-07-02"), "expiry": guard_expiry,
+            "strike": 100.0, "option_type": "call",
+            "underlying_price": 100.0, "last_price": guard_price, "implied_volatility": 0.06,
+        },
+    ])
+    guard_history = metrics.contract_greeks_history(guard_df, 100.0, guard_expiry, "call")
+    assert guard_history.iloc[0]["implied_volatility"] == guard_iv, "consistent IV must pass through unchanged"
+    assert not pd.isna(guard_history.iloc[0]["delta"]), "consistent day's greeks must not be suppressed"
+    assert pd.isna(guard_history.iloc[1]["implied_volatility"]), "inconsistent IV must be suppressed to NaN"
+    assert pd.isna(guard_history.iloc[1]["delta"]), "greeks derived from a suppressed IV must also be NaN"
+    guard_notes = metrics.interpret_greeks(guard_history)
+    assert "not enough reliable data" in guard_notes[0], guard_notes[0]
+    print("IV/price consistency guard checks passed\n")
 
     delta = metrics.oi_delta(df)
     print("OI delta (day-over-day, collapsed):\n", delta, "\n")

@@ -18,6 +18,21 @@ UNUSUAL_MIN_HISTORY_POINTS = 5
 # is not critical here; greeks are weakly sensitive to small changes in r.
 RISK_FREE_RATE = 0.05
 
+# Data-quality guard for the Contract tab (found live: yfinance's reported
+# implied_volatility can be stale/wrong for one specific snapshot while
+# last_price stays normal — every greek derived from that IV then spikes
+# even though nothing about the contract actually changed, producing a
+# jagged chart on an otherwise flat price series). A snapshot's IV is
+# trusted only if plugging it back into Black-Scholes reproduces the
+# reported last_price within tolerance — provider-agnostic and magnitude-
+# agnostic on purpose: a genuine large real move keeps price and IV
+# mutually consistent, so this never fires on real volatility, only on
+# data that contradicts itself. Combines a relative and an absolute
+# tolerance (numpy.isclose-style) so it isn't too tight on cheap contracts
+# or too loose on expensive ones — both are starting hypotheses, not final.
+IV_PRICE_CONSISTENCY_REL_TOLERANCE = 0.5  # 50% of last_price
+IV_PRICE_CONSISTENCY_ABS_TOLERANCE = 0.10  # $0.10
+
 MAX_FETCH_RETRIES = 3
 BACKOFF_BASE_SECONDS = 2
 

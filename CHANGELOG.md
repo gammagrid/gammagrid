@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Data-quality guard on the Contract tab: a reported `implied_volatility` that doesn't
+  reconcile with the reported `last_price` via Black-Scholes (within tolerance) is
+  treated as unreliable for that one snapshot — the chart shows a gap instead of a
+  spike or dip. Deliberately provider- and magnitude-agnostic: a genuine large real
+  move keeps price and IV mutually consistent, so this never fires on real volatility.
+
 ## [0.1.2] - 2026-07-24
 
 ### Fixed
