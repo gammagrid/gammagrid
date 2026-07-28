@@ -22,16 +22,27 @@ RISK_FREE_RATE = 0.05
 # implied_volatility can be stale/wrong for one specific snapshot while
 # last_price stays normal — every greek derived from that IV then spikes
 # even though nothing about the contract actually changed, producing a
-# jagged chart on an otherwise flat price series). A snapshot's IV is
-# trusted only if plugging it back into Black-Scholes reproduces the
-# reported last_price within tolerance — provider-agnostic and magnitude-
-# agnostic on purpose: a genuine large real move keeps price and IV
-# mutually consistent, so this never fires on real volatility, only on
-# data that contradicts itself. Combines a relative and an absolute
-# tolerance (numpy.isclose-style) so it isn't too tight on cheap contracts
-# or too loose on expensive ones — both are starting hypotheses, not final.
-IV_PRICE_CONSISTENCY_REL_TOLERANCE = 0.5  # 50% of last_price
-IV_PRICE_CONSISTENCY_ABS_TOLERANCE = 0.10  # $0.10
+# jagged chart on an otherwise flat price series). A first version priced
+# the reported IV via Black-Scholes and compared it to last_price directly
+# — reverted (found live, real MO LEAPS data) because that needs a
+# dividend yield the app doesn't track: ignoring dividends (q=0) badly
+# overprices long-dated calls on high-yield names, flagging perfectly good
+# IV purely because the pricing model itself was wrong. It also assumed
+# last_price is a live, trustworthy reference — false for thinly-traded
+# strikes, where last_price is often just stale (no new trade) while IV
+# keeps updating from live quotes.
+#
+# This version instead compares a snapshot to the CONTRACT'S OWN history:
+# an IV is untrusted only if it's a strong outlier vs. the contract's own
+# median IV *and* last_price does not corroborate a real move of
+# comparable size. Provider- and magnitude-agnostic by construction —
+# option price is monotonic in IV for any dividend yield, so a genuine
+# large real move always shows a matching price move too; an IV move with
+# no price move at all is what the live incident actually looked like.
+# All three numbers are starting hypotheses, not final.
+IV_OUTLIER_MIN_HISTORY_POINTS = 3
+IV_OUTLIER_REL_THRESHOLD = 0.5  # 50% deviation from the contract's median IV
+IV_OUTLIER_PRICE_COROBORATION_THRESHOLD = 0.15  # 15% deviation from median last_price counts as "moved"
 
 MAX_FETCH_RETRIES = 3
 BACKOFF_BASE_SECONDS = 2

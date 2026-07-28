@@ -97,44 +97,51 @@ def _black_scholes_greeks(
     return {"delta": delta, "gamma": gamma, "theta": theta, "vega": vega, "rho": rho, "vanna": vanna, "charm": charm}
 
 
-def _black_scholes_price(
-    spot: float, strike: float, years_to_expiry: float, iv: float, risk_free_rate: float, option_type: str
-) -> float:
-    """Black-Scholes theoretical price (q=0, same simplifying assumption as
-    _black_scholes_greeks) — used only as an internal-consistency check
-    against a contract's reported last_price (see IV_PRICE_CONSISTENCY_*
-    in config.py), never shown to the user directly."""
-    if years_to_expiry <= 0 or iv <= 0 or spot <= 0:
-        return 0.0
-    sqrt_t = np.sqrt(years_to_expiry)
-    d1 = (np.log(spot / strike) + (risk_free_rate + iv ** 2 / 2) * years_to_expiry) / (iv * sqrt_t)
-    d2 = d1 - iv * sqrt_t
-    discount = np.exp(-risk_free_rate * years_to_expiry)
-    if option_type == "call":
-        return spot * norm.cdf(d1) - strike * discount * norm.cdf(d2)
-    return strike * discount * norm.cdf(-d2) - spot * norm.cdf(-d1)
+def _mark_unreliable_iv(contract: pd.DataFrame) -> pd.Series:
+    """For one contract's full snapshot history (implied_volatility,
+    last_price columns, any order), returns implied_volatility with
+    unreliable points replaced by NaN.
 
+    First cut of this guard compared each row's IV to an absolute
+    Black-Scholes price and flagged it against the reported last_price —
+    reverted (found live: real MO LEAPS data) because that needs a
+    dividend yield the app doesn't track. Ignoring dividends (q=0, the same
+    simplification _black_scholes_greeks already uses) is fine for greeks,
+    which are directional/relative, but badly overprices long-dated calls
+    on high-yield names in absolute terms — it flagged perfectly good IV
+    as "inconsistent" purely because the model itself was wrong, not the
+    data. The same real contract also exposed a second issue: for a thin,
+    rarely-traded strike, last_price is often just stale (no new trade),
+    while implied_volatility keeps updating from live quotes — so even a
+    "correct" pricing model has no reliable last_price to check against.
 
-def _reliable_iv(
-    iv: float, last_price: float, spot: float, strike: float,
-    years_to_expiry: float, risk_free_rate: float, option_type: str,
-) -> float:
-    """Returns iv unchanged if it reconciles with the reported last_price via
-    Black-Scholes, otherwise NaN. NaN (not 0 or the raw value) is deliberate:
-    it propagates through every downstream greek calculation the same way an
-    already-missing IV from the data source does (see config.py), so the
-    chart shows a gap at that point instead of a fabricated flat value or a
-    spike through nonsense math."""
-    if iv is None or not (iv > 0) or years_to_expiry <= 0:
+    This version sidesteps both problems by never pricing anything: a
+    snapshot's IV is untrusted only if it's a strong outlier versus the
+    CONTRACT'S OWN median IV *and* last_price does not corroborate a real
+    move of comparable size. Since option price is monotonic in IV (higher
+    vol -> higher price, all else equal, for any dividend yield), a genuine
+    large IV move always shows up as a real price move too; an IV move with
+    no matching price move at all is what the live incident actually looked
+    like — a single snapshot where last_price never budged."""
+    iv = contract["implied_volatility"]
+    price = contract["last_price"]
+    valid = iv.notna() & (iv > 0)
+    if valid.sum() < config.IV_OUTLIER_MIN_HISTORY_POINTS:
+        return iv  # not enough history yet to know what's "typical"
+
+    reference_iv = iv[valid].median()
+    reference_price = price[valid].median()
+    if not (reference_iv > 0) or not (reference_price > 0):
         return iv
-    theoretical_price = _black_scholes_price(spot, strike, years_to_expiry, iv, risk_free_rate, option_type)
-    tolerance = max(
-        config.IV_PRICE_CONSISTENCY_ABS_TOLERANCE,
-        config.IV_PRICE_CONSISTENCY_REL_TOLERANCE * last_price,
-    )
-    if abs(theoretical_price - last_price) > tolerance:
-        return np.nan
-    return iv
+
+    iv_deviation = (iv - reference_iv).abs() / reference_iv
+    price_deviation = (price - reference_price).abs() / reference_price
+
+    is_outlier = iv_deviation > config.IV_OUTLIER_REL_THRESHOLD
+    is_corroborated = price_deviation > config.IV_OUTLIER_PRICE_COROBORATION_THRESHOLD
+    unreliable = valid & is_outlier & ~is_corroborated
+
+    return iv.where(~unreliable, np.nan)
 
 
 def _black_scholes_greeks_batch(
@@ -456,18 +463,18 @@ def contract_greeks_history(
     if contract.empty:
         return pd.DataFrame(columns=["collected_at", "last_price", "implied_volatility", *_GREEK_KEYS])
 
+    # Data-quality guard (see _mark_unreliable_iv): an IV that's a strong
+    # outlier vs. this contract's own history, uncorroborated by any real
+    # move in last_price, is untrustworthy for that one snapshot — every
+    # greek below is derived from `iv`, not the raw row value, so the whole
+    # row's worth of derived numbers gaps out together rather than one field
+    # silently lying.
+    reliable_iv = _mark_unreliable_iv(contract)
+
     records = []
     for row in contract.itertuples():
         years_to_expiry = (expiry - row.collected_at).days / 365
-        # Data-quality guard (see config.IV_PRICE_CONSISTENCY_*): a reported
-        # IV that doesn't reproduce the reported last_price via Black-Scholes
-        # is untrustworthy for this one snapshot — every greek below is
-        # derived from `iv`, not the raw row value, so the whole row's worth
-        # of derived numbers gaps out together rather than one field lying.
-        iv = _reliable_iv(
-            row.implied_volatility, row.last_price, row.underlying_price,
-            strike, years_to_expiry, risk_free_rate, option_type,
-        )
+        iv = reliable_iv[row.Index]
         greeks = _black_scholes_greeks(row.underlying_price, strike, years_to_expiry, iv, risk_free_rate, option_type)
         records.append({
             "collected_at": row.collected_at,

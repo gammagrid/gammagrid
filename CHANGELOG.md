@@ -9,11 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Data-quality guard on the Contract tab: a reported `implied_volatility` that doesn't
-  reconcile with the reported `last_price` via Black-Scholes (within tolerance) is
-  treated as unreliable for that one snapshot — the chart shows a gap instead of a
-  spike or dip. Deliberately provider- and magnitude-agnostic: a genuine large real
-  move keeps price and IV mutually consistent, so this never fires on real volatility.
+- Data-quality guard on the Contract tab: `implied_volatility` that's a strong outlier
+  vs. a contract's own history and isn't corroborated by a matching move in
+  `last_price` is treated as unreliable for that one snapshot — the chart shows a gap
+  instead of a spike or dip. Deliberately provider- and magnitude-agnostic: a genuine
+  large real move always shows a matching price move too, so this never fires on real
+  volatility. (An earlier version compared to an absolute Black-Scholes price instead;
+  reverted the same day after it broke on real long-dated, high-dividend-yield names —
+  see commit history.)
 
 ## [0.1.2] - 2026-07-24
 
