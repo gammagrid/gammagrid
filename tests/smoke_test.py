@@ -178,6 +178,35 @@ def main():
     assert "not enough reliable data" in guard_notes[0], guard_notes[0]
     print("IV outlier guard checks passed\n")
 
+    # Fail-open on a near-even split (the exact real incident found live on
+    # THIS repo: a contract with only 4 locally-collected snapshots — an
+    # old stuck IV and the current one, split 2-2 — has a median sitting
+    # almost exactly between the two clusters, so BOTH looked like ~60%
+    # outliers from it and every point in the contract's history got
+    # suppressed, blanking out the whole chart instead of just the glitch.
+    # Once "unreliable" would cover too large a share of the history, the
+    # guard must back off entirely rather than trust a median that's
+    # clearly not representative of anything.
+    split_expiry = pd.Timestamp("2028-01-21")
+    split_rows = [
+        {"collected_at": pd.Timestamp("2026-07-23 12:03:12"), "expiry": split_expiry,
+         "strike": 105.0, "option_type": "call",
+         "underlying_price": 72.17, "last_price": 1.39, "implied_volatility": 0.0625},
+        {"collected_at": pd.Timestamp("2026-07-23 12:03:51"), "expiry": split_expiry,
+         "strike": 105.0, "option_type": "call",
+         "underlying_price": 72.17, "last_price": 1.39, "implied_volatility": 0.0625},
+        {"collected_at": pd.Timestamp("2026-07-28 21:39:51"), "expiry": split_expiry,
+         "strike": 105.0, "option_type": "call",
+         "underlying_price": 72.08, "last_price": 1.55, "implied_volatility": 0.2576},
+        {"collected_at": pd.Timestamp("2026-07-28 21:41:07"), "expiry": split_expiry,
+         "strike": 105.0, "option_type": "call",
+         "underlying_price": 72.08, "last_price": 1.55, "implied_volatility": 0.2576},
+    ]
+    split_history = metrics.contract_greeks_history(pd.DataFrame(split_rows), 105.0, split_expiry, "call")
+    assert not split_history["implied_volatility"].isna().any(), "a near-even split must fail open, not blank the whole contract"
+    assert not split_history["delta"].isna().any(), "greeks must survive the fail-open path too"
+    print("IV outlier guard fail-open checks passed\n")
+
     delta = metrics.oi_delta(df)
     print("OI delta (day-over-day, collapsed):\n", delta, "\n")
     assert not delta.empty

@@ -16,7 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   large real move always shows a matching price move too, so this never fires on real
   volatility. (An earlier version compared to an absolute Black-Scholes price instead;
   reverted the same day after it broke on real long-dated, high-dividend-yield names —
-  see commit history.)
+  see commit history.) Also fails open when suppression would cover more than 30% of a
+  contract's history: found live on this repo's own shorter local dataset, where a
+  near-even split between an old glitch value and the current one made the median
+  itself unreliable and blanked an entire contract's greeks instead of just the glitch.
 
 ## [0.1.2] - 2026-07-24
 

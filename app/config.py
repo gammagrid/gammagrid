@@ -39,10 +39,20 @@ RISK_FREE_RATE = 0.05
 # option price is monotonic in IV for any dividend yield, so a genuine
 # large real move always shows a matching price move too; an IV move with
 # no price move at all is what the live incident actually looked like.
-# All three numbers are starting hypotheses, not final.
+#
+# A median is only trustworthy while outliers are a small minority of the
+# sample — found live on THIS repo's own shorter local history (4
+# snapshots, an old stuck IV value and the current one split 2-2): the
+# median landed almost exactly between the two clusters, so BOTH looked
+# like outliers from it, and the whole contract's greeks went blank.
+# IV_OUTLIER_MAX_UNRELIABLE_FRACTION caps how much of a contract's history
+# this guard is allowed to suppress before it no longer trusts its own
+# reference and backs off entirely. All four numbers are starting
+# hypotheses, not final.
 IV_OUTLIER_MIN_HISTORY_POINTS = 3
 IV_OUTLIER_REL_THRESHOLD = 0.5  # 50% deviation from the contract's median IV
 IV_OUTLIER_PRICE_COROBORATION_THRESHOLD = 0.15  # 15% deviation from median last_price counts as "moved"
+IV_OUTLIER_MAX_UNRELIABLE_FRACTION = 0.3  # never suppress more than 30% of a contract's history
 
 MAX_FETCH_RETRIES = 3
 BACKOFF_BASE_SECONDS = 2

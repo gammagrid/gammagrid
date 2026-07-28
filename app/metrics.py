@@ -141,6 +141,17 @@ def _mark_unreliable_iv(contract: pd.DataFrame) -> pd.Series:
     is_corroborated = price_deviation > config.IV_OUTLIER_PRICE_COROBORATION_THRESHOLD
     unreliable = valid & is_outlier & ~is_corroborated
 
+    # A median is only a trustworthy "typical" value while outliers are a
+    # small minority of the sample — found live on a short real history (4
+    # snapshots, an old stuck IV and the current one split 2-2): the median
+    # landed almost exactly between the two clusters, so BOTH looked like
+    # outliers from it, and every point in the contract's history would
+    # have been suppressed. If suppression would hit too large a share of
+    # the valid history, the reference itself can't be trusted — fail open
+    # (trust the raw data) rather than blank out a whole contract.
+    if unreliable.sum() > config.IV_OUTLIER_MAX_UNRELIABLE_FRACTION * valid.sum():
+        return iv
+
     return iv.where(~unreliable, np.nan)
 
 
