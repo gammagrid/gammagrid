@@ -6,6 +6,11 @@ open source, built on free market data.
 
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-B833E0.svg)](LICENSE)
 [![Runs on Docker](https://img.shields.io/badge/runs%20on-Docker-22C55E.svg)](#quick-start-no-coding-required)
+[![Hosted version: join the waitlist](https://img.shields.io/badge/hosted%20version-join%20the%20waitlist-2A332E.svg)](https://gammagrid.io/)
+
+Prefer not to run it yourself? A hosted version is in the works —
+[leave an email on gammagrid.io](https://gammagrid.io/) and you'll hear when it
+opens. Self-hosting stays free and open source either way.
 
 > **No coding required.** If you can install an app and copy-paste one command
 > into a terminal, you can run GammaGrid. No Python, no config files, no
