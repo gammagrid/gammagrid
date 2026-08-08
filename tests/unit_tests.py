@@ -26,8 +26,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # developer's real database. Found the hard way — an earlier version of this
 # file set it inside the function that needed it and wrote its fixtures into
 # data/options.db. smoke_test.py sets it at the top for the same reason.
-_UNIT_DB = tempfile.mkdtemp(prefix="gammagrid-unit-")
-os.environ["OPTIONS_TRACKER_DB"] = os.path.join(_UNIT_DB, "unit.db")
+# setdefault for the same reason smoke_test.py uses it: when coverage_report.py
+# runs both in one process, only the first assignment can take effect.
+os.environ.setdefault(
+    "OPTIONS_TRACKER_DB",
+    os.path.join(tempfile.mkdtemp(prefix="gammagrid-unit-"), "unit.db"),
+)
 
 from app import db, metrics  # noqa: E402
 
@@ -166,10 +170,97 @@ def check_put_call_ratio_matches_sql():
     print("put/call ratio and history bound checks passed")
 
 
+def check_collector_isolation():
+    """One ticker failing must not stop the others (spec FR12), and a chain
+    that arrives corrupted must not reach the database (spec FR23).
+
+    `fetch_ticker_snapshot` is replaced rather than called: these are the two
+    rules the collector exists to enforce, and neither should need Yahoo to be
+    up — or to be reproduced by waiting for a bad day on the real feed."""
+    from app import collector
+
+    conn = db.get_connection()
+    expiry = (datetime.utcnow() + pd.Timedelta(days=30)).date().isoformat()
+
+    def chain(zero_oi: bool) -> pd.DataFrame:
+        return pd.DataFrame([
+            {"expiry": expiry, "strike": 100.0, "option_type": option_type,
+             "last_price": 1.0, "bid": 0.9, "ask": 1.1, "volume": 5,
+             "open_interest": 0 if zero_oi else 50,
+             "implied_volatility": 0.25, "in_the_money": False}
+            for option_type in ("call", "put")
+        ])
+
+    original = collector.fetch_ticker_snapshot
+    try:
+        def fake(ticker):
+            if ticker == "BOOM":
+                raise RuntimeError("provider exploded")
+            if ticker == "ZEROOI":
+                return 100.0, chain(zero_oi=True)
+            return 100.0, chain(zero_oi=False)
+
+        collector.fetch_ticker_snapshot = fake
+        results = collector.collect_watchlist(conn, ["GOOD", "BOOM", "ZEROOI"])
+    finally:
+        collector.fetch_ticker_snapshot = original
+
+    assert results["GOOD"] == "success", results
+    assert results["BOOM"].startswith("failed"), results
+    assert "exploded" in results["BOOM"], results["BOOM"]
+    # A chain where open interest came back empty is refused, not stored: it
+    # looks ordinary but silently breaks the GEX heatmap and OI delta.
+    assert results["ZEROOI"].startswith("failed"), results
+    assert "open_interest=0" in results["ZEROOI"], results["ZEROOI"]
+    assert len(db.get_snapshots(conn, "GOOD", days=None)) == 2
+    assert db.get_snapshots(conn, "ZEROOI", days=None).empty, "a refused snapshot must not be stored"
+    # Every attempt is logged, successful or not — the collection log is the
+    # only place a user can see that a ticker is silently failing.
+    logged = db.get_recent_runs(conn, limit=10)["ticker"].tolist()
+    assert {"GOOD", "BOOM", "ZEROOI"} <= set(logged), logged
+
+    # Naive UTC by convention: a tz-aware stamp here would raise on every
+    # comparison against an expiry date later on.
+    assert collector._now_utc().tzinfo is None
+    conn.close()
+    print("collector isolation checks passed")
+
+
+def check_watchlist_and_snapshot_dates():
+    """Removing a ticker takes it off the list without touching what was
+    already collected — the one rule this project will not break — and
+    get_snapshot_dates backs the Replay selector."""
+    conn = db.get_connection()
+    db.add_ticker(conn, "WATCH")
+    assert "WATCH" in db.get_watchlist(conn)
+
+    chain = pd.DataFrame([{
+        "expiry": "2026-09-18", "strike": 100.0, "option_type": "call",
+        "last_price": 1.0, "bid": 0.9, "ask": 1.1, "volume": 5,
+        "open_interest": 50, "implied_volatility": 0.25, "in_the_money": False,
+    }])
+    base = datetime(2026, 7, 1, 21, 0)
+    for step in range(2):
+        db.insert_snapshot(conn, "WATCH", base + pd.Timedelta(hours=step), 100.0, chain)
+
+    dates = db.get_snapshot_dates(conn, "WATCH")
+    assert len(dates) == 2 and dates == sorted(dates), dates
+
+    db.remove_ticker(conn, "WATCH")
+    assert "WATCH" not in db.get_watchlist(conn)
+    assert len(db.get_snapshots(conn, "WATCH", days=None)) == 2, (
+        "removing a ticker from the watchlist must never delete its collected history"
+    )
+    conn.close()
+    print("watchlist and snapshot-date checks passed")
+
+
 def main():
     check_years_to_expiry()
     check_greeks_respond_to_time()
     check_put_call_ratio_matches_sql()
+    check_collector_isolation()
+    check_watchlist_and_snapshot_dates()
     print("\nALL UNIT CHECKS PASSED")
 
 

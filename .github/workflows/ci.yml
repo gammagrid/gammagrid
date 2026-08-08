@@ -23,12 +23,15 @@ jobs:
       - name: Lint
         run: ruff check .
 
-      - name: Unit tests
-        run: python tests/unit_tests.py
+      # Runs the unit and smoke scripts and fails if either breaks OR if any
+      # non-exempt function in db.py/metrics.py/collector.py has no check
+      # calling it at all.
+      - name: Tests and coverage
+        run: python tests/coverage_report.py
 
-      - name: Smoke test
-        run: python tests/smoke_test.py
-
+      # Separate on purpose: rendering the page calls a lot of db.py on the way
+      # past, and letting that count toward coverage would make the number mean
+      # "something touched this" rather than "a check verified this".
       - name: Render every view
         run: python tests/render_views.py
 

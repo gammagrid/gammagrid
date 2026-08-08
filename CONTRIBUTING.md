@@ -24,10 +24,12 @@ See the [README](README.md#for-developers-running-from-source) for why
 pip install ruff
 ruff check .
 
-# Unit tests (pure functions in metrics.py — no database, no network)
-python tests/unit_tests.py
+# Unit checks (is the number right) and smoke checks (does the SQLite
+# plumbing work), plus functional coverage — this is what CI runs
+python tests/coverage_report.py
 
-# Smoke test (db.py + metrics.py on synthetic data — no network calls)
+# Either script on its own, when you want just that one
+python tests/unit_tests.py
 python tests/smoke_test.py
 
 # Render every dashboard view on a throwaway database (also offline)
@@ -41,6 +43,11 @@ All of them run in CI on every pull request; please run them locally first.
 
 ## Code style
 
+- **A new function in `db.py`, `metrics.py` or `collector.py` arrives with a
+  check.** `tests/coverage_report.py` fails if any non-exempt function has none
+  calling it — write it in `unit_tests.py` if it needs no database, in
+  `smoke_test.py` if it does. Something that genuinely cannot be checked
+  offline goes in that file's `EXEMPT` list, by name and with the reason.
 - Match the existing style: pure functions in `metrics.py` (input a DataFrame,
   output a DataFrame/number, no side effects), all DB access funneled through
   `db.py`, all network calls funneled through `collector.py`. `dashboard.py`

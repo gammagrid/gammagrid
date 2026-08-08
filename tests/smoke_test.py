@@ -10,7 +10,11 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-os.environ["OPTIONS_TRACKER_DB"] = "/tmp/options_tracker_smoke_test.db"
+# setdefault, not assignment: config.DB_PATH is read at import time, so when
+# coverage_report.py runs several scripts in one process only the first
+# assignment can take effect. Whoever gets there first picks the throwaway
+# path; nobody silently ends up on the real database.
+os.environ.setdefault("OPTIONS_TRACKER_DB", "/tmp/options_tracker_smoke_test.db")
 
 from app import collector, db, metrics  # noqa: E402
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Two more check scripts, and CI runs both. `tests/unit_tests.py` covers the
+  pure functions — is the number right — without needing a database;
+  `tests/render_views.py` draws every dashboard view on a throwaway database and
+  also reads the source to catch a name defined in one view and used in another,
+  which is a failure only that view would show. `tests/coverage_report.py` runs
+  the unit and smoke scripts together and fails if any function in `db.py`,
+  `metrics.py` or `collector.py` has no check calling it at all — network calls
+  are exempt by name, with the reason written next to them. All of it is offline:
+  nothing in CI depends on Yahoo being reachable.
+
 ### Changed
 
 - The eight sections are now a view selector rather than tabs, and only the one
