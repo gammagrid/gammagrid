@@ -23,6 +23,9 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      - name: Unit tests
+        run: python tests/unit_tests.py
+
       - name: Smoke test
         run: python tests/smoke_test.py
 

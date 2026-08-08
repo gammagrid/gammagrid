@@ -4,12 +4,68 @@ network access — which is why they are testable without a database or network.
 
 from __future__ import annotations
 
+import datetime as dt
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
 from scipy.stats import norm
 
 from app import config
+
+# US options trade until 16:00 New York time on their expiration date, but
+# `expiry` is stored as a DATE — i.e. midnight. Anything that measures the
+# remaining life of a contract has to bridge that gap explicitly.
+EXPIRY_CLOSE_ET = dt.time(16, 0)
+EXPIRY_TZ = ZoneInfo("America/New_York")
+_YEAR_SECONDS = 365 * 24 * 3600
+
+
+def _expiry_moment(expiry) -> pd.Timestamp:
+    """The instant a contract actually stops trading, as naive UTC.
+
+    `ZoneInfo` rather than a fixed -4/-5 offset: the same expiry date is
+    20:00 UTC in August and 21:00 UTC in December, and a hardcoded shift is a
+    bug that only appears after the clocks change."""
+    date = pd.Timestamp(expiry).date()
+    local = dt.datetime.combine(date, EXPIRY_CLOSE_ET, tzinfo=EXPIRY_TZ)
+    return pd.Timestamp(local.astimezone(dt.timezone.utc)).tz_localize(None)
+
+
+def _as_naive_utc(moment) -> pd.Timestamp:
+    """Collected timestamps are naive UTC, but callers reach for whatever is
+    handy — `pd.Timestamp.utcnow()` is tz-aware and subtracting it raises.
+    Normalized here rather than at each call site, where the mistake stays
+    invisible until it throws."""
+    stamp = pd.Timestamp(moment)
+    return stamp.tz_convert("UTC").tz_localize(None) if stamp.tzinfo is not None else stamp
+
+
+def years_to_expiry(expiry, as_of) -> float:
+    """Time to expiry in years, measured to the 16:00 ET close.
+
+    Replaces `(expiry - as_of).days / 365`, which was wrong twice over: it
+    measured to MIDNIGHT of the expiration date, so a contract still trading
+    through the session already counted as expired and every greek collapsed
+    to zero for the whole day; and truncating to whole days understated the
+    remaining life by up to 24 hours.
+
+    Both errors are negligible on LEAPS and dominant on near-dated contracts,
+    where gamma is largest — which is exactly what the GEX tab is for.
+    Measured on a real snapshot two days before expiry: 2.00 days by the old
+    formula against 2.92 actual, and since gamma scales with 1/sqrt(T) that
+    overstated net GEX by roughly 15%.
+
+    Negative once trading has stopped, which callers rely on to tell a
+    finished contract from a live one."""
+    return (_expiry_moment(expiry) - _as_naive_utc(as_of)).total_seconds() / _YEAR_SECONDS
+
+
+def years_to_expiry_series(expiry: pd.Series, as_of) -> pd.Series:
+    """Vectorized counterpart — the screener prices a whole chain at once."""
+    moments = pd.to_datetime(pd.Series(expiry).map(_expiry_moment))
+    return (moments - _as_naive_utc(as_of)).dt.total_seconds() / _YEAR_SECONDS
 
 
 def _last_snapshot_per_day(df: pd.DataFrame) -> pd.DataFrame:
@@ -213,10 +269,13 @@ def screener_table(df: pd.DataFrame, risk_free_rate: float = config.RISK_FREE_RA
         return pd.DataFrame()
 
     snapshot["dte"] = (snapshot["expiry"] - snapshot_date).dt.days
-    years_to_expiry = snapshot["dte"] / 365
+    # Not dte/365: `dte` is whole days to midnight, and the screener's greeks
+    # need the real remaining life (see years_to_expiry). `dte` stays as the
+    # column users read and filter on, where whole days are what they expect.
+    years = years_to_expiry_series(snapshot["expiry"], snapshot_date)
 
     greeks = _black_scholes_greeks_batch(
-        snapshot["underlying_price"], snapshot["strike"], years_to_expiry,
+        snapshot["underlying_price"], snapshot["strike"], years,
         snapshot["implied_volatility"], risk_free_rate, snapshot["option_type"],
     )
     table = pd.concat([snapshot.reset_index(drop=True), greeks.reset_index(drop=True)], axis=1)
@@ -245,11 +304,11 @@ def gamma_exposure_profile(
         return pd.DataFrame(columns=["strike", "gex"])
 
     spot = snapshot["underlying_price"].iloc[0]
-    years_to_expiry = (expiry - snapshot_date).days / 365
+    years = years_to_expiry(expiry, snapshot_date)
 
     snapshot["gamma"] = snapshot.apply(
         lambda row: _black_scholes_greeks(
-            spot, row["strike"], years_to_expiry, row["implied_volatility"], risk_free_rate, row["option_type"]
+            spot, row["strike"], years, row["implied_volatility"], risk_free_rate, row["option_type"]
         )["gamma"],
         axis=1,
     )
@@ -484,9 +543,9 @@ def contract_greeks_history(
 
     records = []
     for row in contract.itertuples():
-        years_to_expiry = (expiry - row.collected_at).days / 365
+        years = years_to_expiry(expiry, row.collected_at)
         iv = reliable_iv[row.Index]
-        greeks = _black_scholes_greeks(row.underlying_price, strike, years_to_expiry, iv, risk_free_rate, option_type)
+        greeks = _black_scholes_greeks(row.underlying_price, strike, years, iv, risk_free_rate, option_type)
         records.append({
             "collected_at": row.collected_at,
             "last_price": row.last_price,
@@ -586,7 +645,7 @@ def iv_surface(df: pd.DataFrame) -> pd.DataFrame:
         snapshot["strike"] < spot, snapshot["option_type"] == "put", snapshot["option_type"] == "call"
     )
     otm = snapshot[is_otm & snapshot["implied_volatility"].notna() & (snapshot["implied_volatility"] > 0)].copy()
-    otm["years_to_expiry"] = (otm["expiry"] - latest_date).dt.days / 365
+    otm["years_to_expiry"] = years_to_expiry_series(otm["expiry"], latest_date)
     return otm[["strike", "expiry", "years_to_expiry", "implied_volatility"]].sort_values(["expiry", "strike"])
 
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Time to expiry is now measured to the 16:00 ET close instead of to midnight of
+  the expiration date, and keeps its fractional part. Two errors compounded in the
+  old `(expiry - collected_at).days / 365`: a contract still trading through its
+  final session already counted as expired, so every greek collapsed to zero from
+  midnight onward; and truncating to whole days understated the remaining life by
+  up to 24 hours. Both are negligible on long-dated contracts and dominant on the
+  near-dated ones where gamma is largest — measured on a real snapshot two days
+  before expiry, 2.00 days by the old formula against 2.93 actual, which overstated
+  net GEX by roughly 15% (6% at four days). Affects the screener's greeks, the GEX
+  profile and heatmap, the Contract tab's greek history, and the IV surface's
+  maturity axis. Daylight saving is handled properly: the same expiry date closes at
+  20:00 UTC in summer and 21:00 UTC in winter.
+
 ## [0.1.3] - 2026-07-29
 
 ### Added

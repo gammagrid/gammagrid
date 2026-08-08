@@ -24,14 +24,17 @@ See the [README](README.md#for-developers-running-from-source) for why
 pip install ruff
 ruff check .
 
-# Smoke test (offline, synthetic data — no network calls)
+# Unit tests (pure functions in metrics.py — no database, no network)
+python tests/unit_tests.py
+
+# Smoke test (db.py + metrics.py on synthetic data — no network calls)
 python tests/smoke_test.py
 
 # Docker build
 docker build -t gammagrid .
 ```
 
-All three run in CI on every pull request; please run them locally first.
+All of them run in CI on every pull request; please run them locally first.
 
 ## Code style
 
@@ -54,7 +57,8 @@ Use the GitHub issue templates. For security issues, see
 
 - Keep PRs focused — one change per PR is easier to review than a bundle.
 - Update `CHANGELOG.md` under `[Unreleased]` for any user-facing change.
-- Make sure `ruff check .` and `python tests/smoke_test.py` pass before opening the PR.
+- Make sure `ruff check .`, `python tests/unit_tests.py` and `python tests/smoke_test.py`
+  pass before opening the PR.
 
 ## Questions
 
