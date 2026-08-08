@@ -400,11 +400,44 @@ expiries = sorted(df["expiry"].unique())
 
 components.html(render_tradingview_widget(selected_ticker, height=450), height=450)
 
-tab_overview, tab_pain_gex, tab_heatmap, tab_iv, tab_option, tab_screener, tab_unusual, tab_oi = st.tabs(
-    ["Overview", "Max Pain / GEX", "GEX Heatmap", "Volatility (IV)", "Contract", "Screener", "Unusual Activity", "OI Delta"]
-)
+# Deliberately not st.tabs. Streamlit has no lazy tabs: the body of every
+# `with tab_x:` runs on every rerun and the browser merely hides the seven you
+# are not looking at, so each interaction pays for eight views to show one.
+# Measured on a realistically-shaped chain (3,520 contracts per snapshot), one
+# render is 1.3-1.7s — and tripling the stored rows barely moved that, which
+# says the cost is the tabs, not the data, and will not improve on its own.
+#
+# The trade this makes, stated plainly: switching views used to be instant
+# (everything was already in the browser) and now costs one script run. That
+# run renders a single view, so it is a fraction of what every interaction used
+# to cost.
+# Pinned contracts are needed by two views — the Contract tab and the contract
+# card the Screener opens on a row click. This used to be fetched inside the
+# Contract tab's body and read from the Screener's, which worked only because
+# st.tabs executed every tab on every run. With one view rendering at a time
+# that is a NameError on the Screener, reachable only after clicking a row —
+# the sibling project shipped exactly that and a user found it in the browser.
+_tracked_cache: dict[str, pd.DataFrame] = {}
 
-with tab_overview:
+
+def get_tracked() -> pd.DataFrame:
+    if "df" not in _tracked_cache:
+        _tracked_cache["df"] = db.get_tracked_contracts(conn, selected_ticker)
+    return _tracked_cache["df"]
+
+
+VIEWS = [
+    "Overview", "Max Pain / GEX", "GEX Heatmap", "Volatility (IV)",
+    "Contract", "Screener", "Unusual Activity", "OI Delta",
+]
+active_view = st.segmented_control(
+    "View", VIEWS, default=VIEWS[0], key="active_view", label_visibility="collapsed"
+)
+# A segmented control returns None when the current pill is deselected; an
+# empty page is never what that gesture means here.
+active_view = active_view or VIEWS[0]
+
+if active_view == "Overview":
     st.caption(f"Latest collection: {latest_date}")
     st.subheader("Put/Call Ratio")
     # Aggregated in SQL rather than by grouping every raw row here: same
@@ -513,7 +546,7 @@ with tab_overview:
                 "bumps."
             )
 
-with tab_pain_gex:
+if active_view == "Max Pain / GEX":
     # Most tickers list an expiry for today, and it sorts first — so the
     # default landed on the one expiry whose gamma is zero by definition, and
     # the GEX chart came up empty under a "Net GEX: 0" banner while Max Pain
@@ -601,7 +634,7 @@ with tab_pain_gex:
             "hedging flows, especially closer to the expiry date."
         )
 
-with tab_heatmap:
+if active_view == "GEX Heatmap":
     st.subheader("GEX Heatmap: strike × expiry")
 
     snapshot_dates = sorted(df["collected_at"].unique(), reverse=True)
@@ -775,7 +808,7 @@ with tab_heatmap:
                 "data” button)."
             )
 
-with tab_iv:
+if active_view == "Volatility (IV)":
     st.subheader("IV: volume-weighted average for the ticker")
     iv_avg = metrics.iv_weighted_average(df)
     st.line_chart(iv_avg.set_index("collected_at")["iv_weighted_avg"], color=BRAND_PURPLE)
@@ -815,13 +848,12 @@ with tab_iv:
 
     st.caption("IV history and the rest of the greeks for a specific contract — on the Contract tab.")
 
-with tab_option:
+if active_view == "Contract":
     st.subheader("Contract: price and greeks over time")
 
-    tracked = db.get_tracked_contracts(conn, selected_ticker)
-    if not tracked.empty:
+    if not get_tracked().empty:
         st.caption("Pinned contracts (click a name to show it below):")
-        for _, trow in tracked.iterrows():
+        for _, trow in get_tracked().iterrows():
             col_a, col_b = st.columns([5, 1])
             label = f"{format_date(trow['expiry'])}  strike {trow['strike']:g}  {trow['option_type']}"
             if col_a.button(label, key=f"select_tracked_{trow['id']}", use_container_width=True):
@@ -847,9 +879,9 @@ with tab_option:
     opt_strike = col2.selectbox("Strike", opt_strikes, key=f"opt_strike_{selected_ticker}")
     opt_type = col3.selectbox("Type", ["call", "put"], key=f"opt_type_{selected_ticker}")
 
-    render_option_detail(conn, df, selected_ticker, tracked, opt_expiry, opt_strike, opt_type, key_prefix="opt")
+    render_option_detail(conn, df, selected_ticker, get_tracked(), opt_expiry, opt_strike, opt_type, key_prefix="opt")
 
-with tab_screener:
+if active_view == "Screener":
     st.subheader(f"Options screener: {selected_ticker}")
     st.caption(
         "A slice of the latest snapshot (not history) — every contract of the ticker with "
@@ -978,7 +1010,7 @@ with tab_screener:
                     f"strike {picked['strike']:g} {picked['option_type']}"
                 )
                 render_option_detail(
-                    conn, df, selected_ticker, tracked,
+                    conn, df, selected_ticker, get_tracked(),
                     picked["expiry"], picked["strike"], picked["option_type"],
                     key_prefix="screener",
                 )
@@ -995,7 +1027,7 @@ with tab_screener:
                         height=0,
                     )
 
-with tab_unusual:
+if active_view == "Unusual Activity":
     st.subheader("Unusual Activity (latest snapshot)")
     flagged = metrics.unusual_activity(df)
     st.caption(f"Contracts found: {len(flagged)}")
@@ -1016,7 +1048,7 @@ with tab_unusual:
             "together when computing the statistics."
         )
 
-with tab_oi:
+if active_view == "OI Delta":
     st.subheader("Open Interest change (latest day vs. previous)")
     delta = metrics.oi_delta(df)
     if delta.empty:

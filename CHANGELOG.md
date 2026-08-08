@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The eight sections are now a view selector rather than tabs, and only the one
+  you are looking at is computed. Streamlit has no lazy tabs: the body of every
+  tab ran on every interaction and the browser simply hid the other seven, so
+  each click paid for eight views to show one. Measured on a realistically-shaped
+  chain (3,520 contracts per collection, 211,200 stored rows), a page render went
+  from 1.68s to 0.63s — and tripling the stored rows had barely moved the old
+  number, which is what says the cost was the tabs rather than the data. The
+  trade, stated plainly: switching between sections used to be instant because
+  everything was already in the browser, and now costs one render of that one
+  section.
 - A page load now reads the last 365 days of a ticker's history instead of all of
   it, with a "Load full history" toggle that fetches everything on request. The
   bound is a default, never a cap: collected data is the most valuable thing in the

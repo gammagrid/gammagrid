@@ -30,6 +30,9 @@ python tests/unit_tests.py
 # Smoke test (db.py + metrics.py on synthetic data — no network calls)
 python tests/smoke_test.py
 
+# Render every dashboard view on a throwaway database (also offline)
+python tests/render_views.py
+
 # Docker build
 docker build -t gammagrid .
 ```
@@ -57,8 +60,10 @@ Use the GitHub issue templates. For security issues, see
 
 - Keep PRs focused — one change per PR is easier to review than a bundle.
 - Update `CHANGELOG.md` under `[Unreleased]` for any user-facing change.
-- Make sure `ruff check .`, `python tests/unit_tests.py` and `python tests/smoke_test.py`
-  pass before opening the PR.
+- Make sure `ruff check .` and all three test scripts pass before opening the PR.
+- Touching `dashboard.py`? `tests/render_views.py` is the one that matters: only
+  the view you are looking at renders, so a name defined in one view and read in
+  another is a `NameError` on exactly the view nobody opened.
 
 ## Questions
 

@@ -29,5 +29,8 @@ jobs:
       - name: Smoke test
         run: python tests/smoke_test.py
 
+      - name: Render every view
+        run: python tests/render_views.py
+
       - name: Docker build
         run: docker build -t gammagrid .
