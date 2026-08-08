@@ -500,9 +500,28 @@ with tab_overview:
             )
 
 with tab_pain_gex:
+    # Most tickers list an expiry for today, and it sorts first — so the
+    # default landed on the one expiry whose gamma is zero by definition, and
+    # the GEX chart came up empty under a "Net GEX: 0" banner while Max Pain
+    # right above it showed a number (it needs only open interest). Default to
+    # the first expiry that still has time left instead; the others stay in the
+    # list, labelled, because looking at them is legitimate.
+    has_time_left = [e for e in expiries if metrics.years_to_expiry(e, latest_date) > 0]
+    default_expiry_index = expiries.index(has_time_left[0]) if has_time_left else 0
+
+    def format_gex_expiry(expiry) -> str:
+        if metrics.years_to_expiry(expiry, latest_date) > 0:
+            return format_date(expiry)
+        return f"{format_date(expiry)}  ⚠️ no gamma left"
+
     selected_expiry = st.selectbox(
-        "Expiry", expiries, format_func=format_date, key="expiry_pain_gex"
+        "Expiry", expiries, index=default_expiry_index, format_func=format_gex_expiry,
+        # Keyed by ticker: a widget value outlives a rerun, so without this the
+        # expiry picked for the previous ticker carries over, and if the new
+        # ticker doesn't trade that date every chart below filters to nothing.
+        key=f"expiry_pain_gex_{selected_ticker}",
     )
+    years_left = metrics.years_to_expiry(selected_expiry, latest_date)
 
     st.subheader("Max Pain")
     mp = metrics.max_pain(df, selected_expiry)
@@ -518,7 +537,17 @@ with tab_pain_gex:
 
     st.subheader("Approximate Gamma Exposure (GEX)")
     gex = metrics.gamma_exposure_profile(df, selected_expiry)
-    if not gex.empty:
+    if years_left <= 0:
+        # Say why, instead of drawing a flat line at zero. Gamma is undefined
+        # once there is no time left, so this is a property of the contract,
+        # not a gap in the data — which is also why Max Pain above still shows
+        # a number: it is computed from open interest alone.
+        st.info(
+            f"⚠️ This expiry ({format_date(selected_expiry)}) has no time left as of the "
+            f"latest collection ({format_datetime(latest_date)}), so gamma — and therefore "
+            "GEX — is zero by definition, not missing. Pick a later expiry to see a profile."
+        )
+    elif not gex.empty:
         net_gex = metrics.net_gamma_exposure(gex)
         if net_gex >= 0:
             st.success(f"Net GEX: {net_gex:,.0f} — positive gamma: dealers dampen price moves")
@@ -571,23 +600,51 @@ with tab_heatmap:
     is_latest = as_of == snapshot_dates[0]
     st.caption("Latest snapshot (current state)" if is_latest else "Historical snapshot — Replay mode")
 
-    all_expiries_at_snapshot = sorted(df[df["collected_at"] == as_of]["expiry"].unique())
+    # Expiries with no time left are dropped rather than shown as a column of
+    # exact zeros: gamma is undefined there, and unlike the GEX tab a heatmap
+    # has nowhere to explain why one column is blank. Deliberately NOT st.stop()
+    # when none are left — this runs inside `with tab_heatmap:`, and st.stop()
+    # ends the entire script run, taking every tab below it with it.
+    all_expiries_at_snapshot = [
+        e for e in sorted(df[df["collected_at"] == as_of]["expiry"].unique())
+        if metrics.years_to_expiry(e, as_of) > 0
+    ]
     spot_at_snapshot = df.loc[df["collected_at"] == as_of, "underlying_price"].iloc[0]
 
-    col_n, col_band = st.columns(2)
-    n_expiries = col_n.slider(
-        "Nearest expiries",
-        1,
-        len(all_expiries_at_snapshot),
-        min(10, len(all_expiries_at_snapshot)),
-        key="heatmap_n_expiries",
-    )
-    strike_band_pct = col_band.slider(
-        "Strike range around underlying price, %", 5, 50, 15, key="heatmap_strike_band"
-    )
-    shown_expiries = all_expiries_at_snapshot[:n_expiries]
+    if not all_expiries_at_snapshot:
+        st.info(
+            "Every expiry in this snapshot has already stopped trading, so the whole "
+            "matrix would be zero by definition. Pick a more recent snapshot above."
+        )
+        matrix_full = pd.DataFrame()
+        shown_expiries = []
+        strike_band_pct = 15
+    else:
+        col_n, col_band = st.columns(2)
+        # A slider needs min < max: with exactly one expiry to show, st.slider
+        # raises instead of rendering a fixed handle. Found by rendering the
+        # page for a ticker that trades a single expiry — thin tickers really
+        # do look like this, and it took out the whole tab.
+        if len(all_expiries_at_snapshot) > 1:
+            n_expiries = col_n.slider(
+                "Nearest expiries",
+                1,
+                len(all_expiries_at_snapshot),
+                min(10, len(all_expiries_at_snapshot)),
+                # Keyed by ticker: the upper bound is the number of expiries,
+                # which differs per ticker, so a carried-over value can fall
+                # outside the range and raise rather than merely render oddly.
+                key=f"heatmap_n_expiries_{selected_ticker}",
+            )
+        else:
+            n_expiries = 1
+            col_n.caption("Nearest expiries: 1 (the only one still trading)")
+        strike_band_pct = col_band.slider(
+            "Strike range around underlying price, %", 5, 50, 15, key="heatmap_strike_band"
+        )
+        shown_expiries = all_expiries_at_snapshot[:n_expiries]
+        matrix_full = metrics.gex_matrix(df, as_of=as_of, expiries=shown_expiries)
 
-    matrix_full = metrics.gex_matrix(df, as_of=as_of, expiries=shown_expiries)
     if matrix_full.empty:
         st.info("No data to build the heatmap for the selected snapshot.")
     else:
@@ -718,7 +775,7 @@ with tab_iv:
 
     st.subheader("IV: chain slice (latest snapshot)")
     selected_expiry_iv = st.selectbox(
-        "Expiry", expiries, format_func=format_date, key="expiry_iv_skew"
+        "Expiry", expiries, format_func=format_date, key=f"expiry_iv_skew_{selected_ticker}"
     )
     skew_snapshot = df[(df["collected_at"] == latest_date) & (df["expiry"] == selected_expiry_iv)]
     skew_pivot = skew_snapshot.pivot_table(
@@ -766,10 +823,15 @@ with tab_option:
         st.divider()
 
     col1, col2, col3 = st.columns(3)
-    opt_expiry = col1.selectbox("Expiry", expiries, format_func=format_date, key="opt_expiry")
+    # All three keyed by ticker for the same reason as the GEX expiry above —
+    # and the strike list especially: strikes differ between tickers, so a
+    # carried-over value can be one this ticker does not trade at all.
+    opt_expiry = col1.selectbox(
+        "Expiry", expiries, format_func=format_date, key=f"opt_expiry_{selected_ticker}"
+    )
     opt_strikes = sorted(df[df["expiry"] == opt_expiry]["strike"].unique())
-    opt_strike = col2.selectbox("Strike", opt_strikes, key="opt_strike")
-    opt_type = col3.selectbox("Type", ["call", "put"], key="opt_type")
+    opt_strike = col2.selectbox("Strike", opt_strikes, key=f"opt_strike_{selected_ticker}")
+    opt_type = col3.selectbox("Type", ["call", "put"], key=f"opt_type_{selected_ticker}")
 
     render_option_detail(conn, df, selected_ticker, tracked, opt_expiry, opt_strike, opt_type, key_prefix="opt")
 

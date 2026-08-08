@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Switching tickers no longer leaves charts blank. Expiry, strike and option-type
+  selectors kept their value across a ticker change, so a date the previous ticker
+  traded carried over to one that doesn't — Max Pain, the GEX profile and the IV
+  chain slice then filtered to nothing and looked broken while the data was fine.
+  Touching the selector "fixed" it, which is what made this look like a rendering
+  glitch rather than a wrong value.
+- The Max Pain / GEX tab now defaults to the nearest expiry that still has time
+  left. Most tickers list an expiry for the current day and it sorts first, so the
+  default landed on the one expiry whose gamma is zero by definition: an empty
+  chart under a "Net GEX: 0" banner, with Max Pain right above it showing a normal
+  number because it needs only open interest. Expiries with no time left stay
+  selectable, labelled "no gamma left", and explain themselves instead of drawing a
+  flat zero. The GEX Heatmap drops them from the matrix — a heatmap has nowhere to
+  explain a blank column.
+- The GEX Heatmap no longer crashes for a ticker with a single tradeable expiry
+  (`st.slider` requires min < max). Found by rendering the page for a thin ticker.
+
 - Time to expiry is now measured to the 16:00 ET close instead of to midnight of
   the expiration date, and keeps its fractional part. Two errors compounded in the
   old `(expiry - collected_at).days / 365`: a contract still trading through its
