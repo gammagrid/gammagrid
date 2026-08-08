@@ -30,6 +30,17 @@ FAVICON = (
 st.set_page_config(page_title="GammaGrid", page_icon=FAVICON, layout="wide")
 
 
+def _drop_stale_choice(key: str, options) -> None:
+    """Forgets a stored selection that is no longer offered.
+
+    Streamlit raises when a widget's remembered value is absent from its
+    options, and these lists narrow as the user drills down — pick an expiry
+    that lists strike 275, then one that does not, and the Contract tab would
+    die on a perfectly ordinary sequence of clicks."""
+    if key in st.session_state and st.session_state[key] not in list(options):
+        del st.session_state[key]
+
+
 def format_date(value: pd.Timestamp) -> str:
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
@@ -857,11 +868,15 @@ if active_view == "Contract":
             col_a, col_b = st.columns([5, 1])
             label = f"{format_date(trow['expiry'])}  strike {trow['strike']:g}  {trow['option_type']}"
             if col_a.button(label, key=f"select_tracked_{trow['id']}", use_container_width=True):
-                # write session_state before rerun — on the next run the
-                # selectors below (same keys) initialize with these values.
-                st.session_state["opt_expiry"] = trow["expiry"]
-                st.session_state["opt_strike"] = trow["strike"]
-                st.session_state["opt_type"] = trow["option_type"]
+                # Written before the rerun so the selectors below initialize
+                # with these values. The keys MUST match the ones the selectors
+                # use, ticker suffix included — they were keyed by ticker to stop
+                # one ticker's expiry leaking into another, and this handler kept
+                # writing the old unsuffixed names, so clicking a pinned contract
+                # silently did nothing at all.
+                st.session_state[f"opt_expiry_{selected_ticker}"] = trow["expiry"]
+                st.session_state[f"opt_strike_{selected_ticker}"] = trow["strike"]
+                st.session_state[f"opt_type_{selected_ticker}"] = trow["option_type"]
                 st.rerun()
             if col_b.button("✕", key=f"untrack_{trow['id']}"):
                 db.remove_tracked_contract(conn, trow["id"])
@@ -876,8 +891,21 @@ if active_view == "Contract":
         "Expiry", expiries, format_func=format_date, key=f"opt_expiry_{selected_ticker}"
     )
     opt_strikes = sorted(df[df["expiry"] == opt_expiry]["strike"].unique())
+    # A stored widget value that is no longer among the options makes Streamlit
+    # raise, and the option lists here narrow as you go: strikes depend on the
+    # expiry, and the sides quoted depend on the strike. Drop the stale value
+    # rather than letting the tab die on a legitimate sequence of clicks.
+    _drop_stale_choice(f"opt_strike_{selected_ticker}", opt_strikes)
     opt_strike = col2.selectbox("Strike", opt_strikes, key=f"opt_strike_{selected_ticker}")
-    opt_type = col3.selectbox("Type", ["call", "put"], key=f"opt_type_{selected_ticker}")
+    # Only the sides actually quoted for this expiry and strike. Offering both
+    # unconditionally let you select a contract that was never collected — far
+    # OTM strikes are routinely listed on one side only — and the app then said
+    # "No history for the selected contract", which is true and useless.
+    available_types = sorted(
+        df[(df["expiry"] == opt_expiry) & (df["strike"] == opt_strike)]["option_type"].unique()
+    ) or ["call", "put"]
+    _drop_stale_choice(f"opt_type_{selected_ticker}", available_types)
+    opt_type = col3.selectbox("Type", available_types, key=f"opt_type_{selected_ticker}")
 
     render_option_detail(conn, df, selected_ticker, get_tracked(), opt_expiry, opt_strike, opt_type, key_prefix="opt")
 
@@ -889,6 +917,34 @@ if active_view == "Screener":
     )
 
     screener = metrics.screener_table(df)
+    # The greeks and DTE are correct AS OF THE SNAPSHOT — that is the only
+    # honest way to price them. But collection here is a manual button, so the
+    # latest snapshot can be days or weeks old, and contracts that were live
+    # when it was taken may have expired since. Showing them in a "what can I
+    # trade" screener with a cheerful positive DTE is misleading, so they are
+    # hidden by default rather than silently mixed in — and counted out loud,
+    # with a toggle, because hiding collected data without saying so is worse
+    # than showing it.
+    # years_to_expiry normalizes a tz-aware "now" itself — that is what it is
+    # for, and doing the conversion at the call site is how the tz-aware/naive
+    # mismatch keeps coming back.
+    now = pd.Timestamp.utcnow()
+    expired_since = pd.Series(dtype=bool)
+    if not screener.empty:
+        expired_since = screener["expiry"].map(lambda e: metrics.years_to_expiry(e, now) <= 0)
+    show_expired = False
+    if expired_since.any():
+        stale_days = int(metrics.years_to_expiry(latest_date, now) * -365)
+        show_expired = st.checkbox(
+            f"Include {int(expired_since.sum())} contract(s) that have expired since this "
+            f"snapshot was collected ({stale_days} day(s) ago)",
+            key=f"screener_show_expired_{selected_ticker}",
+            help="Their greeks and DTE are as of the collection, which is why they can "
+                 "still show time left. Collect again to refresh the chain.",
+        )
+    if not show_expired and not screener.empty:
+        screener = screener[~expired_since].reset_index(drop=True)
+
     if screener.empty:
         st.info("No data for the screener.")
     else:

@@ -255,12 +255,49 @@ def check_watchlist_and_snapshot_dates():
     print("watchlist and snapshot-date checks passed")
 
 
+def check_screener_expiry_awareness():
+    """A snapshot ages. Its greeks stay correct as of the collection — that is
+    the only honest way to price them — but contracts that were live then may
+    have expired since, and a screener that lists them with a cheerful positive
+    DTE is misleading.
+
+    The dashboard hides those by default, and this pins the arithmetic it uses
+    to decide: measured against NOW, not against the snapshot."""
+    snapshot_date = pd.Timestamp("2026-07-28 21:40")
+    now = pd.Timestamp("2026-08-08 20:00")
+
+    # Alive when collected, gone by now.
+    assert metrics.years_to_expiry("2026-08-05", snapshot_date) > 0
+    assert metrics.years_to_expiry("2026-08-05", now) <= 0
+
+    # Still alive on both counts.
+    assert metrics.years_to_expiry("2026-08-14", snapshot_date) > 0
+    assert metrics.years_to_expiry("2026-08-14", now) > 0
+
+    # The screener's own DTE stays relative to the snapshot: recomputing it
+    # against today would misprice every greek in the table.
+    chain = pd.DataFrame([
+        {"collected_at": snapshot_date, "underlying_price": 100.0,
+         "expiry": pd.Timestamp("2026-08-05"), "strike": 100.0, "option_type": option_type,
+         "last_price": 1.0, "volume": 10, "open_interest": 50, "implied_volatility": 0.3}
+        for option_type in ("call", "put")
+    ])
+    table = metrics.screener_table(chain)
+    # Whole days to midnight of the expiry date: 2026-07-28 21:40 -> 2026-08-05
+    # is 7 days and change. `dte` is the column users read and filter on, where
+    # whole days are what they expect — the fractional, close-aware figure is
+    # what prices the greeks beside it, and the two are deliberately different.
+    assert (table["dte"] == 7).all(), table["dte"].tolist()
+    print("screener expiry-awareness checks passed")
+
+
 def main():
     check_years_to_expiry()
     check_greeks_respond_to_time()
     check_put_call_ratio_matches_sql()
     check_collector_isolation()
     check_watchlist_and_snapshot_dates()
+    check_screener_expiry_awareness()
     print("\nALL UNIT CHECKS PASSED")
 
 

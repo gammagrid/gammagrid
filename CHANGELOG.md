@@ -44,6 +44,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Clicking a pinned contract now actually selects it. The handler wrote to the
+  selectors' old, unsuffixed session keys after those selectors were keyed by
+  ticker, so the click silently did nothing.
+- The Contract tab no longer offers a call/put side that was never collected.
+  Far-OTM strikes are routinely quoted on one side only, and the type selector
+  offered both regardless — picking the missing one gave "No history for the
+  selected contract", which was true and useless. It now lists only the sides
+  present for the chosen expiry and strike, and a remembered selection that
+  disappears from a narrowed list is forgotten rather than raising.
+- The screener hides contracts that have expired since the snapshot was
+  collected, with a checkbox to include them and a count of how many there are.
+  Their greeks and DTE are correct as of the collection — that is the only
+  honest way to price them — but with collection on a manual button the latest
+  snapshot can be days old, and listing a dead contract with a positive DTE in a
+  "what can I trade" view is misleading. On an 11-day-old snapshot this is 826 of
+  5,546 contracts for GLD and 2,205 of 10,526 for SPY.
 - Switching tickers no longer leaves charts blank. Expiry, strike and option-type
   selectors kept their value across a ticker change, so a date the previous ticker
   traded carried over to one that doesn't — Max Pain, the GEX profile and the IV
