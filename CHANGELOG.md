@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-08
+
 ### Added
 
 - Two more check scripts, and CI runs both. `tests/unit_tests.py` covers the
@@ -145,7 +147,8 @@ Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.1.3...main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.2.0...main
+[0.2.0]: https://github.com/gammagrid/gammagrid/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/gammagrid/gammagrid/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/gammagrid/gammagrid/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/gammagrid/gammagrid/compare/v0.1.0...v0.1.1
