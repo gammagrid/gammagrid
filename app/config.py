@@ -65,3 +65,18 @@ BACKOFF_BASE_SECONDS = 2
 # snapshot looked "successful" but broke the GEX Heatmap / OI Delta views.
 # 0.5 leaves a wide margin above the normal level.
 MAX_ZERO_OI_FRACTION = 0.5
+
+# How much history a normal page load reads. Collection is a manual button
+# today, so history grows only when you press it — but scheduled collection is
+# on the roadmap, and an unbounded read is what turns that feature into a
+# complaint about the app being slow. Measured on the hosted sibling, which
+# collects continuously: a year of one liquid ticker is ~1.2M rows and ~390MB
+# once in pandas, fetched on every interaction, to draw charts that only ever
+# show the last few days.
+#
+# A DEFAULT for the normal page load, not a cap: collected data is the most
+# valuable thing in the app, and a rolling window must never silently hide a
+# long-lived contract's early history. The dashboard carries a "Load full
+# history" toggle that passes days=None straight through — bounded by default,
+# unbounded on request, never unbounded-then-secretly-trimmed.
+SNAPSHOT_HISTORY_DAYS = int(os.environ.get("SNAPSHOT_HISTORY_DAYS", "365"))

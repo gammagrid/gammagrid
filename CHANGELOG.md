@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- A page load now reads the last 365 days of a ticker's history instead of all of
+  it, with a "Load full history" toggle that fetches everything on request. The
+  bound is a default, never a cap: collected data is the most valuable thing in the
+  app and a rolling window must not silently hide a long-lived contract's early
+  history. Collection is a manual button today, so history only grows when you press
+  it — but an unbounded read is what would turn scheduled collection, when it
+  arrives, into a complaint about the app being slow.
+- The Put/Call Ratio chart is aggregated in SQL rather than by loading every raw row
+  and grouping in pandas — the same numbers (asserted against the previous
+  implementation to 1e-9) for a fraction of the work.
+
 ### Fixed
 
 - Switching tickers no longer leaves charts blank. Expiry, strike and option-type

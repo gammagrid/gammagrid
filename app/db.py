@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -138,13 +138,72 @@ def insert_snapshot(
     conn.commit()
 
 
-def get_snapshots(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
+def get_snapshots(
+    conn: sqlite3.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
+) -> pd.DataFrame:
+    """A ticker's snapshot history, bounded to the last `days` by default.
+
+    `days=None` fetches everything — used by the dashboard's "Load full
+    history" toggle, and by tooling that genuinely needs the whole series. No
+    UI path should pass None by default: see config.SNAPSHOT_HISTORY_DAYS for
+    why the bound exists."""
+    where = "ticker = ?"
+    params: list = [ticker]
+    if days is not None:
+        # SQLite has no interval arithmetic; the cutoff is computed here and
+        # compared as text, which works because collected_at is stored in
+        # ISO 8601 and ISO strings sort chronologically.
+        where += " AND collected_at >= ?"
+        params.append((datetime.utcnow() - timedelta(days=days)).isoformat(sep=" "))
     return pd.read_sql_query(
-        "SELECT * FROM option_snapshots WHERE ticker = ? ORDER BY collected_at",
+        f"SELECT * FROM option_snapshots WHERE {where} ORDER BY collected_at",
         conn,
-        params=(ticker,),
+        params=params,
         parse_dates=["collected_at", "expiry"],
     )
+
+
+def get_put_call_ratio(
+    conn: sqlite3.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
+) -> pd.DataFrame:
+    """Put/call ratio per collection, aggregated in SQL.
+
+    The Overview chart is a few hundred points. Computing it by loading every
+    raw row and grouping in pandas is the single most expensive thing a page
+    load did — measured on the hosted sibling at 5.0s and ~390MB of DataFrame
+    for one liquid ticker, against 0.8s and a few kilobytes for the same
+    numbers aggregated here."""
+    where = "ticker = ?"
+    params: list = [ticker]
+    if days is not None:
+        where += " AND collected_at >= ?"
+        params.append((datetime.utcnow() - timedelta(days=days)).isoformat(sep=" "))
+    raw = pd.read_sql_query(
+        f"""SELECT collected_at, option_type,
+                   SUM(volume) AS volume, SUM(open_interest) AS open_interest
+            FROM option_snapshots WHERE {where}
+            GROUP BY collected_at, option_type
+            ORDER BY collected_at""",
+        conn,
+        params=params,
+        parse_dates=["collected_at"],
+    )
+    if raw.empty:
+        return pd.DataFrame(columns=["collected_at", "pcr_volume", "pcr_oi"])
+    wide = raw.pivot(index="collected_at", columns="option_type",
+                     values=["volume", "open_interest"])
+    # A collection with no puts (or no calls) leaves the column missing rather
+    # than zero — reindex so the division yields NaN instead of raising on a
+    # thin ticker.
+    for measure in ("volume", "open_interest"):
+        for side in ("call", "put"):
+            if (measure, side) not in wide.columns:
+                wide[(measure, side)] = pd.NA
+    result = pd.DataFrame({
+        "pcr_volume": wide[("volume", "put")] / wide[("volume", "call")],
+        "pcr_oi": wide[("open_interest", "put")] / wide[("open_interest", "call")],
+    })
+    return result.reset_index()
 
 
 def get_snapshot_dates(conn: sqlite3.Connection, ticker: str) -> list[str]:

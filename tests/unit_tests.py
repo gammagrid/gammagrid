@@ -105,9 +105,70 @@ def check_greeks_respond_to_time():
     print("greeks/time checks passed")
 
 
+def check_put_call_ratio_matches_sql():
+    """db.get_put_call_ratio must return exactly what grouping the raw rows
+    returned. metrics.put_call_ratio stays the definition of the ratio and the
+    oracle here: moving an aggregation into SQL is only worth anything if the
+    numbers are identical, and "identical" is precisely the sort of claim that
+    rots quietly — change the date filter, or how a side with no rows is
+    handled, and the chart shifts without anything failing.
+
+    This one needs a database, so it uses a throwaway file rather than the
+    project's real one."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["OPTIONS_TRACKER_DB"] = os.path.join(tmp, "unit.db")
+        # Imported here: db reads the path at connection time, and the module
+        # may already be imported by another check.
+        from app import db
+
+        conn = db.get_connection()
+        db.add_ticker(conn, "UNIT")
+        base = datetime(2026, 7, 1, 21, 0)
+        for step in range(3):
+            chain = pd.DataFrame([
+                # Deliberately lopsided: puts outweigh calls, so a ratio
+                # computed the wrong way round could not coincidentally match.
+                {"expiry": "2026-09-18", "strike": 100.0, "option_type": "call",
+                 "last_price": 1.0, "bid": 0.9, "ask": 1.1, "volume": 10 + step,
+                 "open_interest": 100 + step, "implied_volatility": 0.3,
+                 "in_the_money": False},
+                {"expiry": "2026-09-18", "strike": 100.0, "option_type": "put",
+                 "last_price": 1.0, "bid": 0.9, "ask": 1.1, "volume": 30 + step * 2,
+                 "open_interest": 250 + step * 5, "implied_volatility": 0.35,
+                 "in_the_money": False},
+            ])
+            db.insert_snapshot(conn, "UNIT", base + pd.Timedelta(hours=step), 100.0, chain)
+
+        expected = metrics.put_call_ratio(db.get_snapshots(conn, "UNIT", days=None))
+        actual = db.get_put_call_ratio(conn, "UNIT", days=None)
+        assert len(actual) == len(expected) == 3, (len(actual), len(expected))
+        merged = expected.merge(actual, on="collected_at", suffixes=("_expected", "_actual"))
+        assert len(merged) == 3, "timestamps did not line up between the two implementations"
+        for column in ("pcr_volume", "pcr_oi"):
+            left = merged[f"{column}_expected"].to_numpy(dtype=float)
+            right = merged[f"{column}_actual"].to_numpy(dtype=float)
+            assert np.allclose(left, right, rtol=1e-9, equal_nan=True), (column, left, right)
+        assert (merged["pcr_volume_actual"] > 1).all(), "puts outweigh calls here; a ratio below 1 is inverted"
+
+        # A ticker with no rows must give the columns the chart expects, not a
+        # KeyError on an absent column.
+        empty = db.get_put_call_ratio(conn, "NOSUCH", days=None)
+        assert empty.empty and list(empty.columns) == ["collected_at", "pcr_volume", "pcr_oi"], empty
+
+        # The default bound must exclude old rows while days=None keeps them.
+        old_moment = datetime.utcnow() - pd.Timedelta(days=400)
+        db.insert_snapshot(conn, "UNIT", old_moment, 100.0, chain)
+        assert len(db.get_snapshots(conn, "UNIT", days=None)) > len(db.get_snapshots(conn, "UNIT"))
+        conn.close()
+    print("put/call ratio and history bound checks passed")
+
+
 def main():
     check_years_to_expiry()
     check_greeks_respond_to_time()
+    check_put_call_ratio_matches_sql()
     print("\nALL UNIT CHECKS PASSED")
 
 

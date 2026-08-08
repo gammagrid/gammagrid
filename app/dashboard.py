@@ -378,7 +378,18 @@ if not watchlist:
     st.stop()
 
 selected_ticker = st.selectbox("Ticker to analyze", watchlist, key="selected_ticker")
-df = db.get_snapshots(conn, selected_ticker)
+
+# Bounded by default, never a permanent cap on what you can see: collected data
+# is the most valuable thing in the app, and a rolling window must not silently
+# hide a long-lived contract's early history — an 18-month-old two-year LEAP
+# would lose its first year. days=None below fetches everything.
+load_full_history = st.checkbox(
+    f"Load full history (default: last {config.SNAPSHOT_HISTORY_DAYS} days)",
+    key="load_full_history",
+    help="Slower on tickers with a long collection history.",
+)
+history_days = None if load_full_history else config.SNAPSHOT_HISTORY_DAYS
+df = db.get_snapshots(conn, selected_ticker, days=history_days)
 
 if df.empty:
     st.info(f"No data for {selected_ticker}. Click “Collect data” on the left.")
@@ -396,7 +407,10 @@ tab_overview, tab_pain_gex, tab_heatmap, tab_iv, tab_option, tab_screener, tab_u
 with tab_overview:
     st.caption(f"Latest collection: {latest_date}")
     st.subheader("Put/Call Ratio")
-    pcr = metrics.put_call_ratio(df)
+    # Aggregated in SQL rather than by grouping every raw row here: same
+    # numbers, a fraction of the work. metrics.put_call_ratio remains the
+    # definition of the ratio and the oracle the tests check this against.
+    pcr = db.get_put_call_ratio(conn, selected_ticker, days=history_days)
     st.line_chart(pcr.set_index("collected_at")[["pcr_volume", "pcr_oi"]], color=[BRAND_PURPLE, BRAND_GREEN])
     with st.expander("ℹ️ How to read this"):
         st.write(
