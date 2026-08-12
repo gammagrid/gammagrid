@@ -67,6 +67,13 @@ All of them run in CI on every pull request; please run them locally first.
 - **Adding a data source is a new file in `app/providers/`** and two lines in
   its `__init__.py`; the module docstring there walks through it. Nothing else
   in the app should need to know your source exists.
+- **A change to the database schema arrives with an `UPGRADING.md` entry.**
+  Not a changelog line — a statement of what happens to a database that is
+  already full, and whether going back is possible. People run this on their own
+  machine, often with no backup, and they upgrade by `git pull`; the changelog
+  tells them what is new, and only that file tells them what it costs. Saying
+  "nothing happens to your data" counts and is worth writing, because silence
+  reads as the same thing without anyone having checked.
 - Comment the *why*, not the *what* — a comment should explain a non-obvious
   constraint or a workaround, not restate what the code already says.
 - Keep the "ℹ️ How to read this" explanations under each chart intact and

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-12
+
 ### Added
 
 - **A shared calculation core.** `app/metrics_core.py` now holds every metric
@@ -37,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   exist before a second source does — two providers derive implied volatility
   differently, and a chart mixing them draws a move that never happened, which
   cannot be untangled afterwards if the rows were never labelled.
+
+- `UPGRADING.md`, new: what each release does to a database you have already
+  filled, and whether it can be undone. The changelog says what changed; that
+  file says what it costs, which is the question that decides whether to
+  upgrade today. This release's entry is **one-way** — safe, but keep a copy of
+  `data/options.db` until you have seen a chart.
 
 ### Fixed
 

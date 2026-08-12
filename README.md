@@ -40,6 +40,10 @@ Data is saved to `data/options.db` on your machine and survives restarts.
 Press `Ctrl+C` in the terminal to stop the app; run the same command again to
 bring it back up with your data intact.
 
+**Updating later?** [UPGRADING.md](UPGRADING.md) says, per release, what happens
+to the database you have already filled and whether the upgrade can be undone.
+Your whole backup is `cp data/options.db data/options.db.backup`.
+
 ## What you get
 
 - **Dealer gamma exposure (GEX)** — per-expiry profile and a strike × expiry
