@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **A shared calculation core.** `app/metrics_core.py` now holds every metric
+  calculation and is byte-identical to the copy in the hosted version, with the
+  rules written at the top of the file. `app/metrics.py` re-exports it, so
+  nothing that calls a metric had to change. The reason is a real defect rather
+  than tidiness: the two versions had drifted, and this one was computing greeks
+  with no dividend yield — measured on the other side at 11% off on a high-yield
+  name's forward and 0.05 of delta on long-dated contracts. Carrying fixes
+  across by hand is what failed; a shared file with a checked hash is the
+  replacement.
+- **Greeks now take a dividend yield.** `_black_scholes_greeks` uses the
+  generalized Black-Scholes formulas, and charm is computed per option type
+  rather than shared between calls and puts — sharing it is only correct when
+  the yield is zero. **No number in this release changed**: with no yield
+  supplied the formulas reduce exactly to the previous ones, and a check
+  asserts that over 432 combinations of spot, strike, maturity, volatility and
+  rate, against the previous implementation itself rather than pasted
+  constants.
+- **A provider interface, so a data source is a plug-in.** `app/providers/`
+  defines what a source has to do; `collector.py` no longer imports `yfinance`
+  and works over whatever it is handed. Adding your own source is a new file
+  there and two lines in the registry — the module docstring walks through it.
+  Yahoo remains the default and still needs no account, no token and no card.
+- Four provider-greek columns and a `source` column in `option_snapshots`.
+  Existing databases upgrade in place on first open, with no manual step;
+  existing rows are labelled `yahoo`, which is what they are. The label has to
+  exist before a second source does — two providers derive implied volatility
+  differently, and a chart mixing them draws a move that never happened, which
+  cannot be untangled afterwards if the rows were never labelled.
+
+### Fixed
+
+- One contract with no implied volatility no longer empties the whole day's
+  volume-weighted average IV. `np.average` computes `sum(a·w)/sum(w)` and
+  `NaN·0` is still `NaN`, so a single zero-weighted row with a missing IV
+  poisoned the result. Invisible while Yahoo was the only source, because it
+  quotes an IV on everything; a provider that legitimately reports none for
+  part of a chain empties the chart completely. Fixed now rather than later
+  because the provider interface in this release is exactly what makes that
+  possible here.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added

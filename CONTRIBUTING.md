@@ -43,15 +43,30 @@ All of them run in CI on every pull request; please run them locally first.
 
 ## Code style
 
-- **A new function in `db.py`, `metrics.py` or `collector.py` arrives with a
-  check.** `tests/coverage_report.py` fails if any non-exempt function has none
-  calling it — write it in `unit_tests.py` if it needs no database, in
+- **`app/metrics_core.py` is a shared file — please read its header before
+  changing it.** It is byte-identical to a copy in the hosted version of
+  GammaGrid, and the checks will fail if you edit it without updating
+  `app/metrics_core.sha256`. That is not bureaucracy: the two drifted apart
+  once, and the free version spent weeks computing greeks without a dividend
+  yield while the paid one did not — a wrong number, in the version more people
+  use. A pull request that changes the core is very welcome; it just also has
+  to be carried across, and the failing check is what makes sure someone does
+  it. Anything that needs data this application cannot fetch does not belong in
+  the core at all.
+- **A new function in `db.py`, `metrics.py`, `metrics_core.py`,
+  `collector.py` or `providers/` arrives with a check.**
+  `tests/coverage_report.py` fails if any non-exempt function has none calling
+  it — write it in `unit_tests.py` if it needs no database, in
   `smoke_test.py` if it does. Something that genuinely cannot be checked
   offline goes in that file's `EXEMPT` list, by name and with the reason.
-- Match the existing style: pure functions in `metrics.py` (input a DataFrame,
-  output a DataFrame/number, no side effects), all DB access funneled through
-  `db.py`, all network calls funneled through `collector.py`. `dashboard.py`
-  is display and user input only — no business logic.
+- Match the existing style: pure functions in `metrics_core.py` (input a
+  DataFrame, output a DataFrame/number, no side effects), all DB access
+  funneled through `db.py`, all network calls funneled through
+  `app/providers/` — `collector.py` orchestrates and never talks to a network
+  itself. `dashboard.py` is display and user input only — no business logic.
+- **Adding a data source is a new file in `app/providers/`** and two lines in
+  its `__init__.py`; the module docstring there walks through it. Nothing else
+  in the app should need to know your source exists.
 - Comment the *why*, not the *what* — a comment should explain a non-obvious
   constraint or a workaround, not restate what the code already says.
 - Keep the "ℹ️ How to read this" explanations under each chart intact and

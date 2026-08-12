@@ -31,7 +31,20 @@ CREATE TABLE IF NOT EXISTS option_snapshots (
     volume INTEGER,
     open_interest INTEGER,
     implied_volatility REAL,
-    in_the_money BOOLEAN
+    in_the_money BOOLEAN,
+    -- Greeks as the provider served them, stored rather than recomputed: they
+    -- come from the provider's own model and cannot be reconstructed later.
+    -- Yahoo serves none, so with the default setup these stay NULL and the
+    -- reader computes greeks from implied volatility (see metrics_core).
+    delta REAL,
+    gamma REAL,
+    theta REAL,
+    vega REAL,
+    -- Which provider produced this row. Charts must never mix sources:
+    -- implied volatility is a *computed* number, so the same contract on the
+    -- same day legitimately differs between providers, and splicing two of
+    -- them draws a jump that never happened on the market.
+    source TEXT NOT NULL DEFAULT 'yahoo'
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_ticker_date ON option_snapshots(ticker, collected_at);
 CREATE INDEX IF NOT EXISTS idx_snapshots_contract ON option_snapshots(ticker, expiry, strike, option_type);
@@ -64,6 +77,18 @@ CREATE TABLE IF NOT EXISTS tracked_contracts (
 MIGRATIONS = [
     "ALTER TABLE collection_runs ADD COLUMN rows_fetched INTEGER",
     "ALTER TABLE collection_runs ADD COLUMN oi_zero_fraction REAL",
+    # Provider-supplied greeks and the source that produced the row, added with
+    # app/providers/. Existing rows get NULL greeks, which is the truth — Yahoo
+    # serves none and nothing else has ever written here — and `source` is
+    # backfilled to 'yahoo' by the column default, which is equally true: it is
+    # the only source this application has ever had. A label that can only be
+    # applied at write time has to be added before the second provider exists,
+    # not after, or every row collected in between is permanently unattributable.
+    "ALTER TABLE option_snapshots ADD COLUMN delta REAL",
+    "ALTER TABLE option_snapshots ADD COLUMN gamma REAL",
+    "ALTER TABLE option_snapshots ADD COLUMN theta REAL",
+    "ALTER TABLE option_snapshots ADD COLUMN vega REAL",
+    "ALTER TABLE option_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT 'yahoo'",
 ]
 
 
@@ -107,9 +132,24 @@ def insert_snapshot(
     collected_at: datetime,
     underlying_price: float,
     chain_df: pd.DataFrame,
+    source: str = "yahoo",
 ) -> None:
-    """chain_df: columns expiry, strike, option_type, last_price, bid, ask,
-    volume, open_interest, implied_volatility, in_the_money (see collector.py)."""
+    """chain_df: exactly providers.CHAIN_COLUMNS.
+
+    `source` is the active provider's `name` and is stored per row rather than
+    per collection: a chart that mixes two providers' implied volatility draws
+    a move that never happened, and the only place that can be prevented is at
+    write time. It defaults to 'yahoo' so that callers written before providers
+    existed keep working and mean what they always meant.
+
+    The four greek columns are optional in the frame. Yahoo supplies none, and
+    a provider that supplies some leaves the rest as None — stored as NULL, not
+    0, because a zero delta is a real value a deep-OTM contract can have.
+    """
+    def greek(row, name: str):
+        value = getattr(row, name, None)
+        return None if value is None or pd.isna(value) else float(value)
+
     rows = [
         (
             ticker,
@@ -125,14 +165,20 @@ def insert_snapshot(
             row.open_interest,
             row.implied_volatility,
             bool(row.in_the_money),
+            greek(row, "delta"),
+            greek(row, "gamma"),
+            greek(row, "theta"),
+            greek(row, "vega"),
+            source,
         )
         for row in chain_df.itertuples()
     ]
     conn.executemany(
         """INSERT INTO option_snapshots
            (ticker, collected_at, underlying_price, expiry, strike, option_type,
-            last_price, bid, ask, volume, open_interest, implied_volatility, in_the_money)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            last_price, bid, ask, volume, open_interest, implied_volatility, in_the_money,
+            delta, gamma, theta, vega, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
     conn.commit()

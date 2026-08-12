@@ -33,7 +33,19 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 # The modules whose behaviour the checks are expected to reach. dashboard.py is
 # excluded on purpose: it is a Streamlit script, not a library — importing it
 # runs the page — and it is verified by rendering instead (render_views.py).
-MEASURED_MODULES = ("app/db.py", "app/metrics.py", "app/collector.py")
+MEASURED_MODULES = (
+    "app/db.py",
+    "app/metrics.py",
+    # The shared core (OSS-2). Listed explicitly because moving the calculations
+    # out of metrics.py into it would otherwise have quietly dropped 37 symbols
+    # from the gate while it still reported 100% — the number would have kept
+    # its value and lost its meaning.
+    "app/metrics_core.py",
+    "app/collector.py",
+    "app/providers/base.py",
+    "app/providers/yahoo.py",
+    "app/providers/__init__.py",
+)
 
 SUITES = ("tests.unit_tests", "tests.smoke_test")
 
@@ -41,11 +53,24 @@ SUITES = ("tests.unit_tests", "tests.smoke_test")
 # by name rather than tolerated silently: an exemption should be an argument
 # you can read, and this list is the argument.
 EXEMPT = {
-    "collector.fetch_ticker_snapshot": "network: yfinance",
-    "collector._fetch_chain_for_expiry": "network: yfinance",
-    "collector._fetch_underlying_price": "network: yfinance",
-    "collector.fetch_price_history": "network: yfinance",
-    "collector._with_retry": "retries a network call; only reachable through the ones above",
+    "collector.fetch_ticker_snapshot": "network: delegates to the active provider",
+    "collector.fetch_price_history": "network: delegates to the active provider",
+    # Everything that actually touches Yahoo. Exempt by name rather than by
+    # module so that a NEW function in app/providers/ still has to be either
+    # tested or consciously listed here.
+    "yahoo.YahooProvider.fetch_ticker_snapshot": "network: Yahoo",
+    "yahoo.YahooProvider.fetch_price_history": "network: Yahoo",
+    "yahoo.YahooProvider.fetch_underlying_price": "network: Yahoo",
+    "yahoo.YahooProvider._fetch_underlying_price": "network: Yahoo",
+    "yahoo.YahooProvider._fetch_chain_for_expiry": "network: Yahoo",
+    "yahoo.YahooProvider.check_access": "network: Yahoo",
+    # The Protocol is a declaration of the shape real providers implement, and
+    # calling one of its methods executes nothing at all. A test for these would
+    # assert that `...` returns None.
+    "base.DataProvider.fetch_ticker_snapshot": "Protocol declaration, empty body",
+    "base.DataProvider.fetch_price_history": "Protocol declaration, empty body",
+    "base.DataProvider.check_access": "Protocol declaration, empty body",
+    "base.with_retry": "retries a network call; only reachable through the ones above",
     "db.get_connection": "used by every check; not a behaviour to assert",
 }
 

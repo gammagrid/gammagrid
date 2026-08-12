@@ -1,79 +1,35 @@
-"""The only module that talks to the external data source (yfinance).
-Nothing outside this module makes network requests."""
+"""Collection orchestration. Everything here is provider-agnostic.
+
+This module used to be "the only module that talks to the external data
+source". That is now app/providers/ — but the rule it protected still holds:
+nothing outside app/providers/ makes network requests, and nothing inside
+app/providers/ knows about the database.
+
+What stays here is the part that is the same whichever source is active: the
+quality gate, run logging, and the guarantee that one failing ticker cannot
+take down the rest of the batch.
+"""
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timezone
 
 import pandas as pd
-import yfinance as yf
 
-from app import config, db
-
-CHAIN_COLUMNS = {
-    "lastPrice": "last_price",
-    "openInterest": "open_interest",
-    "impliedVolatility": "implied_volatility",
-    "inTheMoney": "in_the_money",
-}
+from app import config, db, providers
 
 
-def _fetch_underlying_price(ticker_obj: yf.Ticker) -> float:
-    return float(ticker_obj.fast_info["lastPrice"])
+def fetch_ticker_snapshot(
+    ticker: str, provider: providers.DataProvider | None = None
+) -> tuple[float, pd.DataFrame]:
+    """Kept as a module-level function for call sites that predate providers."""
+    return (provider or providers.get_provider()).fetch_ticker_snapshot(ticker)
 
 
-def _fetch_chain_for_expiry(ticker_obj: yf.Ticker, expiry: str) -> pd.DataFrame:
-    chain = ticker_obj.option_chain(expiry)
-
-    calls = chain.calls.copy()
-    calls["option_type"] = "call"
-    puts = chain.puts.copy()
-    puts["option_type"] = "put"
-
-    combined = pd.concat([calls, puts], ignore_index=True)
-    combined["expiry"] = expiry
-    combined = combined.rename(columns=CHAIN_COLUMNS)
-
-    return combined[[
-        "expiry", "strike", "option_type", "last_price", "bid", "ask",
-        "volume", "open_interest", "implied_volatility", "in_the_money",
-    ]]
-
-
-def _with_retry(fn, *args, **kwargs):
-    last_error: Exception | None = None
-    for attempt in range(config.MAX_FETCH_RETRIES):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as exc:  # yfinance/requests raise assorted error and rate-limit types
-            last_error = exc
-            if attempt < config.MAX_FETCH_RETRIES - 1:
-                time.sleep(config.BACKOFF_BASE_SECONDS * (2 ** attempt))
-    raise last_error
-
-
-def fetch_ticker_snapshot(ticker: str) -> tuple[float, pd.DataFrame]:
-    """Returns (underlying price, the full option chain across all expiries)."""
-    ticker_obj = yf.Ticker(ticker)
-    underlying_price = _with_retry(_fetch_underlying_price, ticker_obj)
-    expiries = _with_retry(lambda: ticker_obj.options)
-
-    frames = [_with_retry(_fetch_chain_for_expiry, ticker_obj, expiry) for expiry in expiries]
-    chain_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    return underlying_price, chain_df
-
-
-def fetch_price_history(ticker: str, period: str = "6mo") -> pd.DataFrame:
-    """Daily close history of the underlying, straight from yfinance — for
-    realized volatility (spec FR24). A separate lightweight read-only request,
-    unrelated to collect_watchlist: it doesn't write to the DB, doesn't take
-    part in snapshot quality checks, and doesn't depend on how many days of
-    option chains we have already collected."""
-    history = _with_retry(lambda: yf.Ticker(ticker).history(period=period))
-    if history.empty:
-        return pd.DataFrame(columns=["close"])
-    return history.rename(columns={"Close": "close"})[["close"]]
+def fetch_price_history(
+    ticker: str, period: str = "6mo", provider: providers.DataProvider | None = None
+) -> pd.DataFrame:
+    return (provider or providers.get_provider()).fetch_price_history(ticker, period)
 
 
 def _now_utc() -> datetime:
@@ -92,7 +48,9 @@ def _oi_zero_fraction(chain_df: pd.DataFrame) -> float:
     return float((chain_df["open_interest"].fillna(0) == 0).mean())
 
 
-def collect_watchlist(conn, tickers: list[str]) -> dict[str, str]:
+def collect_watchlist(
+    conn, tickers: list[str], provider: providers.DataProvider | None = None
+) -> dict[str, str]:
     """Collects a snapshot for every ticker in the watchlist. One ticker
     failing does not interrupt collection for the rest (spec FR12). Returns
     a status per ticker.
@@ -105,14 +63,27 @@ def collect_watchlist(conn, tickers: list[str]) -> dict[str, str]:
     the GEX Heatmap (gamma is computed from OI) and OI Delta (day-over-day
     comparison). The check rejects it before it reaches the DB — better to
     skip one collection cycle for a ticker than to silently corrupt the
-    history once."""
+    history once.
+
+    A warning if you add a provider: this threshold was calibrated against
+    Yahoo. The hosted version had to scope it per source after a wider chain
+    tripped it for five days on a ticker whose data was perfectly good — a
+    provider that serves the full chain, including everything untraded, has a
+    much higher baseline of zero-OI contracts and is not corrupt for it. The
+    fraction is computed and logged either way.
+
+    Every row and every log line is stamped with the provider's name: charts
+    must never mix sources, and that is only enforceable if the source is
+    recorded at write time.
+    """
+    active = provider or providers.get_provider()
     results: dict[str, str] = {}
     for ticker in tickers:
         started_at = _now_utc()
         rows_fetched: int | None = None
         oi_zero_fraction: float | None = None
         try:
-            underlying_price, chain_df = fetch_ticker_snapshot(ticker)
+            underlying_price, chain_df = active.fetch_ticker_snapshot(ticker)
             if chain_df.empty:
                 raise ValueError("Empty option chain")
             rows_fetched = len(chain_df)
@@ -126,16 +97,35 @@ def collect_watchlist(conn, tickers: list[str]) -> dict[str, str]:
                     "across the whole chain outside regular trading hours); not saving. "
                     "Try again while the market is open."
                 )
-            db.insert_snapshot(conn, ticker, started_at, underlying_price, chain_df)
+            db.insert_snapshot(
+                conn, ticker, started_at, underlying_price, chain_df, source=active.name
+            )
             db.log_run(
                 conn, started_at, _now_utc(), ticker, "success",
                 rows_fetched=rows_fetched, oi_zero_fraction=oi_zero_fraction,
             )
             results[ticker] = "success"
         except Exception as exc:
+            message = _scrub(str(exc), active)
             db.log_run(
-                conn, started_at, _now_utc(), ticker, "failed", str(exc),
+                conn, started_at, _now_utc(), ticker, "failed", message,
                 rows_fetched=rows_fetched, oi_zero_fraction=oi_zero_fraction,
             )
-            results[ticker] = f"failed: {exc}"
+            results[ticker] = f"failed: {message}"
     return results
+
+
+def _scrub(message: str, provider: providers.DataProvider) -> str:
+    """Strips the provider's credential out of an error message before it is
+    stored.
+
+    Yahoo has no token, so today this does nothing — it is here because the
+    moment someone adds an authenticated provider it stops doing nothing.
+    Collection failures are written to collection_runs and rendered verbatim in
+    the interface, and HTTP client errors routinely quote the request URL. A
+    key that leaks into that log is readable by anyone who can open the page.
+    """
+    secret = getattr(provider, "token", None)
+    if not secret:
+        return message
+    return message.replace(secret, "***")

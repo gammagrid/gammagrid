@@ -18,6 +18,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -191,19 +192,23 @@ def check_collector_isolation():
             for option_type in ("call", "put")
         ])
 
-    original = collector.fetch_ticker_snapshot
-    try:
-        def fake(ticker):
+    # A fake PROVIDER, not a patched module function. Before providers existed
+    # this test replaced collector.fetch_ticker_snapshot, and when collection
+    # moved behind the provider interface that patch silently stopped applying:
+    # the suite kept passing names like "BOOM" to the real Yahoo API and took
+    # 17 seconds to decide the network disagreed with it. Injection is the
+    # supported way in, and it is what keeps these checks offline.
+    class Fake:
+        name = "yahoo"
+        price_history_source = "yahoo"
+        requires_token = False
+
+        def fetch_ticker_snapshot(self, ticker):
             if ticker == "BOOM":
                 raise RuntimeError("provider exploded")
-            if ticker == "ZEROOI":
-                return 100.0, chain(zero_oi=True)
-            return 100.0, chain(zero_oi=False)
+            return 100.0, chain(zero_oi=(ticker == "ZEROOI"))
 
-        collector.fetch_ticker_snapshot = fake
-        results = collector.collect_watchlist(conn, ["GOOD", "BOOM", "ZEROOI"])
-    finally:
-        collector.fetch_ticker_snapshot = original
+    results = collector.collect_watchlist(conn, ["GOOD", "BOOM", "ZEROOI"], provider=Fake())
 
     assert results["GOOD"] == "success", results
     assert results["BOOM"].startswith("failed"), results
@@ -291,6 +296,277 @@ def check_screener_expiry_awareness():
     print("screener expiry-awareness checks passed")
 
 
+def check_metrics_core_is_pristine():
+    """app/metrics_core.py is byte-identical to the copy in the hosted product's
+    repository. This check is what makes that claim enforceable here.
+
+    It cannot compare the two repositories — this one is public and has no
+    business reaching into a private one. What it catches is the likelier
+    accident, and the one that matters most in an open-source repo: a
+    contributor edits the shared core without noticing the header saying it is
+    shared. The failure prints the new hash, so a DELIBERATE change costs one
+    paste while an accidental one stops the suite.
+
+    Also asserts the config contract: the core may import `app.config` and
+    nothing else from the application, and every constant it reads has to exist
+    here. A name that exists in one product and not the other turns a shared
+    file into an AttributeError on someone's first page load."""
+    import hashlib
+    import re
+
+    root = os.path.join(os.path.dirname(__file__), "..")
+    with open(os.path.join(root, "app", "metrics_core.py"), "rb") as handle:
+        body = handle.read()
+    actual = hashlib.sha256(body).hexdigest()
+    with open(os.path.join(root, "app", "metrics_core.sha256")) as handle:
+        recorded = handle.read().split()[0]
+    assert actual == recorded, (
+        "app/metrics_core.py changed but app/metrics_core.sha256 did not.\n"
+        "  This file is shared with the hosted product. If the change is\n"
+        "  deliberate, it has to land there too — then write this line into\n"
+        "  app/metrics_core.sha256:\n"
+        f"    {actual}  app/metrics_core.py"
+    )
+
+    source = body.decode()
+    app_imports = set(re.findall(r"^from app(?:\.([a-z_]+))? import", source, re.M))
+    assert app_imports <= {""}, (
+        f"metrics_core.py imports {sorted(app_imports)} from the application. Only "
+        "`from app import config` may be shared — anything else does not exist in "
+        "the same shape in both products."
+    )
+    from app import config
+    used = set(re.findall(r"\bconfig\.([A-Z_][A-Z0-9_]*)", source))
+    assert used, "no config constants found — the extraction regex is probably wrong"
+    for name in sorted(used):
+        assert hasattr(config, name), f"metrics_core.py reads config.{name}, which does not exist here"
+    print(f"shared-core checks passed ({len(used)} config constants, hash matches)")
+
+
+def check_dividend_yield_defaults_to_the_old_model():
+    """Greeks gained a dividend yield when the core became shared. At q=0 the
+    generalized formulas must reduce EXACTLY to the ones this project used
+    before — otherwise the port silently changed every number on every chart.
+
+    Checked against the previous implementation itself, reproduced below from
+    the pre-shared-core source, rather than against pasted golden numbers: a
+    literal only records what the code did on the day someone ran it, and gets
+    "corrected" to whatever it prints next time it fails. The reduction is
+    exact algebra — every carry term is e^0 = 1 and every q-term is multiplied
+    by zero — so the assertion is exact equality, with no tolerance to tune.
+
+    Charm is the one worth naming: it used to be computed once and shared
+    between calls and puts, which is correct only at q=0, and is now computed
+    per option type."""
+    def previous_implementation(spot, strike, t, iv, r, option_type):
+        sqrt_t = np.sqrt(t)
+        d1 = (np.log(spot / strike) + (r + iv ** 2 / 2) * t) / (iv * sqrt_t)
+        d2 = d1 - iv * sqrt_t
+        pdf_d1 = norm.pdf(d1)
+        discount = np.exp(-r * t)
+        greeks = {
+            "gamma": pdf_d1 / (spot * iv * sqrt_t),
+            "vega": spot * pdf_d1 * sqrt_t / 100,
+            "vanna": -pdf_d1 * d2 / iv,
+            "charm": -pdf_d1 * (2 * r * t - d2 * iv * sqrt_t) / (2 * t * iv * sqrt_t),
+        }
+        if option_type == "call":
+            greeks["delta"] = norm.cdf(d1)
+            greeks["theta"] = (-(spot * pdf_d1 * iv) / (2 * sqrt_t)
+                               - r * strike * discount * norm.cdf(d2)) / 365
+            greeks["rho"] = strike * t * discount * norm.cdf(d2) / 100
+        else:
+            greeks["delta"] = norm.cdf(d1) - 1
+            greeks["theta"] = (-(spot * pdf_d1 * iv) / (2 * sqrt_t)
+                               + r * strike * discount * norm.cdf(-d2)) / 365
+            greeks["rho"] = -strike * t * discount * norm.cdf(-d2) / 100
+        return greeks
+
+    checked = 0
+    for spot in (50.0, 100.0, 431.7):
+        for strike in (45.0, 100.0, 460.0):
+            for t in (0.002, 0.08, 1.0, 3.0):      # from one day out to a LEAP
+                for iv in (0.09, 0.35, 1.2):
+                    for r in (0.0, 0.05):
+                        for option_type in ("call", "put"):
+                            now = metrics._black_scholes_greeks(spot, strike, t, iv, r, option_type)
+                            then = previous_implementation(spot, strike, t, iv, r, option_type)
+                            for greek, expected in then.items():
+                                assert now[greek] == expected, (
+                                    f"{greek} changed at q=0: spot={spot} strike={strike} "
+                                    f"t={t} iv={iv} r={r} {option_type}: {now[greek]} != {expected}"
+                                )
+                            checked += 1
+
+    # And the parameter is not decorative: a real yield has to move delta.
+    flat = metrics._black_scholes_greeks(100.0, 100.0, 1.0, 0.30, 0.05, "call")
+    with_q = metrics._black_scholes_greeks(100.0, 100.0, 1.0, 0.30, 0.05, "call",
+                                           dividend_yield=0.03)
+    assert with_q["delta"] < flat["delta"] - 0.01, (with_q["delta"], flat["delta"])
+
+    # Put charm is no longer a copy of call charm once q != 0.
+    put_q = metrics._black_scholes_greeks(100.0, 100.0, 1.0, 0.30, 0.05, "put",
+                                          dividend_yield=0.03)
+    assert abs(put_q["charm"] - with_q["charm"]) > 1e-9, "charm must differ by side when q != 0"
+    print(f"dividend-yield reduction checks passed ({checked} contracts, exact equality)")
+
+
+def check_iv_average_survives_a_contract_without_iv():
+    """One contract with no implied volatility must not empty the whole day's
+    volume-weighted average.
+
+    `np.average` computes sum(a*w)/sum(w), and NaN*0 is still NaN — so a
+    zero-weighted row with a missing IV poisons the result. This was invisible
+    while the only data source filled IV on every contract; the hosted product
+    hit it the day a second provider arrived, because a real provider
+    legitimately reports no IV for part of a chain. The provider abstraction
+    added here is exactly what makes that possible in this repo too, so the
+    check comes with it rather than after it."""
+    rows = [
+        {"collected_at": datetime(2026, 8, 12, 20, 0), "implied_volatility": 0.30, "volume": 100},
+        {"collected_at": datetime(2026, 8, 12, 20, 0), "implied_volatility": 0.50, "volume": 300},
+        # Deep OTM, never traded, no IV quoted — the shape that broke it.
+        {"collected_at": datetime(2026, 8, 12, 20, 0), "implied_volatility": np.nan, "volume": 0},
+    ]
+    result = metrics.iv_weighted_average(pd.DataFrame(rows))
+    assert len(result) == 1, result
+    value = float(result.iloc[0]["iv_weighted_avg"])
+    assert abs(value - (0.30 * 100 + 0.50 * 300) / 400) < 1e-12, value
+
+    # A day with no usable IV at all returns NaN rather than raising.
+    only_nan = pd.DataFrame([
+        {"collected_at": datetime(2026, 8, 12, 20, 0), "implied_volatility": np.nan, "volume": 5},
+    ])
+    assert np.isnan(float(metrics.iv_weighted_average(only_nan).iloc[0]["iv_weighted_avg"]))
+    print("IV-average checks passed")
+
+
+def check_pricing_inputs():
+    """PricingInputs is the (r, q) pair every greek is computed with. The
+    default instance must reproduce the flat-rate model this project used
+    before it existed — that is what makes it safe to thread through every
+    signature without changing a number."""
+    default = metrics.DEFAULT_PRICING
+    from app import config
+    assert default.rate_for(0.5) == config.RISK_FREE_RATE
+    assert default.dividend_yield == 0.0
+    rates = default.rate_series(pd.Series([0.1, 1.0, 5.0]))
+    assert len(rates) == 3 and all(r == config.RISK_FREE_RATE for r in rates)
+
+    # With a curve, the rate depends on maturity — par yields in percent,
+    # converted to a continuously-compounded rate.
+    curve = {0.5: 4.0, 2.0: 4.4, 10.0: 4.8}
+    priced = metrics.PricingInputs(curve=curve, dividend_yield=0.02)
+    short, long_ = priced.rate_for(0.5), priced.rate_for(10.0)
+    assert 0.03 < short < long_ < 0.05, (short, long_)
+    assert abs(priced.rate_for(1.25) - (short + long_) / 2) < 0.01 or short < priced.rate_for(1.25) < long_
+    # Off the ends of the curve it clamps rather than extrapolating to nonsense.
+    assert priced.rate_for(0.01) == priced.rate_for(0.5)
+    assert priced.rate_for(40.0) == priced.rate_for(10.0)
+    assert "tenors=3" in repr(priced) and "q=0.0200" in repr(priced)
+
+    # risk_free_rate() on an empty curve has nothing to interpolate.
+    assert metrics.risk_free_rate({}, 1.0) is None
+    print("pricing-input checks passed")
+
+
+def check_unpriceable_contracts_are_skipped():
+    """A contract Black-Scholes cannot price must produce no greeks rather than
+    a plausible-looking number. Zero or negative time, zero IV, zero spot — and
+    an IV so extreme it is a data error, not a market."""
+    assert metrics._is_priceable(100.0, 100.0, 0.5, 0.3) is True
+    assert metrics._is_priceable(100.0, 100.0, 0.0, 0.3) is False, "expired"
+    assert metrics._is_priceable(100.0, 100.0, 0.5, 0.0) is False, "no IV"
+    assert metrics._is_priceable(0.0, 100.0, 0.5, 0.3) is False, "no spot"
+    # Missing values, not just zeroes: a chain routinely carries None/NaN IV on
+    # strikes that never traded, and `None > 0` raises rather than returning
+    # False, so the guard has to reject them before comparing.
+    assert metrics._is_priceable(100.0, 100.0, 0.5, None) is False
+    assert metrics._is_priceable(100.0, 100.0, np.nan, 0.3) is False
+
+    # A genuinely expired contract prices to zero greeks rather than raising on
+    # log(0) or sqrt of a negative. Zero and not NaN is deliberate: a contract
+    # past its close really does have no delta left. What made this look like a
+    # bug for months was the DATE arithmetic in front of it — measuring to
+    # midnight meant a contract still trading through the session arrived here
+    # with t <= 0 and every greek collapsed at midnight (see
+    # check_years_to_expiry, which is what guards that).
+    expired = metrics._black_scholes_greeks(100.0, 100.0, 0.0, 0.3, 0.05, "call")
+    assert set(expired) == set(metrics._GREEK_KEYS)
+    assert all(value == 0.0 for value in expired.values()), expired
+    print("unpriceable-contract checks passed")
+
+
+def check_contracts_backing_expiry():
+    """How many contracts with open interest stand behind an expiry's numbers.
+
+    Max Pain and GEX are both weighted by open interest, so an expiry where
+    almost nothing is open produces a confident-looking number resting on two
+    or three strikes — arithmetically correct and meaningless. This is the
+    count that lets the interface say which kind it is showing."""
+    collected = pd.Timestamp("2026-08-12 20:00:00")
+    expiry = pd.Timestamp("2026-09-18")
+    other = pd.Timestamp("2026-10-16")
+    df = pd.DataFrame([
+        {"collected_at": collected, "expiry": expiry, "strike": 100.0,
+         "option_type": "call", "open_interest": 500},
+        {"collected_at": collected, "expiry": expiry, "strike": 105.0,
+         "option_type": "put", "open_interest": 0},
+        # Newly listed, quoted but never traded — open_interest arrives null.
+        {"collected_at": collected, "expiry": expiry, "strike": 110.0,
+         "option_type": "call", "open_interest": None},
+        {"collected_at": collected, "expiry": other, "strike": 100.0,
+         "option_type": "call", "open_interest": 900},
+        # An older snapshot of the same expiry must not be counted alongside
+        # the latest one — the count describes one snapshot, not the history.
+        {"collected_at": pd.Timestamp("2026-08-11 20:00:00"), "expiry": expiry,
+         "strike": 115.0, "option_type": "call", "open_interest": 700},
+    ])
+    assert metrics.contracts_backing_expiry(df, expiry) == 1, "only the strike with OI counts"
+    assert metrics.contracts_backing_expiry(df, other) == 1
+    assert metrics.contracts_backing_expiry(df, pd.Timestamp("2027-01-15")) == 0, "unknown expiry"
+    print("expiry-backing checks passed")
+
+
+def check_provider_registry():
+    """get_provider() is the single place a name becomes a working object.
+
+    An unknown name has to raise. Falling back to the default would mean
+    someone configures a source, sees data appear, and never learns the numbers
+    came from somewhere else — the failure would surface weeks later as "these
+    figures look wrong" with nothing pointing at the cause.
+
+    Also checks that YahooProvider actually satisfies the Protocol. It is
+    runtime-checkable precisely so that "I wrote a provider, does it fit?" is a
+    one-line answer for anyone adding their own."""
+    from app import providers
+
+    assert providers.known_providers() == ("yahoo",), providers.known_providers()
+    assert providers.DEFAULT_PROVIDER in providers.known_providers()
+
+    default = providers.get_provider()
+    assert default.name == "yahoo" and default.requires_token is False
+    assert providers.get_provider("YAHOO").name == "yahoo", "the name is case-insensitive"
+    assert providers.get_provider("  yahoo  ").name == "yahoo", "and surrounded by whitespace"
+    assert isinstance(default, providers.DataProvider), (
+        "YahooProvider must satisfy the DataProvider protocol"
+    )
+
+    try:
+        providers.get_provider("definitely-not-a-provider")
+    except ValueError as exc:
+        assert "definitely-not-a-provider" in str(exc), exc
+        assert "yahoo" in str(exc), "the error should say what IS available"
+    else:
+        raise AssertionError("an unknown provider name must raise, not fall back")
+
+    # Every column the reader expects, in the order db.insert_snapshot writes.
+    assert providers.CHAIN_COLUMNS[:3] == ["expiry", "strike", "option_type"]
+    for greek in ("delta", "gamma", "theta", "vega"):
+        assert greek in providers.CHAIN_COLUMNS, f"{greek} missing from the provider contract"
+    print("provider registry checks passed")
+
+
 def main():
     check_years_to_expiry()
     check_greeks_respond_to_time()
@@ -298,6 +574,13 @@ def main():
     check_collector_isolation()
     check_watchlist_and_snapshot_dates()
     check_screener_expiry_awareness()
+    check_provider_registry()
+    check_metrics_core_is_pristine()
+    check_dividend_yield_defaults_to_the_old_model()
+    check_iv_average_survives_a_contract_without_iv()
+    check_pricing_inputs()
+    check_unpriceable_contracts_are_skipped()
+    check_contracts_backing_expiry()
     print("\nALL UNIT CHECKS PASSED")
 
 
