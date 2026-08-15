@@ -51,6 +51,7 @@ from app.metrics_core import (
     risk_free_rate,
     screener_table,
     unusual_activity,
+    volume_stats,
     years_to_expiry,
     years_to_expiry_series,
 )
@@ -95,6 +96,7 @@ __all__ = [
     "risk_free_rate",
     "screener_table",
     "unusual_activity",
+    "volume_stats",
     "years_to_expiry",
     "years_to_expiry_series",
 ]

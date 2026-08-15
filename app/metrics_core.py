@@ -657,11 +657,41 @@ def gamma_flip_price(
     return float(x0 + (0 - y0) * (x1 - x0) / (y1 - y0))
 
 
+_CONTRACT_KEYS = ["expiry", "strike", "option_type"]
+
+
+def volume_stats(history: pd.DataFrame) -> pd.DataFrame:
+    """Per-contract volume mean, sample deviation and point count over daily
+    history — the only part of `unusual_activity` whose cost grows with how
+    long the installation has been collecting.
+
+    Split out so that a caller who can compute the same three numbers more
+    cheaply may hand them in (see `unusual_activity(stats=...)`), while the
+    rules that decide what counts as unusual stay here, in one place, for both
+    products. Aggregates are cheap to reimplement and easy to verify against
+    each other; product rules are neither.
+
+    Counting rules that any other implementation has to match: a contract with
+    no volume recorded for a day does not contribute a point (the count is over
+    non-null volumes, not over days), and the deviation is the SAMPLE one — one
+    observation therefore yields NaN rather than 0, which is what stops a
+    single-point history from producing an infinite z-score."""
+    daily = _last_snapshot_per_day(history)
+    if daily.empty:
+        return pd.DataFrame(columns=[*_CONTRACT_KEYS, "avg_volume", "std_volume", "history_points"])
+    return (
+        daily.groupby(_CONTRACT_KEYS)["volume"]
+        .agg(avg_volume="mean", std_volume="std", history_points="count")
+        .reset_index()
+    )
+
+
 def unusual_activity(
     df: pd.DataFrame,
     z_threshold: float = config.UNUSUAL_Z_THRESHOLD,
     min_volume: int = config.UNUSUAL_MIN_VOLUME,
     min_history_points: int = config.UNUSUAL_MIN_HISTORY_POINTS,
+    stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Contracts in the latest snapshot with anomalous volume (spec FR16). The
     flag is a volume z-score above `z_threshold` relative to the contract's
@@ -676,11 +706,15 @@ def unusual_activity(
     the mean/variance by mixing different moments within the trading day."""
     latest_date = df["collected_at"].max()
     latest = df[df["collected_at"] == latest_date].copy()
-    history = _last_snapshot_per_day(df[df["collected_at"] < latest_date])
 
-    contract_keys = ["expiry", "strike", "option_type"]
-    stats = history.groupby(contract_keys)["volume"].agg(avg_volume="mean", std_volume="std", history_points="count")
-    latest = latest.merge(stats, on=contract_keys, how="left")
+    # `stats` supplied means the caller aggregated the history itself — the
+    # hosted product does it in SQL, because in pandas it needs every daily
+    # snapshot of the window loaded first. `df` then only has to carry the
+    # latest snapshot. Everything below is unchanged either way, which is the
+    # point: what is unusual is decided here for both products.
+    if stats is None:
+        stats = volume_stats(df[df["collected_at"] < latest_date])
+    latest = latest.merge(stats, on=_CONTRACT_KEYS, how="left")
     latest["history_points"] = latest["history_points"].fillna(0)
 
     latest["volume_zscore"] = (latest["volume"] - latest["avg_volume"]) / latest["std_volume"].replace(0, np.nan)
