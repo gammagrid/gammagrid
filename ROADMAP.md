@@ -9,7 +9,7 @@ page is about direction.
 
 ## Shipped so far
 
-Through v0.4.1. The list below is what the tool does today, not a history —
+Through v0.4.2. The list below is what the tool does today, not a history —
 the changelog has the history.
 
 - Multi-ticker watchlist, collected on demand or on a schedule you choose

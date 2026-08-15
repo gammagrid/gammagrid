@@ -39,7 +39,7 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
-## v0.4.1 → v0.5.0
+## v0.4.1 → v0.4.2
 
 **Risk: safe.** Start the new version. Nothing is rewritten and nothing is
 deleted.
