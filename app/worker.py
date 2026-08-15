@@ -68,6 +68,23 @@ def archive_if_due(conn) -> int:
     return moved
 
 
+def rebuild_stale_volume_stats(conn) -> None:
+    """Recompute the Unusual Activity baseline for any ticker whose stored one
+    no longer covers the closed days.
+
+    Here rather than on a page view because it is an aggregate over one
+    snapshot per day per contract — work that belongs off the path where
+    somebody is waiting. Asked per ticker and skipped when already current, so
+    a machine that was off when the day rolled over catches up on its next pass
+    instead of waiting for a scheduler nobody watches.
+    """
+    for ticker in db.get_watchlist(conn):
+        if db.volume_stats_are_current(conn, ticker):
+            continue
+        written = db.rebuild_volume_stats(conn, ticker)
+        log.info("Rebuilt volume statistics for %s: %s contract(s).", ticker, written)
+
+
 def run_forever() -> None:
     log.info("Collector worker started. Interval is read from the app on every cycle.")
     while True:
@@ -81,6 +98,7 @@ def run_forever() -> None:
                 continue
             archive_if_due(conn)
             collected = collect_once(conn)
+            rebuild_stale_volume_stats(conn)
             log.info("Collected %s ticker(s); next pass in %s minute(s).", collected, interval)
         except Exception:
             # A failed pass must not end the worker: the usual causes are a

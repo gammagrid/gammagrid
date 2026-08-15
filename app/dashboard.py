@@ -443,14 +443,25 @@ load_full_history = st.checkbox(
     help="Slower on tickers with a long collection history.",
 )
 history_days = None if load_full_history else config.SNAPSHOT_HISTORY_DAYS
-df = db.get_snapshots(conn, selected_ticker, days=history_days)
 
-if df.empty:
+# NO VIEW READS THE WHOLE TICKER. What used to be here was one frame of every
+# row this ticker has, loaded on every interaction and filtered in pandas by
+# whichever view was showing — which is fine while collection is a button and
+# stops being fine the moment it runs on a schedule. Measured on the hosted
+# product, which reached that point first: 3.1M rows, 22 seconds and 0.8 GB of
+# memory for one liquid ticker, to draw charts a few hundred points wide.
+#
+# Each view now asks for what it shows: one snapshot, two calendar days, one
+# contract, or a stored rollup. `db.get_snapshots` remains for tooling; if it
+# reappears in a view, this is what regressed.
+latest_df = db.get_latest_snapshot(conn, selected_ticker)
+
+if latest_df.empty:
     st.info(f"No data for {selected_ticker}. Click “Collect data” on the left.")
     st.stop()
 
-latest_date = df["collected_at"].max()
-expiries = sorted(df["expiry"].unique())
+latest_date = latest_df["collected_at"].max()
+expiries = sorted(latest_df["expiry"].unique())
 
 components.html(render_tradingview_widget(selected_ticker, height=450), height=450)
 
@@ -509,7 +520,7 @@ if active_view == "Overview":
         )
 
     st.subheader("Volatility surface (IV surface)")
-    iv_surface_points = metrics.iv_surface(df)
+    iv_surface_points = metrics.iv_surface(latest_df)
     iv_grid = metrics.iv_surface_grid(iv_surface_points)
     if iv_grid is None:
         st.info(
@@ -625,7 +636,7 @@ if active_view == "Max Pain / GEX":
     years_left = metrics.years_to_expiry(selected_expiry, latest_date)
 
     st.subheader("Max Pain")
-    mp = metrics.max_pain(df, selected_expiry)
+    mp = metrics.max_pain(latest_df, selected_expiry)
     st.metric("Max Pain strike", mp if mp is not None else "n/a")
     with st.expander("ℹ️ How to read this"):
         st.write(
@@ -637,7 +648,7 @@ if active_view == "Max Pain / GEX":
         )
 
     st.subheader("Approximate Gamma Exposure (GEX)")
-    gex = metrics.gamma_exposure_profile(df, selected_expiry)
+    gex = metrics.gamma_exposure_profile(latest_df, selected_expiry)
     if years_left <= 0:
         # Say why, instead of drawing a flat line at zero. Gamma is undefined
         # once there is no time left, so this is a property of the contract,
@@ -691,7 +702,13 @@ if active_view == "Max Pain / GEX":
 if active_view == "GEX Heatmap":
     st.subheader("GEX Heatmap: strike × expiry")
 
-    snapshot_dates = sorted(df["collected_at"].unique(), reverse=True)
+    # From the run log rather than DISTINCT over the snapshots: the collector
+    # writes one timestamp per pass into both, and the log has one row per pass
+    # against one row per contract per pass.
+    snapshot_dates = [
+        pd.Timestamp(moment)
+        for moment in db.get_collection_moments(conn, selected_ticker, days=history_days)
+    ] or [pd.Timestamp(latest_date)]
     as_of = st.selectbox(
         "Snapshot (Replay — collection history, no auto-refresh)",
         snapshot_dates,
@@ -701,16 +718,28 @@ if active_view == "GEX Heatmap":
     is_latest = as_of == snapshot_dates[0]
     st.caption("Latest snapshot (current state)" if is_latest else "Historical snapshot — Replay mode")
 
+    # The chosen moment's chain, fetched by equality on collected_at. Everything
+    # this view draws — the matrix, the walls, the flip, per-expiry net GEX — is
+    # a function of one moment, and every metric below already takes `as_of`.
+    snapshot_df = db.get_snapshots_at(conn, selected_ticker, [as_of])
+    if snapshot_df.empty:
+        # The run log is a superset of the data: a pass can be recorded as a
+        # success and still have left nothing for this ticker. Before the list
+        # came from the log, `as_of` came from the rows themselves and could
+        # not miss.
+        st.info("That collection is in the log but stored no rows — pick another moment.")
+        st.stop()
+
     # Expiries with no time left are dropped rather than shown as a column of
     # exact zeros: gamma is undefined there, and unlike the GEX tab a heatmap
     # has nowhere to explain why one column is blank. Deliberately NOT st.stop()
     # when none are left — this runs inside `with tab_heatmap:`, and st.stop()
     # ends the entire script run, taking every tab below it with it.
     all_expiries_at_snapshot = [
-        e for e in sorted(df[df["collected_at"] == as_of]["expiry"].unique())
+        e for e in sorted(snapshot_df["expiry"].unique())
         if metrics.years_to_expiry(e, as_of) > 0
     ]
-    spot_at_snapshot = df.loc[df["collected_at"] == as_of, "underlying_price"].iloc[0]
+    spot_at_snapshot = snapshot_df["underlying_price"].iloc[0]
 
     if not all_expiries_at_snapshot:
         st.info(
@@ -744,7 +773,7 @@ if active_view == "GEX Heatmap":
             "Strike range around underlying price, %", 5, 50, 15, key="heatmap_strike_band"
         )
         shown_expiries = all_expiries_at_snapshot[:n_expiries]
-        matrix_full = metrics.gex_matrix(df, as_of=as_of, expiries=shown_expiries)
+        matrix_full = metrics.gex_matrix(snapshot_df, as_of=as_of, expiries=shown_expiries)
 
     if matrix_full.empty:
         st.info("No data to build the heatmap for the selected snapshot.")
@@ -753,9 +782,9 @@ if active_view == "GEX Heatmap":
         lower, upper = spot_at_snapshot * (1 - band), spot_at_snapshot * (1 + band)
         matrix_band = matrix_full[(matrix_full.index >= lower) & (matrix_full.index <= upper)]
 
-        walls = metrics.dealer_walls(df, as_of=as_of, expiries=shown_expiries)
-        flip = metrics.gamma_flip_price(df, as_of=as_of, expiries=shown_expiries)
-        net_by_expiry = metrics.net_gex_by_expiry(df, as_of=as_of, expiries=shown_expiries)
+        walls = metrics.dealer_walls(snapshot_df, as_of=as_of, expiries=shown_expiries)
+        flip = metrics.gamma_flip_price(snapshot_df, as_of=as_of, expiries=shown_expiries)
+        net_by_expiry = metrics.net_gex_by_expiry(snapshot_df, as_of=as_of, expiries=shown_expiries)
         total_net_gex = net_by_expiry["net_gex"].sum()
 
         col_price, col_call, col_put, col_flip, col_zone = st.columns(5)
@@ -864,7 +893,11 @@ if active_view == "GEX Heatmap":
 
 if active_view == "Volatility (IV)":
     st.subheader("IV: volume-weighted average for the ticker")
-    iv_avg = metrics.iv_weighted_average(df)
+    # From the rollup written at collection time, not aggregated on read: the
+    # answer is one row per collection and the input was one row per contract
+    # per collection. It also stops the chart changing under you as contracts
+    # expire and move to the archive.
+    iv_avg = db.get_iv_weighted_average(conn, selected_ticker, days=history_days)
     st.line_chart(iv_avg.set_index("collected_at")["iv_weighted_avg"], color=BRAND_PURPLE)
     with st.expander("ℹ️ How to read this"):
         st.write(
@@ -878,7 +911,7 @@ if active_view == "Volatility (IV)":
     selected_expiry_iv = st.selectbox(
         "Expiry", expiries, format_func=format_date, key=f"expiry_iv_skew_{selected_ticker}"
     )
-    skew_snapshot = df[(df["collected_at"] == latest_date) & (df["expiry"] == selected_expiry_iv)]
+    skew_snapshot = latest_df[latest_df["expiry"] == selected_expiry_iv]
     skew_pivot = skew_snapshot.pivot_table(
         index="strike", columns="option_type", values="implied_volatility"
     )
@@ -933,7 +966,7 @@ if active_view == "Contract":
     opt_expiry = col1.selectbox(
         "Expiry", expiries, format_func=format_date, key=f"opt_expiry_{selected_ticker}"
     )
-    opt_strikes = sorted(df[df["expiry"] == opt_expiry]["strike"].unique())
+    opt_strikes = sorted(latest_df[latest_df["expiry"] == opt_expiry]["strike"].unique())
     # A stored widget value that is no longer among the options makes Streamlit
     # raise, and the option lists here narrow as you go: strikes depend on the
     # expiry, and the sides quoted depend on the strike. Drop the stale value
@@ -945,12 +978,18 @@ if active_view == "Contract":
     # OTM strikes are routinely listed on one side only — and the app then said
     # "No history for the selected contract", which is true and useless.
     available_types = sorted(
-        df[(df["expiry"] == opt_expiry) & (df["strike"] == opt_strike)]["option_type"].unique()
+        latest_df[(latest_df["expiry"] == opt_expiry) & (latest_df["strike"] == opt_strike)]["option_type"].unique()
     ) or ["call", "put"]
     _drop_stale_choice(f"opt_type_{selected_ticker}", available_types)
     opt_type = col3.selectbox("Type", available_types, key=f"opt_type_{selected_ticker}")
 
-    render_option_detail(conn, df, selected_ticker, get_tracked(), opt_expiry, opt_strike, opt_type, key_prefix="opt")
+    contract_df = db.get_contract_history(
+        conn, selected_ticker, opt_expiry, opt_strike, opt_type, days=history_days
+    )
+    render_option_detail(
+        conn, contract_df, selected_ticker, get_tracked(), opt_expiry, opt_strike, opt_type,
+        key_prefix="opt",
+    )
 
 if active_view == "Screener":
     st.subheader(f"Options screener: {selected_ticker}")
@@ -959,7 +998,7 @@ if active_view == "Screener":
         "greeks and DTE. Clicking a row opens the same charts as the Contract tab."
     )
 
-    screener = metrics.screener_table(df)
+    screener = metrics.screener_table(latest_df)
     # The greeks and DTE are correct AS OF THE SNAPSHOT — that is the only
     # honest way to price them. But collection here is a manual button, so the
     # latest snapshot can be days or weeks old, and contracts that were live
@@ -1109,7 +1148,12 @@ if active_view == "Screener":
                     f"strike {picked['strike']:g} {picked['option_type']}"
                 )
                 render_option_detail(
-                    conn, df, selected_ticker, get_tracked(),
+                    conn,
+                    db.get_contract_history(
+                        conn, selected_ticker, picked["expiry"], picked["strike"],
+                        picked["option_type"], days=history_days,
+                    ),
+                    selected_ticker, get_tracked(),
                     picked["expiry"], picked["strike"], picked["option_type"],
                     key_prefix="screener",
                 )
@@ -1128,7 +1172,12 @@ if active_view == "Screener":
 
 if active_view == "Unusual Activity":
     st.subheader("Unusual Activity (latest snapshot)")
-    flagged = metrics.unusual_activity(df)
+    # Only the latest snapshot is loaded; the baseline comes from the table the
+    # worker rebuilds once a day. The rules that decide what is unusual stay in
+    # metrics — only the aggregation moved.
+    flagged = metrics.unusual_activity(
+        latest_df, stats=db.get_volume_stats(conn, selected_ticker)
+    )
     st.caption(f"Contracts found: {len(flagged)}")
     st.dataframe(flagged, use_container_width=True)
     with st.expander("ℹ️ How to read this"):
@@ -1149,7 +1198,14 @@ if active_view == "Unusual Activity":
 
 if active_view == "OI Delta":
     st.subheader("Open Interest change (latest day vs. previous)")
-    delta = metrics.oi_delta(df)
+    # Two calendar days is the entire input to a day-over-day difference, and
+    # the days are named by the run log before any snapshot row is read.
+    delta = metrics.oi_delta(
+        db.get_snapshots_at(
+            conn, selected_ticker,
+            db.get_collection_moments(conn, selected_ticker, days=history_days, per_day=True)[:2],
+        )
+    )
     if delta.empty:
         st.info("Data from at least two distinct calendar days is needed to compute the OI change.")
     else:

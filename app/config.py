@@ -128,6 +128,14 @@ PROVIDER_MIN_INTERVAL_MINUTES = 15
 # db.estimated_growth_mb_per_month.
 BYTES_PER_SNAPSHOT_ROW = 214
 
+# How far back the z-score's baseline reaches, in calendar days. A cap rather
+# than a preference: the statistics are built from one snapshot per day per
+# contract, so the work grows with the window forever while the answer does
+# not. Sixty days is also the more defensible baseline — "unusual for this
+# contract" measured against volume from ten months ago says more about how the
+# underlying traded last autumn than about today.
+UNUSUAL_HISTORY_DAYS = 60
+
 # Contracts expired longer ago than this move to option_snapshots_archive.
 # Nothing is deleted; the point is only to keep the table every live query
 # reads from carrying years of contracts that can never trade again.

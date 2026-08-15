@@ -3,6 +3,7 @@ a connection directly."""
 
 from __future__ import annotations
 
+import datetime as dt
 import warnings
 from datetime import datetime
 
@@ -59,6 +60,25 @@ def get_watchlist(conn: psycopg.Connection) -> list[str]:
     rows = conn.execute("SELECT ticker FROM watchlist ORDER BY ticker").fetchall()
     return [r[0] for r in rows]
 
+
+# The one SQL definition of the volume-weighted average IV, used by the rollup
+# written on every collection. metrics.iv_weighted_average remains the
+# definition of the number; tests assert the two agree, which is the only form
+# that guarantee can take once one of them runs in the database.
+#
+# `expiry >= collected_at::date` excludes contracts whose expiry has passed:
+# they have no volatility left, a source reporting one is reporting a sentinel,
+# and they still carry the whole session's volume. Inclusive and by date — a
+# zero-day contract during its own session is real trading.
+_IV_WEIGHTED_AVG_SQL = """
+    CASE WHEN SUM(CASE WHEN implied_volatility IS NOT NULL AND expiry >= collected_at::date
+                       THEN COALESCE(volume, 0) ELSE 0 END) > 0
+         THEN SUM(CASE WHEN implied_volatility IS NOT NULL AND expiry >= collected_at::date
+                       THEN implied_volatility * COALESCE(volume, 0) ELSE 0 END)
+              / SUM(CASE WHEN implied_volatility IS NOT NULL AND expiry >= collected_at::date
+                         THEN COALESCE(volume, 0) ELSE 0 END)
+    END
+"""
 
 # --- snapshots ---
 
@@ -146,6 +166,20 @@ def insert_snapshot(
             delta, gamma, theta, vega, source)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             rows,
+        )
+        # The moment's weighted-average IV, computed here and read back from
+        # the rows just written rather than recomputed from chain_df in Python:
+        # the number then has one definition instead of two that must be kept
+        # in step. Reading option_snapshots alone is correct at collection time
+        # and would not be in a rebuild — nothing has been archived yet.
+        cur.execute(
+            f"""INSERT INTO snapshot_iv_summary (ticker, source, collected_at, iv_weighted_avg)
+                SELECT %(ticker)s, %(source)s, %(at)s, {_IV_WEIGHTED_AVG_SQL}
+                FROM option_snapshots
+                WHERE ticker = %(ticker)s AND source = %(source)s AND collected_at = %(at)s
+                ON CONFLICT (ticker, source, collected_at)
+                DO UPDATE SET iv_weighted_avg = EXCLUDED.iv_weighted_avg""",  # noqa: S608
+            {"ticker": ticker, "source": source, "at": collected_at},
         )
 
 
@@ -405,3 +439,229 @@ def archive_expired_contracts(
             (grace_days,),
         )
     return moved
+
+
+# --- narrow reads: each view asks for what it shows ---
+
+
+
+def get_latest_snapshot(conn: psycopg.Connection, ticker: str) -> pd.DataFrame:
+    """The most recent collection's chain, and nothing else.
+
+    Most views show a moment rather than a history — the screener, max pain,
+    the GEX profile, the expiry and strike selectors — and used to get it by
+    filtering the whole ticker's history in pandas after loading it.
+    """
+    started_at = _latest_moment(conn, ticker)
+    if started_at is None:
+        return get_snapshots_at(conn, ticker, [])
+    return get_snapshots_at(conn, ticker, [started_at])
+
+
+def _latest_moment(conn: psycopg.Connection, ticker: str):
+    row = conn.execute(
+        """SELECT max(collected_at) FROM (
+               SELECT max(collected_at) AS collected_at FROM option_snapshots WHERE ticker = %s
+               UNION ALL
+               SELECT max(collected_at) FROM option_snapshots_archive WHERE ticker = %s
+           ) both_tables""",
+        (ticker.upper(), ticker.upper()),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def get_collection_moments(
+    conn: psycopg.Connection,
+    ticker: str,
+    days: int | None = config.SNAPSHOT_HISTORY_DAYS,
+    per_day: bool = False,
+) -> list:
+    """The moments this ticker was collected at, newest first — from the run
+    log, not from the snapshots.
+
+    The two hold the same instant, not merely close ones: the collector takes
+    one timestamp per pass and writes it both as the run's `started_at` and as
+    every row's `collected_at`.
+
+    Why not `SELECT DISTINCT collected_at` on the snapshots, which is what this
+    replaces: Postgres has no loose index scan, so that query reads one index
+    entry per row and its cost grows with collection time rather than with the
+    size of the answer — measured on the hosted product at 946 ms to read 3.26M
+    index entries and return 247 values.
+
+    `per_day=True` returns the last collection of each calendar day, which is
+    what every metric built on daily history actually uses.
+    """
+    params: list = [ticker.upper()]
+    date_filter = ""
+    if days is not None:
+        date_filter = "AND started_at >= now() - make_interval(days => %s)"
+        params.append(days)
+    if per_day:
+        statement = f"""
+            SELECT DISTINCT ON (started_at::date) started_at
+            FROM collection_runs
+            WHERE ticker = %s AND status = 'success' AND COALESCE(rows_fetched, 0) > 0 {date_filter}
+            ORDER BY started_at::date DESC, started_at DESC
+        """
+    else:
+        statement = f"""
+            SELECT started_at FROM collection_runs
+            WHERE ticker = %s AND status = 'success' AND COALESCE(rows_fetched, 0) > 0 {date_filter}
+            ORDER BY started_at DESC
+        """
+    return [row[0] for row in conn.execute(statement, params).fetchall()]  # noqa: S608
+
+
+def get_snapshots_at(conn: psycopg.Connection, ticker: str, moments: list) -> pd.DataFrame:
+    """Chain rows for a named set of collection moments, both tables.
+
+    No early return on an empty list: the query then yields zero rows but with
+    the table's columns, while an empty frame has no columns at all and every
+    caller dies indexing `collected_at`. A ticker with nothing collected yet is
+    not an error.
+    """
+    return pd.read_sql_query(
+        """SELECT * FROM option_snapshots
+           WHERE ticker = %(ticker)s AND collected_at = ANY(%(moments)s::timestamp[])
+           UNION ALL
+           SELECT * FROM option_snapshots_archive
+           WHERE ticker = %(ticker)s AND collected_at = ANY(%(moments)s::timestamp[])
+           ORDER BY collected_at""",
+        conn,
+        params={"ticker": ticker.upper(), "moments": list(moments)},
+        parse_dates=["collected_at", "expiry"],
+    )
+
+
+def get_contract_history(
+    conn: psycopg.Connection,
+    ticker: str,
+    expiry,
+    strike: float,
+    option_type: str,
+    days: int | None = config.SNAPSHOT_HISTORY_DAYS,
+) -> pd.DataFrame:
+    """One contract across every collection, filtered in SQL.
+
+    One row per collection for one contract stays small no matter how liquid
+    the ticker's full chain is — the Contract view used to reach it by loading
+    the whole chain's history and filtering in pandas.
+    """
+    where = "ticker = %(ticker)s AND expiry = %(expiry)s AND strike = %(strike)s AND option_type = %(option_type)s"
+    params = {
+        "ticker": ticker.upper(),
+        "expiry": pd.Timestamp(expiry).strftime("%Y-%m-%d"),
+        "strike": float(strike),
+        "option_type": option_type,
+    }
+    date_filter = ""
+    if days is not None:
+        date_filter = "AND collected_at >= now() - make_interval(days => %(days)s)"
+        params["days"] = days
+    return pd.read_sql_query(
+        f"""SELECT * FROM option_snapshots WHERE {where} {date_filter}
+            UNION ALL
+            SELECT * FROM option_snapshots_archive WHERE {where} {date_filter}
+            ORDER BY collected_at""",  # noqa: S608 — filters are fixed strings
+        conn,
+        params=params,
+        parse_dates=["collected_at", "expiry"],
+    )
+
+
+def get_iv_weighted_average(
+    conn: psycopg.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
+) -> pd.DataFrame:
+    """Volume-weighted average IV per collection, read from the rollup."""
+    params: list = [ticker.upper()]
+    date_filter = ""
+    if days is not None:
+        date_filter = "AND collected_at >= now() - make_interval(days => %s)"
+        params.append(days)
+    return pd.read_sql_query(
+        f"""SELECT collected_at, iv_weighted_avg FROM snapshot_iv_summary
+            WHERE ticker = %s {date_filter}
+            ORDER BY collected_at""",  # noqa: S608 — filter is a fixed string
+        conn,
+        params=params,
+        parse_dates=["collected_at"],
+    )
+
+
+def rebuild_volume_stats(
+    conn: psycopg.Connection, ticker: str, days: int = config.UNUSUAL_HISTORY_DAYS
+) -> int:
+    """Recompute the per-contract volume baseline for one ticker and store it.
+
+    WHOLE CALENDAR DAYS ONLY, and strictly before today: volume accumulates
+    within a session, so today's partial figure is not comparable with
+    completed days — and the metric asks for a baseline that excludes the day
+    being judged anyway. metrics.unusual_activity applies the same rule when it
+    aggregates for itself.
+    """
+    moments = [m for m in get_collection_moments(conn, ticker, days=days, per_day=True)
+               if m.date() < dt.date.today()]
+    if not moments:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO contract_volume_stats
+                   (ticker, source, expiry, strike, option_type,
+                    avg_volume, std_volume, history_points, through_day, computed_at)
+               SELECT %(ticker)s, source, expiry, strike, option_type,
+                      avg(volume)::double precision,
+                      stddev(volume)::double precision,
+                      count(volume),
+                      max(collected_at)::date,
+                      now()
+               FROM (
+                   SELECT source, collected_at, expiry, strike, option_type, volume
+                   FROM option_snapshots
+                   WHERE ticker = %(ticker)s AND collected_at = ANY(%(moments)s::timestamp[])
+                   UNION ALL
+                   SELECT source, collected_at, expiry, strike, option_type, volume
+                   FROM option_snapshots_archive
+                   WHERE ticker = %(ticker)s AND collected_at = ANY(%(moments)s::timestamp[])
+               ) all_rows
+               GROUP BY source, expiry, strike, option_type
+               ON CONFLICT (ticker, source, expiry, strike, option_type) DO UPDATE
+               SET avg_volume = EXCLUDED.avg_volume,
+                   std_volume = EXCLUDED.std_volume,
+                   history_points = EXCLUDED.history_points,
+                   through_day = EXCLUDED.through_day,
+                   computed_at = EXCLUDED.computed_at""",
+            {"ticker": ticker.upper(), "moments": moments},
+        )
+        return cur.rowcount
+
+
+def volume_stats_are_current(conn: psycopg.Connection, ticker: str) -> bool:
+    """Whether the stored baseline already covers every closed day.
+
+    Cheap enough to ask on every collection pass, which is what makes the
+    rebuild self-healing: a machine that was off when the day rolled over
+    catches up on its next pass rather than waiting for a scheduler nobody
+    watches.
+    """
+    row = conn.execute(
+        "SELECT max(through_day) FROM contract_volume_stats WHERE ticker = %s", (ticker.upper(),)
+    ).fetchone()
+    return bool(row and row[0] and row[0] >= dt.date.today() - dt.timedelta(days=1))
+
+
+def get_volume_stats(conn: psycopg.Connection, ticker: str) -> pd.DataFrame:
+    """The stored per-contract baseline — a lookup, not an aggregate.
+
+    Empty for a ticker with no completed day yet, and that is the right answer
+    rather than a missing one: metrics.unusual_activity treats a contract with
+    no history as having none and falls back to its crude rule, which is what
+    "we have not watched this long enough" means.
+    """
+    return pd.read_sql_query(
+        """SELECT expiry, strike, option_type, avg_volume, std_volume, history_points
+           FROM contract_volume_stats WHERE ticker = %(ticker)s""",
+        conn,
+        params={"ticker": ticker.upper()},
+        parse_dates=["expiry"],
+    )

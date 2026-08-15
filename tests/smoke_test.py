@@ -184,6 +184,126 @@ def check_missing_numbers_survive_a_write(conn):
         cur.execute("DELETE FROM option_snapshots WHERE ticker = %s", (ticker,))
     print("Missing-number checks passed (a chain with untraded contracts stores)\n")
 
+
+def check_narrow_reads_and_rollups(conn):
+    """Every view asks for what it shows, and the two stored numbers agree with
+    the functions that define them.
+
+    This is the port of work done on the hosted product, where loading a
+    ticker's whole history on every interaction reached 3.1M rows, 22 seconds
+    and 0.8 GB of memory. Manual collection hid the problem here; a scheduler
+    removes that cover, which is why it is worth checking rather than trusting.
+
+    The equality checks are the part that matters over time. Moving an
+    aggregate into SQL is only worth anything if the numbers are identical, and
+    "identical" is exactly the sort of claim that rots quietly — so
+    metrics.iv_weighted_average and metrics.volume_stats stay the definitions
+    and the stored values are asserted against them.
+    """
+    ticker = "NARROWTEST"
+    with conn.cursor() as cur:
+        for table in ("option_snapshots", "option_snapshots_archive", "snapshot_iv_summary",
+                      "contract_volume_stats", "collection_runs"):
+            cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
+
+    expiry = (datetime.utcnow().date() + timedelta(days=30)).isoformat()
+    midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def chain(volume_a, volume_b):
+        return pd.DataFrame([
+            {"expiry": expiry, "strike": 100.0, "option_type": "call", "last_price": 1.0,
+             "bid": 0.9, "ask": 1.1, "volume": volume_a, "open_interest": 100,
+             "implied_volatility": 0.20, "in_the_money": False},
+            {"expiry": expiry, "strike": 105.0, "option_type": "put", "last_price": 2.0,
+             "bid": 1.9, "ask": 2.1, "volume": volume_b, "open_interest": 200,
+             "implied_volatility": 0.60, "in_the_money": False},
+        ])
+
+    # Three closed days, the middle one collected twice so that "one snapshot
+    # per day" has something to choose between, plus today.
+    plan = [
+        (midnight - timedelta(days=3, hours=-16), chain(10, 90)),
+        (midnight - timedelta(days=2, hours=-10), chain(999, 999)),   # superseded
+        (midnight - timedelta(days=2, hours=-16), chain(20, 80)),
+        (midnight - timedelta(days=1, hours=-16), chain(30, 70)),
+        (midnight + timedelta(hours=1), chain(400, 40)),
+    ]
+    for moment, rows in plan:
+        db.insert_snapshot(conn, ticker, moment, 100.0, rows)
+        db.log_run(conn, moment, moment, ticker, "success", rows_fetched=len(rows))
+
+    moments = db.get_collection_moments(conn, ticker, days=None)
+    assert len(moments) == 5, moments
+    assert moments == sorted(moments, reverse=True), "newest first, as the Replay list expects"
+
+    per_day = db.get_collection_moments(conn, ticker, days=None, per_day=True)
+    assert len(per_day) == 4, per_day
+    assert per_day[1] == plan[3][0], "a day collected twice must be represented by its later pass"
+
+    latest = db.get_latest_snapshot(conn, ticker)
+    assert len(latest) == 2 and latest["collected_at"].nunique() == 1, latest
+    assert latest["collected_at"].iloc[0] == plan[-1][0]
+
+    at_two = db.get_snapshots_at(conn, ticker, per_day[:2])
+    assert len(at_two) == 4, "two moments, two contracts each"
+    # An empty request is not an error — it is a ticker in its first minutes —
+    # and it must still come back with columns, or every caller dies indexing.
+    empty = db.get_snapshots_at(conn, ticker, [])
+    assert empty.empty and "collected_at" in empty.columns
+
+    one = db.get_contract_history(conn, ticker, expiry, 100.0, "call", days=None)
+    assert len(one) == 5, "one contract, every collection"
+    assert set(one["strike"]) == {100.0} and set(one["option_type"]) == {"call"}
+
+    # The IV rollup is written with the chain; it must equal the function that
+    # defines the number, computed over the same rows.
+    stored_iv = db.get_iv_weighted_average(conn, ticker, days=None)
+    everything = db.get_snapshots(conn, ticker, days=None)
+    expected_iv = metrics.iv_weighted_average(everything)
+    merged = expected_iv.merge(stored_iv, on="collected_at", suffixes=("_metrics", "_stored"))
+    assert len(merged) == len(expected_iv) == 5, (len(merged), len(expected_iv))
+    assert np.allclose(
+        merged["iv_weighted_avg_metrics"].to_numpy(dtype=float),
+        merged["iv_weighted_avg_stored"].to_numpy(dtype=float),
+        rtol=1e-12, equal_nan=True,
+    ), merged.to_dict()
+    # Pin the arithmetic itself, so both being wrong the same way still fails:
+    # 0.20*400 + 0.60*40 over 440.
+    latest_iv = float(stored_iv.iloc[-1]["iv_weighted_avg"])
+    assert abs(latest_iv - (0.20 * 400 + 0.60 * 40) / 440) < 1e-12, latest_iv
+
+    # The volume baseline: closed days only, and equal to the shared function
+    # fed the same rows.
+    assert not db.volume_stats_are_current(conn, ticker), "nothing computed yet"
+    db.rebuild_volume_stats(conn, ticker, days=None)
+    assert db.volume_stats_are_current(conn, ticker), "a rebuild must satisfy the worker"
+
+    stored_stats = db.get_volume_stats(conn, ticker)
+    closed_days = everything[
+        everything["collected_at"].dt.normalize() < pd.Timestamp(plan[-1][0]).normalize()
+    ]
+    expected_stats = metrics.volume_stats(closed_days)
+    keys = ["expiry", "strike", "option_type"]
+    joined = expected_stats.merge(stored_stats, on=keys, suffixes=("_metrics", "_stored"))
+    assert len(joined) == len(expected_stats) == 2, (len(joined), len(expected_stats))
+    for column in ("avg_volume", "std_volume", "history_points"):
+        assert np.allclose(
+            joined[f"{column}_metrics"].to_numpy(dtype=float),
+            joined[f"{column}_stored"].to_numpy(dtype=float),
+            rtol=1e-9, equal_nan=True,
+        ), f"{column}: {joined.to_dict()}"
+    # Today is excluded and the superseded pass does not count: the call's
+    # baseline is 10, 20, 30 rather than anything containing 999 or 400.
+    call_stats = stored_stats[stored_stats["strike"] == 100.0].iloc[0]
+    assert call_stats["history_points"] == 3, call_stats.to_dict()
+    assert abs(call_stats["avg_volume"] - 20.0) < 1e-9, call_stats.to_dict()
+
+    with conn.cursor() as cur:
+        for table in ("option_snapshots", "option_snapshots_archive", "snapshot_iv_summary",
+                      "contract_volume_stats", "collection_runs"):
+            cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
+    print("Narrow-read and rollup checks passed (stored numbers match the shared functions)\n")
+
 def main():
     # A clean slate, without dropping the database itself: the checks assert
     # counts, and a leftover row from a previous run makes them fail in a way
@@ -481,6 +601,7 @@ def main():
     assert db.get_tracked_contracts(conn, "TEST").empty
 
     check_missing_numbers_survive_a_write(conn)
+    check_narrow_reads_and_rollups(conn)
     check_scheduled_collection(conn)
     check_archiving_moves_and_keeps(conn)
 
