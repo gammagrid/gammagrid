@@ -80,6 +80,79 @@ _IV_WEIGHTED_AVG_SQL = """
     END
 """
 
+# --- which provider's data a screen is showing ---
+
+def active_source(conn: psycopg.Connection, ticker: str) -> str | None:
+    """The provider that produced this ticker's most recent collection.
+
+    Every read below is scoped to one source, and this is how that source is
+    chosen: the freshest one wins, and rows from any other provider are hidden
+    rather than blended in. Nothing is deleted — switch back and the older
+    provider's history is visible again the moment it is the freshest one.
+
+    Why refuse rather than offer a choice. Implied volatility is *computed* by
+    the provider, not observed on the market, so the same contract on the same
+    day legitimately differs between two of them; a chart that concatenates the
+    two draws a move that never happened. Worse, the views showing "the latest
+    moment" would take the newest timestamp regardless of source and then every
+    row at it, so two providers collecting the same minute feed GEX and Max Pain
+    each contract twice. A source switcher is the full answer and only earns its
+    complexity once somebody actually runs two — refusing to mix is the part
+    that has to exist first.
+
+    None means "not known", and every read then applies no filter at all. That
+    is the safe degradation: a database imported from before any of this existed
+    keeps showing everything it did, instead of going blank because it failed to
+    match a source nobody recorded.
+    """
+    ticker = ticker.upper()
+    # The run log first, because it is what get_collection_moments reads: the
+    # source decision and the moment list then come from the same table and
+    # cannot disagree about which collection was last.
+    row = conn.execute(
+        """SELECT source FROM collection_runs
+           WHERE ticker = %s AND status = 'success' AND COALESCE(rows_fetched, 0) > 0
+           ORDER BY started_at DESC LIMIT 1""",
+        (ticker,),
+    ).fetchone()
+    if row:
+        return row[0]
+    # An imported database may have snapshots and no runs. One row per
+    # collection either way, so this stays a lookup rather than a scan.
+    row = conn.execute(
+        "SELECT source FROM snapshot_iv_summary WHERE ticker = %s ORDER BY collected_at DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def sources_for(conn: psycopg.Connection, ticker: str) -> list[str]:
+    """Every provider that has data for this ticker, freshest first.
+
+    Used by the interface to say that older rows are hidden rather than gone —
+    a hidden chunk of history with no explanation is indistinguishable from a
+    bug, and the person looking is the one who switched providers.
+    """
+    rows = conn.execute(
+        """SELECT source FROM (
+               SELECT source, max(collected_at) AS last_seen
+               FROM snapshot_iv_summary WHERE ticker = %s GROUP BY source
+           ) per_source ORDER BY last_seen DESC""",
+        (ticker.upper(),),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _scope(conn: psycopg.Connection, ticker: str, source: str | None) -> str | None:
+    """Resolve the source a read should be scoped to.
+
+    Callers that already know it pass it — the dashboard resolves once per page
+    load and hands it down, so a render costs one lookup rather than one per
+    query. Callers that do not (the worker, scripts, checks) leave it out.
+    """
+    return source if source is not None else active_source(conn, ticker)
+
+
 # --- snapshots ---
 
 def insert_snapshot(
@@ -184,16 +257,26 @@ def insert_snapshot(
 
 
 def get_snapshots(
-    conn: psycopg.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
+    conn: psycopg.Connection,
+    ticker: str,
+    days: int | None = config.SNAPSHOT_HISTORY_DAYS,
+    source: str | None = None,
 ) -> pd.DataFrame:
     """A ticker's snapshot history, bounded to the last `days` by default.
 
     `days=None` fetches everything — used by the dashboard's "Load full
     history" toggle, and by tooling that genuinely needs the whole series. No
     UI path should pass None by default: see config.SNAPSHOT_HISTORY_DAYS for
-    why the bound exists."""
+    why the bound exists.
+
+    `source=None` resolves to the ticker's freshest provider; see
+    `active_source` for why one is picked rather than all of them read."""
     where = "ticker = %s"
     params: list = [ticker]
+    scoped = _scope(conn, ticker, source)
+    if scoped is not None:
+        where += " AND source = %s"
+        params.append(scoped)
     if days is not None:
         where += " AND collected_at >= now() - make_interval(days => %s)"
         params.append(days)
@@ -215,7 +298,10 @@ def get_snapshots(
 
 
 def get_put_call_ratio(
-    conn: psycopg.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
+    conn: psycopg.Connection,
+    ticker: str,
+    days: int | None = config.SNAPSHOT_HISTORY_DAYS,
+    source: str | None = None,
 ) -> pd.DataFrame:
     """Put/call ratio per collection, aggregated in SQL.
 
@@ -226,6 +312,10 @@ def get_put_call_ratio(
     numbers aggregated here."""
     where = "ticker = %s"
     params: list = [ticker]
+    scoped = _scope(conn, ticker, source)
+    if scoped is not None:
+        where += " AND source = %s"
+        params.append(scoped)
     if days is not None:
         where += " AND collected_at >= now() - make_interval(days => %s)"
         params.append(days)
@@ -263,13 +353,17 @@ def get_put_call_ratio(
     return result.reset_index()
 
 
-def get_snapshot_dates(conn: psycopg.Connection, ticker: str) -> list[str]:
+def get_snapshot_dates(
+    conn: psycopg.Connection, ticker: str, source: str | None = None
+) -> list[str]:
+    scoped = _scope(conn, ticker, source)
+    where = "ticker = %(ticker)s" + (" AND source = %(source)s" if scoped else "")
     rows = conn.execute(
-        """SELECT collected_at FROM option_snapshots WHERE ticker = %s
+        f"""SELECT collected_at FROM option_snapshots WHERE {where}
            UNION
-           SELECT collected_at FROM option_snapshots_archive WHERE ticker = %s
-           ORDER BY collected_at""",
-        (ticker, ticker),
+           SELECT collected_at FROM option_snapshots_archive WHERE {where}
+           ORDER BY collected_at""",  # noqa: S608 — filter is a fixed string
+        {"ticker": ticker, "source": scoped},
     ).fetchall()
     return [r[0] for r in rows]
 
@@ -285,16 +379,24 @@ def log_run(
     error_message: str | None = None,
     rows_fetched: int | None = None,
     oi_zero_fraction: float | None = None,
+    source: str = "yahoo",
 ) -> None:
     """`rows_fetched`/`oi_zero_fraction` — diagnostics for the collection log
     (dashboard sidebar): how many chain rows actually arrived and what fraction
     of open_interest came back as zero. Written regardless of status — they
     reveal not just outright failures but also "successful" yet suspect
-    collections (see spec FR23)."""
+    collections (see spec FR23).
+
+    `source` is the provider that ran, and it matters beyond the log: this table
+    is where the list of collection moments comes from, so a run recorded
+    without its provider is a moment no screen can scope. Defaults to 'yahoo'
+    for the same reason the column does — it is what every run recorded before
+    the column existed actually was."""
     conn.execute(
         """INSERT INTO collection_runs
-           (started_at, finished_at, ticker, status, error_message, rows_fetched, oi_zero_fraction)
-           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+           (started_at, finished_at, ticker, status, error_message, rows_fetched,
+            oi_zero_fraction, source)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
         (
             started_at,
             finished_at,
@@ -303,6 +405,7 @@ def log_run(
             error_message,
             rows_fetched,
             oi_zero_fraction,
+            source,
         ),
     )
     conn.commit()
@@ -445,27 +548,36 @@ def archive_expired_contracts(
 
 
 
-def get_latest_snapshot(conn: psycopg.Connection, ticker: str) -> pd.DataFrame:
+def get_latest_snapshot(
+    conn: psycopg.Connection, ticker: str, source: str | None = None
+) -> pd.DataFrame:
     """The most recent collection's chain, and nothing else.
 
     Most views show a moment rather than a history — the screener, max pain,
     the GEX profile, the expiry and strike selectors — and used to get it by
     filtering the whole ticker's history in pandas after loading it.
+
+    The moment and the rows at it are scoped to the same source, and that is
+    the pairing that matters: taking the newest timestamp across all providers
+    and then every row at it hands the chain to GEX and Max Pain twice if two
+    of them happened to collect the same minute.
     """
-    started_at = _latest_moment(conn, ticker)
-    if started_at is None:
-        return get_snapshots_at(conn, ticker, [])
-    return get_snapshots_at(conn, ticker, [started_at])
+    scoped = _scope(conn, ticker, source)
+    started_at = _latest_moment(conn, ticker, scoped)
+    moments = [] if started_at is None else [started_at]
+    return get_snapshots_at(conn, ticker, moments, source=scoped)
 
 
-def _latest_moment(conn: psycopg.Connection, ticker: str):
+def _latest_moment(conn: psycopg.Connection, ticker: str, source: str | None = None):
+    scoped = _scope(conn, ticker, source)
+    where = "ticker = %(ticker)s" + (" AND source = %(source)s" if scoped else "")
     row = conn.execute(
-        """SELECT max(collected_at) FROM (
-               SELECT max(collected_at) AS collected_at FROM option_snapshots WHERE ticker = %s
+        f"""SELECT max(collected_at) FROM (
+               SELECT max(collected_at) AS collected_at FROM option_snapshots WHERE {where}
                UNION ALL
-               SELECT max(collected_at) FROM option_snapshots_archive WHERE ticker = %s
-           ) both_tables""",
-        (ticker.upper(), ticker.upper()),
+               SELECT max(collected_at) FROM option_snapshots_archive WHERE {where}
+           ) both_tables""",  # noqa: S608 — filter is a fixed string
+        {"ticker": ticker.upper(), "source": scoped},
     ).fetchone()
     return row[0] if row else None
 
@@ -475,6 +587,7 @@ def get_collection_moments(
     ticker: str,
     days: int | None = config.SNAPSHOT_HISTORY_DAYS,
     per_day: bool = False,
+    source: str | None = None,
 ) -> list:
     """The moments this ticker was collected at, newest first — from the run
     log, not from the snapshots.
@@ -491,45 +604,56 @@ def get_collection_moments(
 
     `per_day=True` returns the last collection of each calendar day, which is
     what every metric built on daily history actually uses.
+
+    Scoped to one source like every other read. A run recorded before the
+    source column existed reads as 'yahoo', which is what it was.
     """
-    params: list = [ticker.upper()]
-    date_filter = ""
+    scoped = _scope(conn, ticker, source)
+    params: dict = {"ticker": ticker.upper(), "source": scoped}
+    where = "ticker = %(ticker)s AND status = 'success' AND COALESCE(rows_fetched, 0) > 0"
+    if scoped is not None:
+        where += " AND source = %(source)s"
     if days is not None:
-        date_filter = "AND started_at >= now() - make_interval(days => %s)"
-        params.append(days)
+        where += " AND started_at >= now() - make_interval(days => %(days)s)"
+        params["days"] = days
     if per_day:
         statement = f"""
             SELECT DISTINCT ON (started_at::date) started_at
-            FROM collection_runs
-            WHERE ticker = %s AND status = 'success' AND COALESCE(rows_fetched, 0) > 0 {date_filter}
+            FROM collection_runs WHERE {where}
             ORDER BY started_at::date DESC, started_at DESC
         """
     else:
         statement = f"""
-            SELECT started_at FROM collection_runs
-            WHERE ticker = %s AND status = 'success' AND COALESCE(rows_fetched, 0) > 0 {date_filter}
+            SELECT started_at FROM collection_runs WHERE {where}
             ORDER BY started_at DESC
         """
     return [row[0] for row in conn.execute(statement, params).fetchall()]  # noqa: S608
 
 
-def get_snapshots_at(conn: psycopg.Connection, ticker: str, moments: list) -> pd.DataFrame:
+def get_snapshots_at(
+    conn: psycopg.Connection, ticker: str, moments: list, source: str | None = None
+) -> pd.DataFrame:
     """Chain rows for a named set of collection moments, both tables.
 
     No early return on an empty list: the query then yields zero rows but with
     the table's columns, while an empty frame has no columns at all and every
     caller dies indexing `collected_at`. A ticker with nothing collected yet is
     not an error.
+
+    A moment is not by itself a unique key — two providers can collect the same
+    instant — so this is scoped to one source too.
     """
+    scoped = _scope(conn, ticker, source)
+    where = "ticker = %(ticker)s AND collected_at = ANY(%(moments)s::timestamp[])"
+    if scoped is not None:
+        where += " AND source = %(source)s"
     return pd.read_sql_query(
-        """SELECT * FROM option_snapshots
-           WHERE ticker = %(ticker)s AND collected_at = ANY(%(moments)s::timestamp[])
+        f"""SELECT * FROM option_snapshots WHERE {where}
            UNION ALL
-           SELECT * FROM option_snapshots_archive
-           WHERE ticker = %(ticker)s AND collected_at = ANY(%(moments)s::timestamp[])
-           ORDER BY collected_at""",
+           SELECT * FROM option_snapshots_archive WHERE {where}
+           ORDER BY collected_at""",  # noqa: S608 — filter is a fixed string
         conn,
-        params={"ticker": ticker.upper(), "moments": list(moments)},
+        params={"ticker": ticker.upper(), "moments": list(moments), "source": scoped},
         parse_dates=["collected_at", "expiry"],
     )
 
@@ -541,19 +665,28 @@ def get_contract_history(
     strike: float,
     option_type: str,
     days: int | None = config.SNAPSHOT_HISTORY_DAYS,
+    source: str | None = None,
 ) -> pd.DataFrame:
     """One contract across every collection, filtered in SQL.
 
     One row per collection for one contract stays small no matter how liquid
     the ticker's full chain is — the Contract view used to reach it by loading
     the whole chain's history and filtering in pandas.
+
+    Scoping matters here more than anywhere: this is the one view that plots a
+    single contract's own implied volatility over time, so two providers'
+    differing calculations of it would show up as the contract moving.
     """
+    scoped = _scope(conn, ticker, source)
     where = "ticker = %(ticker)s AND expiry = %(expiry)s AND strike = %(strike)s AND option_type = %(option_type)s"
+    if scoped is not None:
+        where += " AND source = %(source)s"
     params = {
         "ticker": ticker.upper(),
         "expiry": pd.Timestamp(expiry).strftime("%Y-%m-%d"),
         "strike": float(strike),
         "option_type": option_type,
+        "source": scoped,
     }
     date_filter = ""
     if days is not None:
@@ -571,17 +704,27 @@ def get_contract_history(
 
 
 def get_iv_weighted_average(
-    conn: psycopg.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
+    conn: psycopg.Connection,
+    ticker: str,
+    days: int | None = config.SNAPSHOT_HISTORY_DAYS,
+    source: str | None = None,
 ) -> pd.DataFrame:
-    """Volume-weighted average IV per collection, read from the rollup."""
-    params: list = [ticker.upper()]
-    date_filter = ""
+    """Volume-weighted average IV per collection, read from the rollup.
+
+    The rollup is stored per source already, so without a filter this would
+    return two rows for the same instant and the chart would zigzag between
+    two providers' opinions of the same market."""
+    scoped = _scope(conn, ticker, source)
+    params: dict = {"ticker": ticker.upper(), "source": scoped}
+    where = "ticker = %(ticker)s"
+    if scoped is not None:
+        where += " AND source = %(source)s"
     if days is not None:
-        date_filter = "AND collected_at >= now() - make_interval(days => %s)"
-        params.append(days)
+        where += " AND collected_at >= now() - make_interval(days => %(days)s)"
+        params["days"] = days
     return pd.read_sql_query(
         f"""SELECT collected_at, iv_weighted_avg FROM snapshot_iv_summary
-            WHERE ticker = %s {date_filter}
+            WHERE {where}
             ORDER BY collected_at""",  # noqa: S608 — filter is a fixed string
         conn,
         params=params,
@@ -590,7 +733,10 @@ def get_iv_weighted_average(
 
 
 def rebuild_volume_stats(
-    conn: psycopg.Connection, ticker: str, days: int = config.UNUSUAL_HISTORY_DAYS
+    conn: psycopg.Connection,
+    ticker: str,
+    days: int = config.UNUSUAL_HISTORY_DAYS,
+    source: str | None = None,
 ) -> int:
     """Recompute the per-contract volume baseline for one ticker and store it.
 
@@ -599,14 +745,20 @@ def rebuild_volume_stats(
     completed days — and the metric asks for a baseline that excludes the day
     being judged anyway. metrics.unusual_activity applies the same rule when it
     aggregates for itself.
+
+    One source at a time. The moments come from that source's runs and the rows
+    are filtered to it, so a baseline is always built from one provider's
+    numbers even when two of them collected the same days.
     """
-    moments = [m for m in get_collection_moments(conn, ticker, days=days, per_day=True)
+    scoped = _scope(conn, ticker, source)
+    moments = [m for m in get_collection_moments(conn, ticker, days=days, per_day=True, source=scoped)
                if m.date() < dt.date.today()]
     if not moments:
         return 0
+    row_filter = " AND source = %(source)s" if scoped is not None else ""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            """INSERT INTO contract_volume_stats
+            f"""INSERT INTO contract_volume_stats
                    (ticker, source, expiry, strike, option_type,
                     avg_volume, std_volume, history_points, through_day, computed_at)
                SELECT %(ticker)s, source, expiry, strike, option_type,
@@ -618,11 +770,13 @@ def rebuild_volume_stats(
                FROM (
                    SELECT source, collected_at, expiry, strike, option_type, volume
                    FROM option_snapshots
-                   WHERE ticker = %(ticker)s AND collected_at = ANY(%(moments)s::timestamp[])
+                   WHERE ticker = %(ticker)s
+                     AND collected_at = ANY(%(moments)s::timestamp[]){row_filter}
                    UNION ALL
                    SELECT source, collected_at, expiry, strike, option_type, volume
                    FROM option_snapshots_archive
-                   WHERE ticker = %(ticker)s AND collected_at = ANY(%(moments)s::timestamp[])
+                   WHERE ticker = %(ticker)s
+                     AND collected_at = ANY(%(moments)s::timestamp[]){row_filter}
                ) all_rows
                GROUP BY source, expiry, strike, option_type
                ON CONFLICT (ticker, source, expiry, strike, option_type) DO UPDATE
@@ -630,38 +784,54 @@ def rebuild_volume_stats(
                    std_volume = EXCLUDED.std_volume,
                    history_points = EXCLUDED.history_points,
                    through_day = EXCLUDED.through_day,
-                   computed_at = EXCLUDED.computed_at""",
-            {"ticker": ticker.upper(), "moments": moments},
+                   computed_at = EXCLUDED.computed_at""",  # noqa: S608 — filter is a fixed string
+            {"ticker": ticker.upper(), "moments": moments, "source": scoped},
         )
         return cur.rowcount
 
 
-def volume_stats_are_current(conn: psycopg.Connection, ticker: str) -> bool:
+def volume_stats_are_current(
+    conn: psycopg.Connection, ticker: str, source: str | None = None
+) -> bool:
     """Whether the stored baseline already covers every closed day.
 
     Cheap enough to ask on every collection pass, which is what makes the
     rebuild self-healing: a machine that was off when the day rolled over
     catches up on its next pass rather than waiting for a scheduler nobody
     watches.
+
+    Asked per source, because a baseline is per source: the active provider's
+    statistics being stale is not excused by another provider's being fresh.
     """
+    scoped = _scope(conn, ticker, source)
+    where = "ticker = %(ticker)s" + (" AND source = %(source)s" if scoped else "")
     row = conn.execute(
-        "SELECT max(through_day) FROM contract_volume_stats WHERE ticker = %s", (ticker.upper(),)
+        f"SELECT max(through_day) FROM contract_volume_stats WHERE {where}",  # noqa: S608
+        {"ticker": ticker.upper(), "source": scoped},
     ).fetchone()
     return bool(row and row[0] and row[0] >= dt.date.today() - dt.timedelta(days=1))
 
 
-def get_volume_stats(conn: psycopg.Connection, ticker: str) -> pd.DataFrame:
+def get_volume_stats(
+    conn: psycopg.Connection, ticker: str, source: str | None = None
+) -> pd.DataFrame:
     """The stored per-contract baseline — a lookup, not an aggregate.
 
     Empty for a ticker with no completed day yet, and that is the right answer
     rather than a missing one: metrics.unusual_activity treats a contract with
     no history as having none and falls back to its crude rule, which is what
     "we have not watched this long enough" means.
+
+    One row per contract *per source* is stored, and the caller joins on the
+    contract alone — so without the filter every contract would match twice and
+    Unusual Activity would report each one as two rows.
     """
+    scoped = _scope(conn, ticker, source)
+    where = "ticker = %(ticker)s" + (" AND source = %(source)s" if scoped else "")
     return pd.read_sql_query(
-        """SELECT expiry, strike, option_type, avg_volume, std_volume, history_points
-           FROM contract_volume_stats WHERE ticker = %(ticker)s""",
+        f"""SELECT expiry, strike, option_type, avg_volume, std_volume, history_points
+           FROM contract_volume_stats WHERE {where}""",  # noqa: S608 — filter is a fixed string
         conn,
-        params={"ticker": ticker.upper()},
+        params={"ticker": ticker.upper(), "source": scoped},
         parse_dates=["expiry"],
     )

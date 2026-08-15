@@ -143,6 +143,99 @@ def check_archiving_moves_and_keeps(conn):
     print("Archiving checks passed (moved, not deleted; history stays whole)\n")
 
 
+def check_two_sources_never_mix(conn):
+    """Two providers with data for the same ticker must never appear together.
+
+    The failure this guards is not cosmetic. Implied volatility is *computed*
+    by a provider rather than observed, so two of them differ on the same
+    contract on the same day — and the views that show "the latest moment"
+    took the newest timestamp regardless of source and then every row at it.
+    Two providers collecting the same minute therefore handed GEX and Max Pain
+    each contract twice, which is a wrong number rather than an ugly chart.
+
+    The older provider's rows stay in the database throughout — hidden is not
+    deleted, and this asserts it rather than assuming it.
+    """
+    ticker = "SRCTEST"
+    yesterday = datetime.utcnow().replace(microsecond=0) - timedelta(days=1)
+    only_old = yesterday - timedelta(hours=2)   # yahoo alone
+    shared = yesterday - timedelta(hours=1)     # both, to the same instant
+    newest = yesterday                          # premium alone
+
+    def collected(moment, source, price, iv_shift, volume):
+        db.insert_snapshot(
+            conn, ticker, moment, price, make_chain(iv_shift, volume, 500), source=source
+        )
+        db.log_run(
+            conn, moment, moment + timedelta(seconds=1), ticker, "success",
+            rows_fetched=len(STRIKES) * 2, source=source,
+        )
+
+    per_moment = len(STRIKES) * 2
+    collected(only_old, "yahoo", 100.0, 0.0, 100)
+    collected(shared, "yahoo", 100.0, 0.0, 110)
+    collected(shared, "premium", 101.0, 0.05, 700)
+    collected(newest, "premium", 102.0, 0.06, 800)
+
+    assert db.active_source(conn, ticker) == "premium", "the freshest provider is the active one"
+    assert db.sources_for(conn, ticker) == ["premium", "yahoo"], db.sources_for(conn, ticker)
+
+    # The filter has real work to do: the shared instant genuinely holds two
+    # chains, and the scoped read must return one of them.
+    both = conn.execute(
+        "SELECT count(*) FROM option_snapshots WHERE ticker = %s AND collected_at = %s",
+        (ticker, shared),
+    ).fetchone()[0]
+    assert both == per_moment * 2, both
+    at_shared = db.get_snapshots_at(conn, ticker, [shared])
+    assert len(at_shared) == per_moment, (
+        f"a moment collected by two providers returned {len(at_shared)} rows — "
+        "every contract twice is a doubled GEX and a moved Max Pain"
+    )
+    assert set(at_shared["source"]) == {"premium"}
+
+    latest = db.get_latest_snapshot(conn, ticker)
+    assert len(latest) == per_moment and set(latest["source"]) == {"premium"}, latest["source"].unique()
+    assert latest["collected_at"].max() == pd.Timestamp(newest)
+
+    history = db.get_snapshots(conn, ticker, days=None)
+    assert set(history["source"]) == {"premium"}, "history must not reach back into another provider"
+    assert len(history) == per_moment * 2, len(history)
+
+    moments = db.get_collection_moments(conn, ticker, days=None)
+    assert moments == [newest, shared], moments
+    assert len(db.get_snapshot_dates(conn, ticker)) == 2
+
+    # One row per moment, not one per moment per provider: the IV chart would
+    # otherwise zigzag between two opinions of the same market.
+    iv = db.get_iv_weighted_average(conn, ticker, days=None)
+    assert len(iv) == 2 and iv["collected_at"].is_unique, iv.to_dict()
+
+    ratio = db.get_put_call_ratio(conn, ticker, days=None)
+    assert len(ratio) == 2, ratio.to_dict()
+
+    contract = db.get_contract_history(conn, ticker, EXPIRY, 100.0, "call", days=None)
+    assert set(contract["source"]) == {"premium"}, "one contract's IV history must be one provider's"
+
+    # The Unusual Activity baseline is stored per contract per source and joined
+    # on the contract alone, so an unscoped read reports every contract twice.
+    db.rebuild_volume_stats(conn, ticker, days=30)
+    stats = db.get_volume_stats(conn, ticker)
+    assert len(stats) == per_moment, f"expected one row per contract, got {len(stats)}"
+
+    kept = conn.execute(
+        "SELECT count(*) FROM option_snapshots WHERE ticker = %s AND source = 'yahoo'",
+        (ticker,),
+    ).fetchone()[0]
+    assert kept == per_moment * 2, "the inactive provider's rows are hidden, never removed"
+
+    with conn.cursor() as cur:
+        for table in ("option_snapshots", "option_snapshots_archive", "snapshot_iv_summary",
+                      "contract_volume_stats", "collection_runs"):
+            cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
+    print("Source-scoping checks passed (two providers never share a screen)\n")
+
+
 def check_missing_numbers_survive_a_write(conn):
     """A chain with nothing quoted for a contract must store, not explode.
 
@@ -604,6 +697,7 @@ def main():
     check_narrow_reads_and_rollups(conn)
     check_scheduled_collection(conn)
     check_archiving_moves_and_keeps(conn)
+    check_two_sources_never_mix(conn)
 
     print("ALL SMOKE CHECKS PASSED")
 

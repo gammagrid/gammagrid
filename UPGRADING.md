@@ -12,20 +12,24 @@ data" is information, and silence is not the same statement.
 
 ## How upgrading works at all
 
-The app owns its schema. On the first connection after you start a new version,
-`app/db.py` creates anything missing and applies any new columns to tables that
-already exist. There is no migration command to run and no step you can forget.
+The app owns its schema. Every change to it is a numbered file in
+`app/migrations/`, and the first connection either container opens applies
+whatever is pending — under a lock, so the app and the collector starting
+together is safe, and recorded, so nothing runs twice. There is no migration
+command to run and no step you can forget.
 
-Your data lives in one file — `data/options.db` by default, or wherever
-`OPTIONS_TRACKER_DB` points. Nothing outside that file matters, which makes the
-backup for any upgrade a copy:
+Your data lives in Postgres (since v0.4.0), in the volume `docker compose`
+creates for it. The backup for any upgrade is a dump:
 
 ```bash
-cp data/options.db data/options.db.backup
+docker compose exec postgres pg_dump -U gammagrid gammagrid > gammagrid-backup.sql
 ```
 
 Worth doing before any upgrade marked anything other than **safe** below. It
-costs a second and it is the whole recovery plan.
+costs a moment and it is the whole recovery plan.
+
+*(Before v0.4.0 everything lived in `data/options.db`. That file is never
+touched by the move and is still the backup for those versions.)*
 
 ## Reading the risk labels
 
@@ -34,6 +38,32 @@ costs a second and it is the whole recovery plan.
 | **Safe** | Start the new version. Nothing is rewritten, nothing is deleted, and the old version still opens the same file afterwards. |
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
+
+## v0.4.1 → v0.5.0
+
+**Risk: safe.** Start the new version. Nothing is rewritten and nothing is
+deleted.
+
+**What changes in the database.** One column is added — `collection_runs.source`
+— and existing rows get `yahoo`, which is what they were: yahoo is the only
+provider that has ever shipped. Two indexes are added alongside it. Your
+snapshots are not touched.
+
+**What you will notice.** Nothing at all, if you use one data source — which
+today means everybody running a stock install. If you have written your own
+provider and collected with both, the screens now show one of them at a time:
+the one that collected most recently. The other's rows stay in the database and
+come back into view the moment that provider is the freshest again.
+
+This is a correctness fix rather than a preference. Implied volatility is a
+number a provider *calculates*, not one it observes, so two providers
+legitimately disagree about the same contract on the same day — and the views
+that show "the latest collection" previously took the newest timestamp
+regardless of source and then every row at it, so two providers collecting the
+same minute counted each contract twice in dealer GEX and Max Pain.
+
+**Going back.** v0.4.1 runs fine on the same database: it does not write the new
+column, and the default fills it in.
 
 ## v0.4.0 → v0.4.1
 

@@ -16,11 +16,14 @@ file already does for anything optional, so that people who do not use your
 provider do not have to install its dependencies.
 
 One thing to get right, because it is invisible until it is not: every row is
-stamped with `name` in `option_snapshots.source`. Two providers derive implied
-volatility with different models, so the same contract on the same day
-legitimately differs between them, and a chart that mixes both draws a jump
-that never happened. Pick a name and never change it — changing it orphans
-everything already collected under the old one.
+stamped with `name` in `option_snapshots.source`, and the reads act on that
+stamp. Two providers derive implied volatility with different models, so the
+same contract on the same day legitimately differs between them; the app
+therefore shows one source at a time — the one that collected most recently
+for that ticker — rather than blending them (see `db.active_source`). Pick a
+name and never change it. Changing it does not merely rename rows: the old
+name's history stops being the freshest under any name, so it disappears from
+every screen while sitting in the database in full.
 
 The hosted version of GammaGrid ships an adapter for a paid, licensed feed. It
 is not in this repository; the interface it implements is exactly the one

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-15
+
+### Fixed
+
+- **Two data sources are never shown together.** Every row has recorded which
+  provider produced it since the provider interface landed, but nothing on the
+  read side looked at it. With the one provider that ships, that was invisible;
+  with a second one it was wrong. Implied volatility is *calculated* by a
+  provider rather than observed, so two of them legitimately differ on the same
+  contract on the same day, and a chart drawn from both shows a move nobody
+  traded.
+
+  The sharper failure was in the views that show the latest collection: they
+  took the newest timestamp regardless of source and then every row at it, so
+  two providers collecting the same minute fed dealer GEX and Max Pain each
+  contract twice, and Unusual Activity listed every contract as two rows.
+
+  Every screen now works from one source — the one that collected most
+  recently — and says so when a ticker has history from more than one. Nothing
+  is deleted: the other provider's rows stay where they are and reappear when
+  it is the freshest source again. Choosing between sources by hand is a
+  separate feature and waits until somebody actually runs two.
+
+### Added
+
+- `collection_runs.source`, so the list of collection moments every history
+  screen stands on can be scoped to one provider. Existing rows read as
+  `yahoo`.
+
 ## [0.4.1] - 2026-08-15
 
 ### Fixed

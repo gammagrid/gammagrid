@@ -103,6 +103,7 @@ def collect_watchlist(
             db.log_run(
                 conn, started_at, _now_utc(), ticker, "success",
                 rows_fetched=rows_fetched, oi_zero_fraction=oi_zero_fraction,
+                source=active.name,
             )
             results[ticker] = "success"
         except Exception as exc:
@@ -110,6 +111,7 @@ def collect_watchlist(
             db.log_run(
                 conn, started_at, _now_utc(), ticker, "failed", message,
                 rows_fetched=rows_fetched, oi_zero_fraction=oi_zero_fraction,
+                source=active.name,
             )
             results[ticker] = f"failed: {message}"
     return results

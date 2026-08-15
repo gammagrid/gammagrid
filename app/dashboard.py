@@ -454,11 +454,30 @@ history_days = None if load_full_history else config.SNAPSHOT_HISTORY_DAYS
 # Each view now asks for what it shows: one snapshot, two calendar days, one
 # contract, or a stored rollup. `db.get_snapshots` remains for tooling; if it
 # reappears in a view, this is what regressed.
-latest_df = db.get_latest_snapshot(conn, selected_ticker)
+#
+# ONE SOURCE PER PAGE, resolved once here and passed to every read below rather
+# than looked up inside each of them: a render then pays for one small query
+# instead of a dozen identical ones. GammaGrid never blends two providers on
+# one screen — see db.active_source for why implied volatility makes that a
+# correctness problem and not a tidiness one.
+page_source = db.active_source(conn, selected_ticker)
+latest_df = db.get_latest_snapshot(conn, selected_ticker, source=page_source)
 
 if latest_df.empty:
     st.info(f"No data for {selected_ticker}. Click “Collect data” on the left.")
     st.stop()
+
+# Said out loud only when there is something to say. A person who switched
+# providers sees their older history disappear from the charts, and hidden
+# history with no explanation is indistinguishable from data loss.
+_ticker_sources = db.sources_for(conn, selected_ticker) if page_source else []
+if len(_ticker_sources) > 1:
+    others = ", ".join(s for s in _ticker_sources if s != page_source)
+    st.caption(
+        f"Showing data from **{page_source}**. This ticker also has history from {others}, "
+        "which is kept but not shown: two providers calculate implied volatility "
+        "differently, so mixing them on one chart would draw moves that never happened."
+    )
 
 latest_date = latest_df["collected_at"].max()
 expiries = sorted(latest_df["expiry"].unique())
@@ -508,7 +527,7 @@ if active_view == "Overview":
     # Aggregated in SQL rather than by grouping every raw row here: same
     # numbers, a fraction of the work. metrics.put_call_ratio remains the
     # definition of the ratio and the oracle the tests check this against.
-    pcr = db.get_put_call_ratio(conn, selected_ticker, days=history_days)
+    pcr = db.get_put_call_ratio(conn, selected_ticker, days=history_days, source=page_source)
     st.line_chart(pcr.set_index("collected_at")[["pcr_volume", "pcr_oi"]], color=[BRAND_PURPLE, BRAND_GREEN])
     with st.expander("ℹ️ How to read this"):
         st.write(
@@ -707,7 +726,7 @@ if active_view == "GEX Heatmap":
     # against one row per contract per pass.
     snapshot_dates = [
         pd.Timestamp(moment)
-        for moment in db.get_collection_moments(conn, selected_ticker, days=history_days)
+        for moment in db.get_collection_moments(conn, selected_ticker, days=history_days, source=page_source)
     ] or [pd.Timestamp(latest_date)]
     as_of = st.selectbox(
         "Snapshot (Replay — collection history, no auto-refresh)",
@@ -721,7 +740,7 @@ if active_view == "GEX Heatmap":
     # The chosen moment's chain, fetched by equality on collected_at. Everything
     # this view draws — the matrix, the walls, the flip, per-expiry net GEX — is
     # a function of one moment, and every metric below already takes `as_of`.
-    snapshot_df = db.get_snapshots_at(conn, selected_ticker, [as_of])
+    snapshot_df = db.get_snapshots_at(conn, selected_ticker, [as_of], source=page_source)
     if snapshot_df.empty:
         # The run log is a superset of the data: a pass can be recorded as a
         # success and still have left nothing for this ticker. Before the list
@@ -897,7 +916,7 @@ if active_view == "Volatility (IV)":
     # answer is one row per collection and the input was one row per contract
     # per collection. It also stops the chart changing under you as contracts
     # expire and move to the archive.
-    iv_avg = db.get_iv_weighted_average(conn, selected_ticker, days=history_days)
+    iv_avg = db.get_iv_weighted_average(conn, selected_ticker, days=history_days, source=page_source)
     st.line_chart(iv_avg.set_index("collected_at")["iv_weighted_avg"], color=BRAND_PURPLE)
     with st.expander("ℹ️ How to read this"):
         st.write(
@@ -984,7 +1003,8 @@ if active_view == "Contract":
     opt_type = col3.selectbox("Type", available_types, key=f"opt_type_{selected_ticker}")
 
     contract_df = db.get_contract_history(
-        conn, selected_ticker, opt_expiry, opt_strike, opt_type, days=history_days
+        conn, selected_ticker, opt_expiry, opt_strike, opt_type, days=history_days,
+        source=page_source,
     )
     render_option_detail(
         conn, contract_df, selected_ticker, get_tracked(), opt_expiry, opt_strike, opt_type,
@@ -1151,7 +1171,7 @@ if active_view == "Screener":
                     conn,
                     db.get_contract_history(
                         conn, selected_ticker, picked["expiry"], picked["strike"],
-                        picked["option_type"], days=history_days,
+                        picked["option_type"], days=history_days, source=page_source,
                     ),
                     selected_ticker, get_tracked(),
                     picked["expiry"], picked["strike"], picked["option_type"],
@@ -1176,7 +1196,7 @@ if active_view == "Unusual Activity":
     # worker rebuilds once a day. The rules that decide what is unusual stay in
     # metrics — only the aggregation moved.
     flagged = metrics.unusual_activity(
-        latest_df, stats=db.get_volume_stats(conn, selected_ticker)
+        latest_df, stats=db.get_volume_stats(conn, selected_ticker, source=page_source)
     )
     st.caption(f"Contracts found: {len(flagged)}")
     st.dataframe(flagged, use_container_width=True)
@@ -1203,7 +1223,10 @@ if active_view == "OI Delta":
     delta = metrics.oi_delta(
         db.get_snapshots_at(
             conn, selected_ticker,
-            db.get_collection_moments(conn, selected_ticker, days=history_days, per_day=True)[:2],
+            db.get_collection_moments(
+                conn, selected_ticker, days=history_days, per_day=True, source=page_source
+            )[:2],
+            source=page_source,
         )
     )
     if delta.empty:

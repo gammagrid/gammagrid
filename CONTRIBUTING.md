@@ -66,7 +66,10 @@ All of them run in CI on every pull request; please run them locally first.
   itself. `dashboard.py` is display and user input only — no business logic.
 - **Adding a data source is a new file in `app/providers/`** and two lines in
   its `__init__.py`; the module docstring there walks through it. Nothing else
-  in the app should need to know your source exists.
+  in the app should need to know your source exists. Two of them are never
+  shown together: every screen works from whichever source collected most
+  recently for that ticker, and a read that does not scope itself to one source
+  is a defect — see `db.active_source`.
 - **A change to the database schema arrives with an `UPGRADING.md` entry.**
   Not a changelog line — a statement of what happens to a database that is
   already full, and whether going back is possible. People run this on their own
