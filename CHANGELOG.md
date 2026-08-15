@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A contract whose data source quotes no implied volatility no longer breaks
+  the greeks.** `_black_scholes_greeks` compared `iv <= 0` without first asking
+  whether there was an `iv` at all, and a missing one arrives as `None` — which
+  raises rather than comparing false. It now returns NaN for every greek when
+  an input is missing, which is a different statement from the zeros an expired
+  contract returns: expired means no optionality is left, missing means there
+  is nothing to compute from, and drawing the second as a flat zero would make
+  an absence of data look like a measurement. Yahoo quotes an IV on nearly
+  everything, so this was invisible here — but the provider interface added in
+  v0.3.0 exists so that other sources can be plugged in, and a source that
+  declines to price a far out-of-the-money strike is ordinary. Found in the
+  hosted sibling that shares this file, on a strike 36% out of the money whose
+  every snapshot carried a price and no volatility.
+
 ## [0.3.0] - 2026-08-12
 
 ### Added

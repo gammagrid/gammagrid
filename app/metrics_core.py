@@ -245,6 +245,32 @@ def _black_scholes_greeks(
     version computed it once and shared it, which was correct only because
     delta_put - delta_call was a constant at q = 0. It is now computed per
     option type."""
+    # `iv` and `spot` come from collected data and can simply be absent: a
+    # provider that quotes no volatility for a strike writes SQL NULL, and a
+    # deep out-of-the-money contract is exactly where that happens. Which
+    # Python value arrives depends on rows this contract has nothing to do
+    # with: pandas keeps the column as `object` (so `None` survives) when the
+    # WHOLE ticker's column is null, and as `float64` (so it becomes `NaN`)
+    # when any other contract of that ticker has a value. `None <= 0` raises,
+    # and that took the Contract tab down entirely — found live 14.08.2026 on
+    # MO 2026-08-21 500 call, whose 245 snapshots all carry a last_price, no
+    # implied volatility and no provider greeks.
+    #
+    # NaN rather than 0.0, and the distinction is the point: zero below means
+    # "this contract has no optionality left", which is a statement about an
+    # expired contract and is true. Missing input means "there is nothing to
+    # compute from", which is not a value at all — returning 0.0 would draw a
+    # flat delta of zero and make an absence of data indistinguishable from a
+    # real number.
+    # `_is_priceable` performs exactly this rejection and has done since С-16 —
+    # it just is not called from here, which is the whole story of this bug: the
+    # knowledge existed in the file and was not applied at the one call site
+    # that takes its inputs straight from a provider's rows. It cannot simply be
+    # called here either, because it also rejects an expired contract, and that
+    # case must keep returning zeros (below) rather than NaN.
+    if iv is None or spot is None or pd.isna(iv) or pd.isna(spot):
+        return dict.fromkeys(_GREEK_KEYS, float("nan"))
+
     if years_to_expiry <= 0 or iv <= 0 or spot <= 0:
         return {k: 0.0 for k in _GREEK_KEYS}
 

@@ -494,6 +494,23 @@ def check_unpriceable_contracts_are_skipped():
     expired = metrics._black_scholes_greeks(100.0, 100.0, 0.0, 0.3, 0.05, "call")
     assert set(expired) == set(metrics._GREEK_KEYS)
     assert all(value == 0.0 for value in expired.values()), expired
+
+    # A missing IV is not the same statement as a zero one, and the difference
+    # is visible on a chart: zero above means an expired contract genuinely has
+    # no optionality left, while a source that quotes no volatility for a strike
+    # tells us nothing about its delta. Returning 0.0 for the second would draw
+    # a flat line where there is no data at all.
+    #
+    # This crashed in the paid sibling on 14.08.2026 (`None <= 0` raises), and
+    # the free product is exposed by the same file: Yahoo quotes an IV on
+    # everything, but the provider interface added in v0.3.0 exists precisely so
+    # that other sources can be plugged in, and a source with no IV is ordinary.
+    for missing in (None, np.nan):
+        unknown = metrics._black_scholes_greeks(100.0, 100.0, 0.5, missing, 0.05, "call")
+        assert set(unknown) == set(metrics._GREEK_KEYS)
+        assert all(np.isnan(value) for value in unknown.values()), (missing, unknown)
+        no_spot = metrics._black_scholes_greeks(missing, 100.0, 0.5, 0.3, 0.05, "call")
+        assert all(np.isnan(value) for value in no_spot.values()), (missing, no_spot)
     print("unpriceable-contract checks passed")
 
 
