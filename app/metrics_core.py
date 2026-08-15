@@ -713,7 +713,14 @@ def unusual_activity(
     # latest snapshot. Everything below is unchanged either way, which is the
     # point: what is unusual is decided here for both products.
     if stats is None:
-        stats = volume_stats(df[df["collected_at"] < latest_date])
+        # Whole calendar days only, not "everything before the latest moment".
+        # Volume is cumulative within a session, so an earlier collection of
+        # today is a PARTIAL day, and letting it into the baseline compares
+        # today against a fraction of itself — the same mixing of moments
+        # within a trading day that the daily collapse exists to prevent. The
+        # hosted product's stored statistics are built the same way; the rule
+        # has to match, or the two products call different things unusual.
+        stats = volume_stats(df[df["collected_at"].dt.normalize() < latest_date.normalize()])
     latest = latest.merge(stats, on=_CONTRACT_KEYS, how="left")
     latest["history_points"] = latest["history_points"].fillna(0)
 

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Unusual Activity compares today against completed days only.** The baseline
+  used to include an earlier collection of the current day, and volume
+  accumulates through a session — so a contract was partly being compared
+  against a fraction of itself, which is the same mixing of moments within a
+  trading day that the daily collapse already existed to prevent. Fewer
+  contracts will be flagged on a day you have collected several times.
+- `volume_stats` is now a function of its own, and `unusual_activity` accepts
+  its result as an argument. Nothing changes if you do not pass one. It exists
+  so that a deployment large enough to care can compute that baseline outside
+  pandas, while the rules deciding what counts as unusual stay here, in one
+  place, for every deployment.
+
 ### Fixed
 
 - **A contract whose data source quotes no implied volatility no longer breaks
