@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-15
+
 ### Added
 
 - **Scheduled collection.** Pick an interval in the sidebar — off, every 15
@@ -49,9 +51,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   existed since v0.3.0 and the indexes had not caught up, so every query
   filtering by source — which is all of them — left that filter to be applied
   after the scan.
-
-### Changed
-
 - **Expired contracts no longer count toward the ticker's average IV.** A
   contract past its expiry date has no implied volatility — it diverges as time
   to expiry goes to zero — and a source that reports one anyway reports a
