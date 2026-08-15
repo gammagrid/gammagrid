@@ -352,6 +352,49 @@ with st.sidebar:
             else:
                 st.error(f"{ticker}: {status}")
 
+    # Scheduled collection. The list is short on purpose: the floor is set by
+    # the data source rather than by preference, and a free-text box inviting
+    # "every minute" invites getting blocked. Off is the default — a tool that
+    # starts hitting an API the moment it is installed made a decision that was
+    # not its to make.
+    current_interval = db.get_collector_interval(conn)
+    labels = list(config.COLLECTOR_INTERVAL_CHOICES)
+    current_label = next(
+        (name for name, minutes in config.COLLECTOR_INTERVAL_CHOICES.items()
+         if minutes == current_interval),
+        labels[0],
+    )
+    chosen = st.selectbox(
+        "Collect automatically",
+        labels,
+        index=labels.index(current_label),
+        help="Runs in the background worker container, not in this page — it keeps "
+        "collecting while nobody is looking, and stops when you stop the containers.",
+    )
+    chosen_minutes = config.COLLECTOR_INTERVAL_CHOICES[chosen]
+    if chosen_minutes != current_interval:
+        db.set_collector_interval(conn, chosen_minutes)
+        st.rerun()
+
+    # The cost, stated at the moment of the decision and computed from THIS
+    # watchlist rather than from a generic figure — chain sizes differ by an
+    # order of magnitude between one small ticker and a few index ETFs.
+    if chosen_minutes > 0:
+        growth = db.estimated_growth_mb_per_month(conn, chosen_minutes)
+        if growth > 0:
+            st.caption(
+                f"About {growth / 1000:.1f} GB per month at this interval, for your current "
+                f"watchlist. Nothing is ever deleted; expired contracts move to a separate "
+                f"table after {config.CONTRACT_ARCHIVE_GRACE_DAYS} days."
+            )
+        else:
+            st.caption(
+                "Collect once first and this will say how much disk a month of collection "
+                "costs for your watchlist."
+            )
+    else:
+        st.caption("Automatic collection is off. Use the button above to collect on demand.")
+
     with st.expander("📋 Collection log"):
         runs = db.get_recent_runs(conn, limit=30)
         if runs.empty:

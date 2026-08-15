@@ -94,3 +94,41 @@ MAX_ZERO_OI_FRACTION = 0.5
 # history" toggle that passes days=None straight through — bounded by default,
 # unbounded on request, never unbounded-then-secretly-trimmed.
 SNAPSHOT_HISTORY_DAYS = int(os.environ.get("SNAPSHOT_HISTORY_DAYS", "365"))
+
+
+# --- scheduled collection ---
+
+# What the interval selector offers, in minutes. A short list rather than a
+# free-text field, because the floor is set by the data source and not by
+# taste: Yahoo throttles under frequent requests, and a box accepting "1"
+# invites exactly the setting that gets somebody blocked.
+COLLECTOR_INTERVAL_CHOICES = {
+    "Off": 0,
+    "Every 15 minutes": 15,
+    "Hourly": 60,
+    "Every 4 hours": 240,
+    "Once a day": 1440,
+}
+
+# OFF BY DEFAULT, deliberately. A tool that starts hitting a free API the
+# moment it is installed is a bad citizen, and this one promises no account and
+# no card — the least it can do is wait to be asked. Turning it on is also when
+# the interface states what it will cost in disk space, which is the honest
+# moment for that number.
+COLLECTOR_INTERVAL_DEFAULT_MINUTES = 0
+
+# The floor is enforced in code, not only in the list above: a setting written
+# straight into the database, or a list edited later, must not be able to point
+# the collector at something the source will refuse to serve.
+PROVIDER_MIN_INTERVAL_MINUTES = 15
+
+# Roughly what one stored snapshot row costs on disk, measured on the hosted
+# product across millions of rows. Used to tell the user, at the moment they
+# choose an interval, how fast their database will grow — see
+# db.estimated_growth_mb_per_month.
+BYTES_PER_SNAPSHOT_ROW = 214
+
+# Contracts expired longer ago than this move to option_snapshots_archive.
+# Nothing is deleted; the point is only to keep the table every live query
+# reads from carrying years of contracts that can never trade again.
+CONTRACT_ARCHIVE_GRACE_DAYS = int(os.environ.get("CONTRACT_ARCHIVE_GRACE_DAYS", "30"))

@@ -15,7 +15,7 @@ import testdb  # noqa: E402
 
 testdb.configure()
 
-from app import collector, db, metrics  # noqa: E402
+from app import collector, config, db, metrics  # noqa: E402
 
 EXPIRY = "2026-09-18"
 STRIKES = [90, 95, 100, 105, 110]
@@ -46,6 +46,101 @@ def make_chain(iv_shift: float, strike_100_volume: int, strike_100_oi: int) -> p
                 "in_the_money": strike < 100 if option_type == "call" else strike > 100,
             })
     return pd.DataFrame(rows)
+
+
+def check_scheduled_collection(conn):
+    """The interval is a setting, the floor is a rule, and the growth figure is
+    computed rather than guessed.
+
+    The floor is checked against the database and not only against the
+    dropdown, because a value can arrive by other routes — a hand-written
+    UPDATE, a future import, a list of choices edited without noticing what it
+    implies — and the data source that would be hit too often cannot defend
+    itself. Zero has to survive untouched: "off" is not a frequency, and
+    clamping it to the floor would silently switch collection on.
+    """
+    assert db.get_collector_interval(conn) == 0, "collection must be off until asked for"
+
+    db.set_collector_interval(conn, 60)
+    assert db.get_collector_interval(conn) == 60
+
+    db.set_collector_interval(conn, 1)
+    assert db.get_collector_interval(conn) == config.PROVIDER_MIN_INTERVAL_MINUTES, (
+        "a value below the provider floor must be raised to it, not honoured"
+    )
+
+    db.set_collector_interval(conn, 0)
+    assert db.get_collector_interval(conn) == 0, "off must stay off"
+
+    # Every choice the interface offers has to survive the floor, or the list
+    # is offering something the code will silently change.
+    for label, minutes in config.COLLECTOR_INTERVAL_CHOICES.items():
+        db.set_collector_interval(conn, minutes)
+        stored = db.get_collector_interval(conn)
+        assert stored == minutes, f"{label} ({minutes}) came back as {stored}"
+
+    assert db.estimated_growth_mb_per_month(conn, 0) == 0.0, "off costs nothing"
+    hourly = db.estimated_growth_mb_per_month(conn, 60)
+    quarter_hourly = db.estimated_growth_mb_per_month(conn, 15)
+    assert quarter_hourly > hourly > 0, (hourly, quarter_hourly)
+    assert abs(quarter_hourly / hourly - 4) < 1e-9, "four times as often is four times the disk"
+
+    db.set_setting(conn, "unit-probe", "value")
+    assert db.get_setting(conn, "unit-probe") == "value"
+    db.set_setting(conn, "unit-probe", "changed")
+    assert db.get_setting(conn, "unit-probe") == "changed", "a setting must be updatable in place"
+    assert db.get_setting(conn, "never-set", "fallback") == "fallback"
+
+    db.set_collector_interval(conn, 0)
+    print("Scheduled-collection checks passed\n")
+
+
+def check_archiving_moves_and_keeps(conn):
+    """Archiving moves rows; it never removes them, and history stays whole.
+
+    The second half is what makes this worth a check of its own: a snapshot is
+    not archived as a unit — only the contracts inside it that have expired —
+    so every historical read has to union both tables. Reading one of them
+    leaves a chain quietly missing contracts, which is a defect that shows up
+    as a slightly wrong chart rather than as an error.
+    """
+    ticker = "ARCHTEST"
+    long_gone = (datetime.utcnow().date() - timedelta(days=400)).isoformat()
+    live = (datetime.utcnow().date() + timedelta(days=30)).isoformat()
+    moment = datetime.utcnow().replace(microsecond=0) - timedelta(days=1)
+    chain = pd.DataFrame([
+        {"expiry": long_gone, "strike": 100.0, "option_type": "call", "last_price": 1.0,
+         "bid": 0.9, "ask": 1.1, "volume": 10, "open_interest": 100,
+         "implied_volatility": 0.3, "in_the_money": False},
+        {"expiry": live, "strike": 105.0, "option_type": "put", "last_price": 2.0,
+         "bid": 1.9, "ask": 2.1, "volume": 20, "open_interest": 200,
+         "implied_volatility": 0.4, "in_the_money": False},
+    ])
+    db.insert_snapshot(conn, ticker, moment, 100.0, chain)
+
+    before = db.get_snapshots(conn, ticker, days=None)
+    assert len(before) == 2, before
+
+    moved = db.archive_expired_contracts(conn, grace_days=30)
+    assert moved == 1, f"exactly the long-expired contract should have moved, got {moved}"
+
+    hot = conn.execute(
+        "SELECT count(*) FROM option_snapshots WHERE ticker = %s", (ticker,)
+    ).fetchone()[0]
+    assert hot == 1, "the expired contract must be out of the table live queries read"
+
+    after = db.get_snapshots(conn, ticker, days=None)
+    assert len(after) == 2, (
+        "history lost a row: a read that does not union the archive shows an incomplete chain"
+    )
+    assert len(db.get_snapshot_dates(conn, ticker)) == 1, "the moment itself must not be duplicated"
+    ratio = db.get_put_call_ratio(conn, ticker, days=None)
+    assert len(ratio) == 1 and not pd.isna(ratio.iloc[0]["pcr_volume"]), ratio.to_dict()
+
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM option_snapshots_archive WHERE ticker = %s", (ticker,))
+        cur.execute("DELETE FROM option_snapshots WHERE ticker = %s", (ticker,))
+    print("Archiving checks passed (moved, not deleted; history stays whole)\n")
 
 def main():
     # A clean slate, without dropping the database itself: the checks assert
@@ -342,6 +437,9 @@ def main():
     assert len(tracked) == 1
     db.remove_tracked_contract(conn, int(tracked.iloc[0]["id"]))
     assert db.get_tracked_contracts(conn, "TEST").empty
+
+    check_scheduled_collection(conn)
+    check_archiving_moves_and_keeps(conn)
 
     print("ALL SMOKE CHECKS PASSED")
 

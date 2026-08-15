@@ -139,10 +139,19 @@ def get_snapshots(
     if days is not None:
         where += " AND collected_at >= now() - make_interval(days => %s)"
         params.append(days)
+    # Both tables, always. A snapshot is never archived as a whole — only the
+    # contracts inside it that have since expired — so a moment from a few
+    # months ago has its chain split across the two, and reading one of them
+    # draws a chain quietly missing contracts. Found on the hosted product,
+    # where 69 of one ticker's 288 moments were split, on average 8.3% of the
+    # chain on the archive side.
     return pd.read_sql_query(
-        f"SELECT * FROM option_snapshots WHERE {where} ORDER BY collected_at",
+        f"""SELECT * FROM option_snapshots WHERE {where}
+            UNION ALL
+            SELECT * FROM option_snapshots_archive WHERE {where}
+            ORDER BY collected_at""",
         conn,
-        params=params,
+        params=params + params,
         parse_dates=["collected_at", "expiry"],
     )
 
@@ -165,11 +174,17 @@ def get_put_call_ratio(
     raw = pd.read_sql_query(
         f"""SELECT collected_at, option_type,
                    SUM(volume) AS volume, SUM(open_interest) AS open_interest
-            FROM option_snapshots WHERE {where}
+            FROM (
+                SELECT collected_at, option_type, volume, open_interest
+                FROM option_snapshots WHERE {where}
+                UNION ALL
+                SELECT collected_at, option_type, volume, open_interest
+                FROM option_snapshots_archive WHERE {where}
+            ) both_tables
             GROUP BY collected_at, option_type
             ORDER BY collected_at""",
         conn,
-        params=params,
+        params=params + params,
         parse_dates=["collected_at"],
     )
     if raw.empty:
@@ -192,8 +207,11 @@ def get_put_call_ratio(
 
 def get_snapshot_dates(conn: psycopg.Connection, ticker: str) -> list[str]:
     rows = conn.execute(
-        "SELECT DISTINCT collected_at FROM option_snapshots WHERE ticker = %s ORDER BY collected_at",
-        (ticker,),
+        """SELECT collected_at FROM option_snapshots WHERE ticker = %s
+           UNION
+           SELECT collected_at FROM option_snapshots_archive WHERE ticker = %s
+           ORDER BY collected_at""",
+        (ticker, ticker),
     ).fetchall()
     return [r[0] for r in rows]
 
@@ -266,3 +284,100 @@ def get_tracked_contracts(conn: psycopg.Connection, ticker: str) -> pd.DataFrame
         params=(ticker.upper(),),
         parse_dates=["expiry"],
     )
+
+
+# --- settings the running application changes ---
+
+def get_setting(conn: psycopg.Connection, key: str, default: str | None = None) -> str | None:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = %s", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(conn: psycopg.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """INSERT INTO app_settings (key, value, updated_at) VALUES (%s, %s, now())
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()""",
+        (key, str(value)),
+    )
+
+
+COLLECTOR_INTERVAL_KEY = "collector_interval_minutes"
+
+
+def get_collector_interval(conn: psycopg.Connection) -> int:
+    """How often the collector should run, in minutes. Zero means never.
+
+    Read from the database rather than the environment so that changing it is a
+    setting rather than maintenance: the worker re-reads this every cycle, and
+    nothing has to be restarted.
+
+    The floor is applied HERE rather than only in the interface. A value can
+    reach the database by other routes — a hand-written UPDATE, a future import,
+    a list of choices edited without noticing what it implies — and the source
+    that would be hit too often has no way to defend itself. Zero passes
+    through untouched: "off" is not a frequency.
+    """
+    raw = get_setting(conn, COLLECTOR_INTERVAL_KEY)
+    minutes = int(raw) if raw is not None else config.COLLECTOR_INTERVAL_DEFAULT_MINUTES
+    if minutes <= 0:
+        return 0
+    return max(minutes, config.PROVIDER_MIN_INTERVAL_MINUTES)
+
+
+def set_collector_interval(conn: psycopg.Connection, minutes: int) -> None:
+    set_setting(conn, COLLECTOR_INTERVAL_KEY, str(int(minutes)))
+
+
+def estimated_growth_mb_per_month(conn: psycopg.Connection, interval_minutes: int) -> float:
+    """What continuous collection will cost on disk, for THIS watchlist.
+
+    Answered from the rows already collected rather than from a guess: the
+    average chain size differs by an order of magnitude between a single small
+    ticker and a handful of index ETFs, so a generic number would be wrong in
+    the only direction that matters. With nothing collected yet there is
+    nothing to measure and the answer is zero — the interface says so rather
+    than inventing a figure.
+
+    This exists to be shown at the moment somebody switches collection on. A
+    background process filling a stranger's disk without ever having named a
+    number is how a tool gets uninstalled angrily.
+    """
+    if interval_minutes <= 0:
+        return 0.0
+    row = conn.execute(
+        """SELECT count(*)::float / GREATEST(count(DISTINCT collected_at), 1)
+           FROM option_snapshots"""
+    ).fetchone()
+    rows_per_pass = float(row[0] or 0)
+    passes_per_month = (60 / interval_minutes) * 24 * 30
+    return rows_per_pass * passes_per_month * config.BYTES_PER_SNAPSHOT_ROW / 1_000_000
+
+
+# --- archiving ---
+
+def archive_expired_contracts(
+    conn: psycopg.Connection, grace_days: int = config.CONTRACT_ARCHIVE_GRACE_DAYS
+) -> int:
+    """Move snapshots of long-expired contracts to option_snapshots_archive.
+
+    MOVED, NEVER DELETED — the first rule of this project. What this buys is
+    that the table every live query reads stops carrying contracts that can
+    never trade again; the history itself stays, and every historical read
+    unions both tables.
+
+    One transaction: an INSERT that committed without its DELETE would double
+    every archived row, and the union means you would see them twice.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO option_snapshots_archive
+               SELECT * FROM option_snapshots
+               WHERE expiry < current_date - make_interval(days => %s)""",
+            (grace_days,),
+        )
+        moved = cur.rowcount
+        cur.execute(
+            "DELETE FROM option_snapshots WHERE expiry < current_date - make_interval(days => %s)",
+            (grace_days,),
+        )
+    return moved

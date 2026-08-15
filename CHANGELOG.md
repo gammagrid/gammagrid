@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Scheduled collection.** Pick an interval in the sidebar — off, every 15
+  minutes, hourly, every 4 hours, once a day — and a small worker container
+  keeps collecting while nobody is looking. Off by default, because a tool that
+  starts hitting a free API the moment it is installed has made a decision that
+  was not its to make. Fifteen minutes is the floor, enforced in code rather
+  than only in the list, since the limit belongs to the data source. The
+  interval is a setting the worker re-reads every cycle, so changing it takes
+  effect without restarting anything.
+- **The interval selector states what it costs.** GB per month for *your*
+  watchlist, computed from what you have already collected, shown at the moment
+  you choose. A background process filling a stranger's disk without ever
+  naming a number is how a tool gets uninstalled angrily; the README carries
+  the same arithmetic for both a small watchlist and one with an index ETF.
+- **Archiving.** Contracts expired more than 30 days ago move to a separate
+  table, so the one every chart reads stops carrying contracts that can never
+  trade again. Moved, never deleted — collected data is time, and time cannot
+  be re-fetched — and every historical view reads both tables.
+- `scripts/import_sqlite.py`, to bring a pre-v0.4.0 database across. Databases
+  from before v0.3.0 work too: the greeks and `source` columns they lack are
+  filled the way that upgrade filled them. The old file is opened read-only.
+
+### Changed
+
+- **Storage is Postgres, not SQLite.** This is what made scheduled collection
+  possible at all: a background writer working every few minutes while the
+  dashboard reads is the workload a single-writer lock is worst at. `docker
+  compose up` is still one command and now starts a database beside the app.
+  The costs, stated plainly: a backup is `pg_dump` rather than copying one file,
+  running from source means having a Postgres to point `DATABASE_URL` at, and
+  existing data needs the import above. See UPGRADING.md.
+- **Schema changes go through a migration runner** rather than `CREATE TABLE IF
+  NOT EXISTS` on every connection. Two processes now start together, and
+  "create everything if missing" run twice at once is a race; an `ALTER` guarded
+  by catching the error re-runs forever and reports nothing. The runner keeps a
+  ledger, takes an advisory lock so concurrent starts are safe, and refuses to
+  start if a migration that was already applied has since been edited.
+- **Both snapshot indexes now lead with `(ticker, source)`.** The column has
+  existed since v0.3.0 and the indexes had not caught up, so every query
+  filtering by source — which is all of them — left that filter to be applied
+  after the scan.
+
 ### Changed
 
 - **Expired contracts no longer count toward the ticker's average IV.** A

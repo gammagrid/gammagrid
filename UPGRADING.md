@@ -35,6 +35,48 @@ costs a second and it is the whole recovery plan.
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.3.0 → v0.4.0
+
+**Risk: one-way, and it needs one command from you.** Nothing is lost, but the
+application no longer opens the database you have.
+
+**What changes.** Storage moves from SQLite to Postgres. `docker compose up`
+now starts a database next to the app and a worker that can collect on a
+schedule; your `data/options.db` is left exactly where it is and is never
+written to again.
+
+**What you have to do.** Bring your history across, once:
+
+```bash
+docker compose up -d
+docker compose run --rm -v "$PWD/data:/import" app \
+    python scripts/import_sqlite.py /import/options.db
+```
+
+It prints what it copied. Add `--dry-run` first if you would rather see the
+counts before anything is written. The old file is opened read-only; delete it
+yourself once you have seen your charts, and not before.
+
+Databases from before v0.3.0 are handled too — they have no greek columns and
+no `source` column, and the import fills those the same way the v0.3.0 upgrade
+did: greeks empty, source `yahoo`. Both are simply true, since Yahoo was the
+only provider those files ever saw.
+
+**Why it is one-way.** v0.3.0 cannot read a Postgres database, so going back
+means going back to `data/options.db` — which still holds everything up to the
+day you moved, and nothing after it.
+
+**What you gain, and what it costs.** Scheduled collection becomes possible at
+all: a background writer working every few minutes while the dashboard reads is
+the workload SQLite's single-writer lock is worst at. The cost is that a backup
+is `pg_dump` rather than copying one file, and that running from source now
+means having a Postgres to point `DATABASE_URL` at.
+
+**Also in this release:** contracts that expired more than 30 days ago move to a
+separate table. They are moved, never deleted, and every historical view reads
+both tables — this only keeps the table your charts hit from carrying contracts
+that can never trade again.
+
 ## v0.2.0 → v0.3.0
 
 **Risk: one-way.** Safe to do, keep the backup until you have seen a chart.

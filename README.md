@@ -36,13 +36,22 @@ opens. Self-hosting stays free and open source either way.
 5. **Open [http://localhost:8501](http://localhost:8501) in your browser.**
    That's it — GammaGrid is running.
 
-Data is saved to `data/options.db` on your machine and survives restarts.
-Press `Ctrl+C` in the terminal to stop the app; run the same command again to
-bring it back up with your data intact.
+Your data lives in a Postgres database that `docker compose` starts alongside
+the app and keeps in a Docker volume, so it survives restarts. Press `Ctrl+C` to
+stop; run the same command again to bring everything back with your data intact.
+`docker compose down` also keeps it — only `down -v` deletes it, and that
+removes every snapshot you have collected.
 
-**Updating later?** [UPGRADING.md](UPGRADING.md) says, per release, what happens
-to the database you have already filled and whether the upgrade can be undone.
-Your whole backup is `cp data/options.db data/options.db.backup`.
+Back it up with:
+
+```bash
+docker compose exec postgres pg_dump -U gammagrid gammagrid | gzip > gammagrid-backup.sql.gz
+```
+
+**Coming from a version before v0.4.0?** Your history is in `data/options.db`
+and the app no longer reads that file. `scripts/import_sqlite.py` copies it
+across in one command — see [UPGRADING.md](UPGRADING.md), which says per release
+what happens to the database you have already filled.
 
 ## What you get
 
@@ -66,8 +75,8 @@ Your whole backup is `cp data/options.db data/options.db.backup`.
 1. In the left sidebar, enter a ticker (e.g. `AAPL`) and click **Add** — it
    appears in the watchlist.
 2. Click **Collect data** — the app fetches the current option chain for every
-   watchlist ticker via Yahoo Finance and saves a snapshot. Collection is
-   manual; there is no automatic schedule.
+   watchlist ticker via Yahoo Finance and saves a snapshot. To keep collecting
+   without you, pick an interval under **Collect automatically** (see below).
 3. Pick a ticker in the dropdown above the tabs to open the metrics:
    - **Overview** — Put/Call Ratio over time and the IV surface
    - **Max Pain / GEX** — max pain and the approximate gamma-exposure profile for a selected expiry
@@ -80,7 +89,39 @@ Your whole backup is `cp data/options.db data/options.db.backup`.
 
 Most history-based metrics (other than Put/Call Ratio, average IV, and OI
 Delta) need several days of collection — some charts require at least two
-snapshots. Click **Collect data** daily (or a few times a day) to build up history.
+snapshots, so history is worth building up before the more interesting screens
+say anything.
+
+## Automatic collection, and what it costs on disk
+
+**Off by default.** A tool that starts hitting a free API the moment it is
+installed has made a decision that was not its to make, so you turn it on:
+pick **Off / Every 15 minutes / Hourly / Every 4 hours / Once a day** in the
+sidebar. It runs in a small worker container that `docker compose up` already
+started, which means it keeps collecting while nobody is looking — and stops
+when you stop the containers. Fifteen minutes is the floor: Yahoo throttles
+under frequent requests, and the floor is enforced in code, not just in the
+list.
+
+Collecting continuously fills a disk, so here is the arithmetic rather than a
+shrug. One stored row costs about 214 bytes, and one pass stores one row per
+contract in every watchlist ticker's chain — a few hundred for a small single
+name, ~14,000 for SPY:
+
+| Interval | Small watchlist (~1,000 contracts) | With an index ETF (~15,000) |
+|---|---|---|
+| Once a day | ~6 MB/month | ~96 MB/month |
+| Every 4 hours | ~39 MB/month | ~578 MB/month |
+| Hourly | ~154 MB/month | ~2.3 GB/month |
+| Every 15 minutes | ~617 MB/month | ~9.2 GB/month |
+
+The sidebar shows this figure for **your** watchlist at the moment you choose an
+interval, computed from what you have already collected rather than from the
+table above.
+
+**Nothing is ever deleted.** Contracts that expired more than 30 days ago move
+to a separate table so the one every chart reads stays small; their history
+stays readable and still appears in every historical view.
 
 ## Screenshots
 

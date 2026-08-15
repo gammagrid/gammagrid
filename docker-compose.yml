@@ -34,5 +34,18 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  worker:
+    # Scheduled collection, in its own process. It does nothing at all until
+    # you switch collection on in the dashboard — the default is off — so
+    # starting it costs nothing and there is no second thing to remember later.
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment:
+      - DATABASE_URL=postgresql://gammagrid:gammagrid@postgres:5432/gammagrid
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   gammagrid-data:
