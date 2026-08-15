@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-15
+
+### Fixed
+
+- **The Volatility chart stops changing under you.** The volume-weighted
+  average IV was computed on read, so a point from three months ago was
+  re-averaged over a shrinking set of contracts as they expired and moved to
+  the archive — the same July point showed one value in August and another in
+  October. It is now computed when the chain is collected and stored with it,
+  which is what it was.
+
+### Changed
+
+- **No view loads a ticker's whole history any more.** Every screen used to
+  work from one frame of every row collected for the selected ticker, loaded on
+  each interaction and filtered in pandas by whichever view was showing. That
+  was fine while collection was a button — history only grew when you pressed
+  it — and stopped being fine the moment v0.4.0 let it run on a schedule.
+  Measured in a running container on 102,124 rows: **301 ms** for the old
+  whole-history read against **36 ms** for the latest snapshot, 26 ms for a
+  chosen moment in Replay, 59 ms for the two days OI Delta compares, and 1 ms
+  for the Replay list. The gap widens with every day you collect.
+
+  Each view now asks for what it shows: one snapshot for the screener, max
+  pain, the GEX profile and the selectors; the chosen moment for the heatmap;
+  two calendar days for OI Delta; one contract for the Contract view.
+
+- **The Replay list comes from the collection log** rather than `SELECT
+  DISTINCT` over the snapshots. The collector writes one timestamp per pass
+  into both, and the log holds one row per pass against one row per contract
+  per pass — Postgres has no loose index scan, so the old query's cost grew
+  with how long you had been collecting rather than with the size of the answer.
+
+- **The Unusual Activity baseline is rebuilt once a day by the worker** instead
+  of aggregated on every view: it is a mean and deviation over one snapshot per
+  day per contract, and the answer does not grow with time even though the
+  input does. What is **not** stored is the verdict — the rules deciding what
+  counts as unusual stay in the shared calculation core, and the checks assert
+  the stored numbers equal what those functions compute over the same rows.
+
+  Nothing here changes what gets flagged.
+
 ## [0.4.0] - 2026-08-15
 
 ### Added

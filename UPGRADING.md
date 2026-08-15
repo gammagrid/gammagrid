@@ -35,6 +35,31 @@ costs a second and it is the whole recovery plan.
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.4.0 → v0.4.1
+
+**Risk: safe.** Start the new version. Nothing is rewritten and nothing is
+deleted.
+
+**What changes in the database.** Two tables are added on first start —
+`snapshot_iv_summary` and `contract_volume_stats` — and the first is filled
+from what you have already collected, archive included. Expect that backfill to
+take seconds rather than minutes; it is one pass and it runs once.
+
+Both hold numbers that used to be recomputed on every page view. Your snapshots
+are not touched.
+
+**What you will notice.** Pages that used to get slower as your history grew no
+longer do. One number moves: the volume-weighted average IV on the Volatility
+chart is now what it was at the moment of collection, and stops drifting as
+contracts expire and move to the archive — historical points may sit slightly
+differently than they did yesterday, once, and then never again.
+
+**Going back.** v0.4.0 ignores the two new tables and runs fine on the same
+database. One caveat if you do go back and keep collecting: the old version
+does not write `snapshot_iv_summary`, so the Volatility chart will have gaps
+for whatever you collect while you are there, and coming forward again does not
+fill them — the backfill has already run. Everything else catches up on its own.
+
 ## v0.3.0 → v0.4.0
 
 **Risk: one-way, and it needs one command from you.** Nothing is lost, but the
