@@ -13,7 +13,6 @@ Usage: python tests/unit_tests.py
 
 import os
 import sys
-import tempfile
 from datetime import datetime
 
 import numpy as np
@@ -21,18 +20,10 @@ import pandas as pd
 from scipy.stats import norm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import testdb  # noqa: E402
 
-# BEFORE importing anything from app: config.DB_PATH is read at import time, so
-# setting this later has no effect and the checks below would run against the
-# developer's real database. Found the hard way — an earlier version of this
-# file set it inside the function that needed it and wrote its fixtures into
-# data/options.db. smoke_test.py sets it at the top for the same reason.
-# setdefault for the same reason smoke_test.py uses it: when coverage_report.py
-# runs both in one process, only the first assignment can take effect.
-os.environ.setdefault(
-    "OPTIONS_TRACKER_DB",
-    os.path.join(tempfile.mkdtemp(prefix="gammagrid-unit-"), "unit.db"),
-)
+testdb.configure()
 
 from app import db, metrics  # noqa: E402
 
@@ -98,7 +89,6 @@ def check_years_to_expiry():
     assert np.allclose(vector, scalar, rtol=1e-12), (vector, scalar)
     print("years_to_expiry checks passed")
 
-
 def check_greeks_respond_to_time():
     """Gamma scales with 1/sqrt(T), which is why the time-to-expiry error
     mattered: understating T overstates gamma, and GEX is gamma × open
@@ -117,7 +107,6 @@ def check_greeks_respond_to_time():
     expired = metrics._black_scholes_greeks(years_to_expiry=-0.5 / 365, **at_the_money)
     assert all(value == 0.0 for value in expired.values()), expired
     print("greeks/time checks passed")
-
 
 def check_put_call_ratio_matches_sql():
     """db.get_put_call_ratio must return exactly what grouping the raw rows
@@ -169,7 +158,6 @@ def check_put_call_ratio_matches_sql():
     assert len(db.get_snapshots(conn, "UNIT", days=None)) > len(db.get_snapshots(conn, "UNIT"))
     conn.close()
     print("put/call ratio and history bound checks passed")
-
 
 def check_collector_isolation():
     """One ticker failing must not stop the others (spec FR12), and a chain
@@ -230,7 +218,6 @@ def check_collector_isolation():
     conn.close()
     print("collector isolation checks passed")
 
-
 def check_watchlist_and_snapshot_dates():
     """Removing a ticker takes it off the list without touching what was
     already collected — the one rule this project will not break — and
@@ -258,7 +245,6 @@ def check_watchlist_and_snapshot_dates():
     )
     conn.close()
     print("watchlist and snapshot-date checks passed")
-
 
 def check_screener_expiry_awareness():
     """A snapshot ages. Its greeks stay correct as of the collection — that is
@@ -294,7 +280,6 @@ def check_screener_expiry_awareness():
     # what prices the greeks beside it, and the two are deliberately different.
     assert (table["dte"] == 7).all(), table["dte"].tolist()
     print("screener expiry-awareness checks passed")
-
 
 def check_metrics_core_is_pristine():
     """app/metrics_core.py is byte-identical to the copy in the hosted product's
@@ -341,7 +326,6 @@ def check_metrics_core_is_pristine():
     for name in sorted(used):
         assert hasattr(config, name), f"metrics_core.py reads config.{name}, which does not exist here"
     print(f"shared-core checks passed ({len(used)} config constants, hash matches)")
-
 
 def check_dividend_yield_defaults_to_the_old_model():
     """Greeks gained a dividend yield when the core became shared. At q=0 the
@@ -410,7 +394,6 @@ def check_dividend_yield_defaults_to_the_old_model():
     assert abs(put_q["charm"] - with_q["charm"]) > 1e-9, "charm must differ by side when q != 0"
     print(f"dividend-yield reduction checks passed ({checked} contracts, exact equality)")
 
-
 def check_iv_average_survives_a_contract_without_iv():
     """One contract with no implied volatility must not empty the whole day's
     volume-weighted average.
@@ -460,7 +443,6 @@ def check_iv_average_survives_a_contract_without_iv():
     assert np.isnan(float(metrics.iv_weighted_average(only_nan).iloc[0]["iv_weighted_avg"]))
     print("IV-average checks passed")
 
-
 def check_pricing_inputs():
     """PricingInputs is the (r, q) pair every greek is computed with. The
     default instance must reproduce the flat-rate model this project used
@@ -488,7 +470,6 @@ def check_pricing_inputs():
     # risk_free_rate() on an empty curve has nothing to interpolate.
     assert metrics.risk_free_rate({}, 1.0) is None
     print("pricing-input checks passed")
-
 
 def check_unpriceable_contracts_are_skipped():
     """A contract Black-Scholes cannot price must produce no greeks rather than
@@ -533,7 +514,6 @@ def check_unpriceable_contracts_are_skipped():
         assert all(np.isnan(value) for value in no_spot.values()), (missing, no_spot)
     print("unpriceable-contract checks passed")
 
-
 def check_contracts_backing_expiry():
     """How many contracts with open interest stand behind an expiry's numbers.
 
@@ -563,7 +543,6 @@ def check_contracts_backing_expiry():
     assert metrics.contracts_backing_expiry(df, other) == 1
     assert metrics.contracts_backing_expiry(df, pd.Timestamp("2027-01-15")) == 0, "unknown expiry"
     print("expiry-backing checks passed")
-
 
 def check_provider_registry():
     """get_provider() is the single place a name becomes a working object.
@@ -603,7 +582,6 @@ def check_provider_registry():
         assert greek in providers.CHAIN_COLUMNS, f"{greek} missing from the provider contract"
     print("provider registry checks passed")
 
-
 def main():
     check_years_to_expiry()
     check_greeks_respond_to_time()
@@ -619,7 +597,6 @@ def main():
     check_unpriceable_contracts_are_skipped()
     check_contracts_backing_expiry()
     print("\nALL UNIT CHECKS PASSED")
-
 
 if __name__ == "__main__":
     main()

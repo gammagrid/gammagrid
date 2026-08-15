@@ -1,125 +1,61 @@
-"""The single access point to SQLite. Nothing outside this module
-opens a database connection directly."""
+"""The single access point to the database. Nothing outside this module opens
+a connection directly."""
 
 from __future__ import annotations
 
-import os
-import sqlite3
-from datetime import datetime, timedelta
+import warnings
+from datetime import datetime
 
 import pandas as pd
+import psycopg
 
-from app import config
+from app import config, migrate
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS watchlist (
-    ticker TEXT PRIMARY KEY,
-    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+# pandas prefers SQLAlchemy and says so on every read against a plain DBAPI
+# connection. The advice does not apply here — this module owns every query and
+# has no use for an ORM — and the warning would otherwise print on each page
+# load, training everyone to ignore the console.
+warnings.filterwarnings(
+    "ignore", message="pandas only supports SQLAlchemy connectable.*", category=UserWarning
+)
 
-CREATE TABLE IF NOT EXISTS option_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker TEXT NOT NULL,
-    collected_at TIMESTAMP NOT NULL,
-    underlying_price REAL NOT NULL,
-    expiry DATE NOT NULL,
-    strike REAL NOT NULL,
-    option_type TEXT NOT NULL CHECK (option_type IN ('call','put')),
-    last_price REAL,
-    bid REAL,
-    ask REAL,
-    volume INTEGER,
-    open_interest INTEGER,
-    implied_volatility REAL,
-    in_the_money BOOLEAN,
-    -- Greeks as the provider served them, stored rather than recomputed: they
-    -- come from the provider's own model and cannot be reconstructed later.
-    -- Yahoo serves none, so with the default setup these stay NULL and the
-    -- reader computes greeks from implied volatility (see metrics_core).
-    delta REAL,
-    gamma REAL,
-    theta REAL,
-    vega REAL,
-    -- Which provider produced this row. Charts must never mix sources:
-    -- implied volatility is a *computed* number, so the same contract on the
-    -- same day legitimately differs between providers, and splicing two of
-    -- them draws a jump that never happened on the market.
-    source TEXT NOT NULL DEFAULT 'yahoo'
-);
-CREATE INDEX IF NOT EXISTS idx_snapshots_ticker_date ON option_snapshots(ticker, collected_at);
-CREATE INDEX IF NOT EXISTS idx_snapshots_contract ON option_snapshots(ticker, expiry, strike, option_type);
+_schema_ready = False
 
-CREATE TABLE IF NOT EXISTS collection_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at TIMESTAMP NOT NULL,
-    finished_at TIMESTAMP,
-    ticker TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('success','failed')),
-    error_message TEXT
-);
+def get_connection() -> psycopg.Connection:
+    """Open a connection, bringing the schema up to date on the first one.
 
-CREATE TABLE IF NOT EXISTS tracked_contracts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker TEXT NOT NULL,
-    expiry DATE NOT NULL,
-    strike REAL NOT NULL,
-    option_type TEXT NOT NULL CHECK (option_type IN ('call','put')),
-    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(ticker, expiry, strike, option_type)
-);
-"""
+    Migrations run here rather than from a command you have to remember: the
+    app and the collector both start from `docker compose up`, and a step that
+    can be forgotten is a step that will be. `migrate.ensure_current` takes an
+    advisory lock, so the two starting at once is safe and only one of them
+    does the work.
 
-
-# Additive migrations for pre-existing databases — CREATE TABLE IF NOT EXISTS
-# in SCHEMA does not add columns to a table that was created earlier without
-# them. ADD COLUMN does not support IF NOT EXISTS in all SQLite versions,
-# so idempotency is achieved by catching OperationalError on re-runs.
-MIGRATIONS = [
-    "ALTER TABLE collection_runs ADD COLUMN rows_fetched INTEGER",
-    "ALTER TABLE collection_runs ADD COLUMN oi_zero_fraction REAL",
-    # Provider-supplied greeks and the source that produced the row, added with
-    # app/providers/. Existing rows get NULL greeks, which is the truth — Yahoo
-    # serves none and nothing else has ever written here — and `source` is
-    # backfilled to 'yahoo' by the column default, which is equally true: it is
-    # the only source this application has ever had. A label that can only be
-    # applied at write time has to be added before the second provider exists,
-    # not after, or every row collected in between is permanently unattributable.
-    "ALTER TABLE option_snapshots ADD COLUMN delta REAL",
-    "ALTER TABLE option_snapshots ADD COLUMN gamma REAL",
-    "ALTER TABLE option_snapshots ADD COLUMN theta REAL",
-    "ALTER TABLE option_snapshots ADD COLUMN vega REAL",
-    "ALTER TABLE option_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT 'yahoo'",
-]
-
-
-def get_connection() -> sqlite3.Connection:
-    db_dir = os.path.dirname(config.DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(config.DB_PATH)
-    conn.executescript(SCHEMA)
-    for migration in MIGRATIONS:
-        try:
-            conn.execute(migration)
-        except sqlite3.OperationalError:
-            pass  # column already added in a previous run
-    conn.commit()
+    autocommit=True because most functions here only read, and a plain SELECT
+    under autocommit=False still opens a transaction — leaving connections
+    "idle in transaction" for as long as a Streamlit session lives. Writers
+    that need atomicity open `conn.transaction()` explicitly.
+    """
+    global _schema_ready
+    conn = psycopg.connect(config.DATABASE_URL, autocommit=True)
+    if not _schema_ready:
+        migrate.ensure_current(conn)
+        _schema_ready = True
     return conn
 
 
 # --- watchlist ---
 
-def add_ticker(conn: sqlite3.Connection, ticker: str) -> None:
-    conn.execute("INSERT OR IGNORE INTO watchlist (ticker) VALUES (?)", (ticker.upper(),))
+def add_ticker(conn: psycopg.Connection, ticker: str) -> None:
+    conn.execute("INSERT INTO watchlist (ticker) VALUES (%s) ON CONFLICT DO NOTHING", (ticker.upper(),))
     conn.commit()
 
 
-def remove_ticker(conn: sqlite3.Connection, ticker: str) -> None:
-    conn.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker.upper(),))
+def remove_ticker(conn: psycopg.Connection, ticker: str) -> None:
+    conn.execute("DELETE FROM watchlist WHERE ticker = %s", (ticker.upper(),))
     conn.commit()
 
 
-def get_watchlist(conn: sqlite3.Connection) -> list[str]:
+def get_watchlist(conn: psycopg.Connection) -> list[str]:
     rows = conn.execute("SELECT ticker FROM watchlist ORDER BY ticker").fetchall()
     return [r[0] for r in rows]
 
@@ -127,7 +63,7 @@ def get_watchlist(conn: sqlite3.Connection) -> list[str]:
 # --- snapshots ---
 
 def insert_snapshot(
-    conn: sqlite3.Connection,
+    conn: psycopg.Connection,
     ticker: str,
     collected_at: datetime,
     underlying_price: float,
@@ -153,7 +89,7 @@ def insert_snapshot(
     rows = [
         (
             ticker,
-            collected_at.isoformat(),
+            collected_at,
             underlying_price,
             row.expiry,
             row.strike,
@@ -173,19 +109,24 @@ def insert_snapshot(
         )
         for row in chain_df.itertuples()
     ]
-    conn.executemany(
-        """INSERT INTO option_snapshots
+    # One transaction for the whole chain, and a cursor because psycopg keeps
+    # executemany there rather than on the connection. Under autocommit each
+    # row would otherwise commit on its own, so a failure halfway would leave
+    # a partial chain stored — a snapshot missing contracts is worse than no
+    # snapshot, because nothing downstream can tell the difference.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            """INSERT INTO option_snapshots
            (ticker, collected_at, underlying_price, expiry, strike, option_type,
             last_price, bid, ask, volume, open_interest, implied_volatility, in_the_money,
             delta, gamma, theta, vega, source)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        rows,
-    )
-    conn.commit()
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            rows,
+        )
 
 
 def get_snapshots(
-    conn: sqlite3.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
+    conn: psycopg.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
 ) -> pd.DataFrame:
     """A ticker's snapshot history, bounded to the last `days` by default.
 
@@ -193,14 +134,11 @@ def get_snapshots(
     history" toggle, and by tooling that genuinely needs the whole series. No
     UI path should pass None by default: see config.SNAPSHOT_HISTORY_DAYS for
     why the bound exists."""
-    where = "ticker = ?"
+    where = "ticker = %s"
     params: list = [ticker]
     if days is not None:
-        # SQLite has no interval arithmetic; the cutoff is computed here and
-        # compared as text, which works because collected_at is stored in
-        # ISO 8601 and ISO strings sort chronologically.
-        where += " AND collected_at >= ?"
-        params.append((datetime.utcnow() - timedelta(days=days)).isoformat(sep=" "))
+        where += " AND collected_at >= now() - make_interval(days => %s)"
+        params.append(days)
     return pd.read_sql_query(
         f"SELECT * FROM option_snapshots WHERE {where} ORDER BY collected_at",
         conn,
@@ -210,7 +148,7 @@ def get_snapshots(
 
 
 def get_put_call_ratio(
-    conn: sqlite3.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
+    conn: psycopg.Connection, ticker: str, days: int | None = config.SNAPSHOT_HISTORY_DAYS
 ) -> pd.DataFrame:
     """Put/call ratio per collection, aggregated in SQL.
 
@@ -219,11 +157,11 @@ def get_put_call_ratio(
     load did — measured on the hosted sibling at 5.0s and ~390MB of DataFrame
     for one liquid ticker, against 0.8s and a few kilobytes for the same
     numbers aggregated here."""
-    where = "ticker = ?"
+    where = "ticker = %s"
     params: list = [ticker]
     if days is not None:
-        where += " AND collected_at >= ?"
-        params.append((datetime.utcnow() - timedelta(days=days)).isoformat(sep=" "))
+        where += " AND collected_at >= now() - make_interval(days => %s)"
+        params.append(days)
     raw = pd.read_sql_query(
         f"""SELECT collected_at, option_type,
                    SUM(volume) AS volume, SUM(open_interest) AS open_interest
@@ -252,9 +190,9 @@ def get_put_call_ratio(
     return result.reset_index()
 
 
-def get_snapshot_dates(conn: sqlite3.Connection, ticker: str) -> list[str]:
+def get_snapshot_dates(conn: psycopg.Connection, ticker: str) -> list[str]:
     rows = conn.execute(
-        "SELECT DISTINCT collected_at FROM option_snapshots WHERE ticker = ? ORDER BY collected_at",
+        "SELECT DISTINCT collected_at FROM option_snapshots WHERE ticker = %s ORDER BY collected_at",
         (ticker,),
     ).fetchall()
     return [r[0] for r in rows]
@@ -263,7 +201,7 @@ def get_snapshot_dates(conn: sqlite3.Connection, ticker: str) -> list[str]:
 # --- collection runs ---
 
 def log_run(
-    conn: sqlite3.Connection,
+    conn: psycopg.Connection,
     started_at: datetime,
     finished_at: datetime,
     ticker: str,
@@ -280,10 +218,10 @@ def log_run(
     conn.execute(
         """INSERT INTO collection_runs
            (started_at, finished_at, ticker, status, error_message, rows_fetched, oi_zero_fraction)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
         (
-            started_at.isoformat(),
-            finished_at.isoformat(),
+            started_at,
+            finished_at,
             ticker,
             status,
             error_message,
@@ -294,9 +232,9 @@ def log_run(
     conn.commit()
 
 
-def get_recent_runs(conn: sqlite3.Connection, limit: int = 50) -> pd.DataFrame:
+def get_recent_runs(conn: psycopg.Connection, limit: int = 50) -> pd.DataFrame:
     return pd.read_sql_query(
-        "SELECT * FROM collection_runs ORDER BY started_at DESC LIMIT ?",
+        "SELECT * FROM collection_runs ORDER BY started_at DESC LIMIT %s",
         conn,
         params=(limit,),
     )
@@ -305,25 +243,25 @@ def get_recent_runs(conn: sqlite3.Connection, limit: int = 50) -> pd.DataFrame:
 # --- tracked contracts (spec FR14) ---
 
 def add_tracked_contract(
-    conn: sqlite3.Connection, ticker: str, expiry, strike: float, option_type: str
+    conn: psycopg.Connection, ticker: str, expiry, strike: float, option_type: str
 ) -> None:
     expiry_str = pd.Timestamp(expiry).strftime("%Y-%m-%d")
     conn.execute(
-        """INSERT OR IGNORE INTO tracked_contracts (ticker, expiry, strike, option_type)
-           VALUES (?, ?, ?, ?)""",
+        """INSERT INTO tracked_contracts (ticker, expiry, strike, option_type)
+           VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING""",
         (ticker.upper(), expiry_str, float(strike), option_type),
     )
     conn.commit()
 
 
-def remove_tracked_contract(conn: sqlite3.Connection, contract_id: int) -> None:
-    conn.execute("DELETE FROM tracked_contracts WHERE id = ?", (contract_id,))
+def remove_tracked_contract(conn: psycopg.Connection, contract_id: int) -> None:
+    conn.execute("DELETE FROM tracked_contracts WHERE id = %s", (contract_id,))
     conn.commit()
 
 
-def get_tracked_contracts(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
+def get_tracked_contracts(conn: psycopg.Connection, ticker: str) -> pd.DataFrame:
     return pd.read_sql_query(
-        "SELECT * FROM tracked_contracts WHERE ticker = ? ORDER BY expiry, strike",
+        "SELECT * FROM tracked_contracts WHERE ticker = %s ORDER BY expiry, strike",
         conn,
         params=(ticker.upper(),),
         parse_dates=["expiry"],

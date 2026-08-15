@@ -26,12 +26,16 @@ import ast
 import builtins
 import os
 import sys
-import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import testdb  # noqa: E402
+
+testdb.configure()
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DASHBOARD = os.path.join(REPO, "app", "dashboard.py")
@@ -40,7 +44,6 @@ VIEWS = [
     "Overview", "Max Pain / GEX", "GEX Heatmap", "Volatility (IV)",
     "Contract", "Screener", "Unusual Activity", "OI Delta",
 ]
-
 
 def check_no_cross_view_names() -> list[str]:
     """No view may read a name that only another view assigns."""
@@ -162,7 +165,6 @@ def check_no_cross_view_names() -> list[str]:
                 )
     return problems
 
-
 def seed(db) -> None:
     """A small but complete chain: two expiries, three strikes, both sides,
     three collections. A view that renders only because its data was empty
@@ -202,6 +204,26 @@ def seed(db) -> None:
         )
     conn.close()
 
+@contextmanager
+def empty_database():
+    """Truncate every table the renders touch, and hand back a clean database.
+
+    A context manager rather than a plain call so that the block below keeps
+    its shape from when this was a temporary SQLite file — and so that the
+    emptying is visibly scoped to the renders rather than something that
+    happened earlier in the module.
+
+    TRUNCATE, not DROP: the schema is owned by the migrations, and recreating
+    it here would mean this file quietly holds a second copy of it.
+    """
+    from app import db
+
+    conn = db.get_connection()
+    try:
+        testdb.truncate_all(conn)
+        yield
+    finally:
+        conn.close()
 
 def main():
     problems = check_no_cross_view_names()
@@ -214,8 +236,10 @@ def main():
 
     from streamlit.testing.v1 import AppTest
 
-    with tempfile.TemporaryDirectory() as tmp:
-        os.environ["OPTIONS_TRACKER_DB"] = os.path.join(tmp, "render.db")
+    # The same throwaway database the other suites use, emptied first: the
+    # views are rendered against fixtures written below, and a leftover row
+    # from another run would change what is on screen.
+    with empty_database():
         from app import collector, db
 
         # The Contract view fetches daily prices to show realized volatility.
@@ -266,7 +290,6 @@ def main():
             print(f"  - {line}")
         raise SystemExit(1)
     print("\nALL VIEWS RENDERED")
-
 
 if __name__ == "__main__":
     main()

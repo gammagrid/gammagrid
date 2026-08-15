@@ -1,6 +1,20 @@
 import os
 
-DB_PATH = os.environ.get("OPTIONS_TRACKER_DB", "data/options.db")
+# Postgres replaced SQLite in this release. The reason is the scheduled
+# collector: a background worker writing every few minutes while the dashboard
+# reads is exactly the workload SQLite's single-writer lock is worst at, and the
+# archiving and per-contract bookkeeping that continuous collection needs are
+# the features that made a real engine pay for itself.
+#
+# What it costs, stated plainly because the README used to promise otherwise:
+# the app no longer runs from a single file, and a backup is `pg_dump` rather
+# than copying one. `docker compose up` is still one command.
+#
+# The default matches docker-compose.yml, so nothing has to be set by hand
+# there. Running from source against your own server means setting this.
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://gammagrid:gammagrid@localhost:5432/gammagrid"
+)
 
 # Unusual activity (spec FR16): volume must be a z-score outlier relative to
 # the contract's own history, not just exceed a flat multiplier — otherwise

@@ -17,16 +17,14 @@ import io
 import os
 import pathlib
 import sys
-import tempfile
 import time
 
-# Set before the suites are imported, because config.DB_PATH is read at import
-# time: whichever module imports app.config first fixes the path for the whole
-# process. One throwaway database, chosen here, for every suite in this run.
-os.environ.setdefault(
-    "OPTIONS_TRACKER_DB",
-    os.path.join(tempfile.mkdtemp(prefix="gammagrid-coverage-"), "checks.db"),
-)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import testdb  # noqa: E402
+
+# Before any suite is imported: they read the target at import time, and this
+# is also what refuses to run against anything but a disposable database.
+testdb.configure()
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -76,7 +74,6 @@ EXEMPT = {
 
 COVERAGE_FLOOR = 100.0  # percent, excluding EXEMPT
 
-
 def declared_functions() -> dict[str, str]:
     """{qualified name: file:line} for every def in the measured modules."""
     found = {}
@@ -96,7 +93,6 @@ def declared_functions() -> dict[str, str]:
 
         walk(tree)
     return found
-
 
 def run_suites_with_tracing():
     """Executes every suite in-process under a profiler, so we see what ran.
@@ -154,7 +150,6 @@ def run_suites_with_tracing():
         sys.stdout, sys.stderr = stdout, stderr
     return results, captured.getvalue(), called, time.perf_counter() - started
 
-
 def matches(declared, called):
     """A declared `module.Class.method` counts as covered under any shape the
     tracer can report it (qualname, or bare name on older Pythons)."""
@@ -162,7 +157,6 @@ def matches(declared, called):
         return True
     module, _, rest = declared.partition(".")
     return f"{module}.{rest.rsplit('.', 1)[-1]}" in called
-
 
 def main() -> int:
     results, output, called, seconds = run_suites_with_tracing()
@@ -191,7 +185,6 @@ def main() -> int:
               f"{COVERAGE_FLOOR:.0f}%.", file=sys.stderr)
         return 2
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

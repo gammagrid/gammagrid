@@ -1,11 +1,38 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=gammagrid
+      - POSTGRES_PASSWORD=gammagrid
+      - POSTGRES_DB=gammagrid
+    volumes:
+      # Your data lives here, in a named volume rather than a bind mount, so
+      # that Postgres owns the file permissions and nothing on the host has to
+      # match its uid. `docker compose down` keeps it; only `down -v` removes
+      # it, and that deletes every snapshot you have collected.
+      - gammagrid-data:/var/lib/postgresql/data
+    # Nothing outside this compose project needs the database, so the port is
+    # not published at all. Add `ports: ["127.0.0.1:5432:5432"]` if you want to
+    # connect with your own client — on localhost only, never 0.0.0.0.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gammagrid"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   app:
     build: .
     ports:
       # The port is published on localhost only — the app must not be
       # reachable from the local network (spec section 5.3).
       - "127.0.0.1:8501:8501"
-    volumes:
-      - ./data:/app/data
     environment:
-      - OPTIONS_TRACKER_DB=data/options.db
+      - DATABASE_URL=postgresql://gammagrid:gammagrid@postgres:5432/gammagrid
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  gammagrid-data:

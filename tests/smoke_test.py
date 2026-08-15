@@ -10,17 +10,15 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-# setdefault, not assignment: config.DB_PATH is read at import time, so when
-# coverage_report.py runs several scripts in one process only the first
-# assignment can take effect. Whoever gets there first picks the throwaway
-# path; nobody silently ends up on the real database.
-os.environ.setdefault("OPTIONS_TRACKER_DB", "/tmp/options_tracker_smoke_test.db")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import testdb  # noqa: E402
+
+testdb.configure()
 
 from app import collector, db, metrics  # noqa: E402
 
 EXPIRY = "2026-09-18"
 STRIKES = [90, 95, 100, 105, 110]
-
 
 def make_chain(iv_shift: float, strike_100_volume: int, strike_100_oi: int) -> pd.DataFrame:
     """strike_100_volume/oi varies per snapshot to exercise daily normalization;
@@ -49,10 +47,13 @@ def make_chain(iv_shift: float, strike_100_volume: int, strike_100_oi: int) -> p
             })
     return pd.DataFrame(rows)
 
-
 def main():
-    if os.path.exists(os.environ["OPTIONS_TRACKER_DB"]):
-        os.remove(os.environ["OPTIONS_TRACKER_DB"])
+    # A clean slate, without dropping the database itself: the checks assert
+    # counts, and a leftover row from a previous run makes them fail in a way
+    # that looks like a code defect.
+    reset = db.get_connection()
+    testdb.truncate_all(reset)
+    reset.close()
 
     conn = db.get_connection()
     db.add_ticker(conn, "TEST")
@@ -343,7 +344,6 @@ def main():
     assert db.get_tracked_contracts(conn, "TEST").empty
 
     print("ALL SMOKE CHECKS PASSED")
-
 
 if __name__ == "__main__":
     main()

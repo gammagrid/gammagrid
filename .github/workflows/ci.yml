@@ -8,6 +8,32 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+
+    # The checks need a database now that the application uses Postgres. A
+    # service container is the whole cost of that: it starts before the job and
+    # is thrown away with it, so nothing here can reach anybody's data.
+    #
+    # The name ends in _test on purpose — tests/testdb.py refuses to run
+    # against a database whose name does not, and CI should be held to the same
+    # rule as a laptop rather than exempted from it.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gammagrid
+          POSTGRES_PASSWORD: gammagrid
+          POSTGRES_DB: gammagrid_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gammagrid"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://gammagrid:gammagrid@localhost:5432/gammagrid_test
+
     steps:
       - uses: actions/checkout@v4
 
