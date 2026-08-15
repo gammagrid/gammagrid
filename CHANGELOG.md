@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Expired contracts no longer count toward the ticker's average IV.** A
+  contract past its expiry date has no implied volatility — it diverges as time
+  to expiry goes to zero — and a source that reports one anyway reports a
+  sentinel. Those contracts still carry the whole session's volume, which on an
+  index ETF's zero-day expiries is the largest in the chain, so the weighted
+  average followed the sentinel rather than the market: measured on the hosted
+  sibling at 13.53 against 0.163 once they are excluded, one such spike per day
+  with the real series flattened underneath it. The comparison is by date and
+  inclusive — a contract expiring today is real trading during today's session.
+  `iv_weighted_average` therefore needs `expiry` and `collected_at` columns now;
+  every snapshot frame has both.
 - **Unusual Activity compares today against completed days only.** The baseline
   used to include an earlier collection of the current day, and volume
   accumulates through a session — so a contract was partly being compared

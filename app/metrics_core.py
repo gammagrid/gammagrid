@@ -746,13 +746,32 @@ def iv_weighted_average(df: pd.DataFrame) -> pd.DataFrame:
         # IV on every contract (Yahoo did); the moment Massive became an option
         # it emptied the chart completely, since it legitimately reports no IV
         # for ~15% of a chain (deep ITM/OTM, nothing traded).
-        usable = group[["implied_volatility", "volume"]].dropna(subset=["implied_volatility"])
+        usable = group[group["_priced"]][["implied_volatility", "volume"]].dropna(
+            subset=["implied_volatility"]
+        )
         weights = usable["volume"].fillna(0)
         if usable.empty or weights.sum() == 0:
             return np.nan
         return np.average(usable["implied_volatility"], weights=weights)
 
-    result = df.groupby("collected_at").apply(weighted_avg, include_groups=False)
+    # Contracts whose expiry date has passed carry no volatility, whatever the
+    # source reports for them. Massive reports 20.0 — a sentinel, since implied
+    # volatility diverges as time to expiry goes to zero — and they arrive with
+    # the whole session's accumulated volume, which on SPY's zero-day expiries
+    # is the largest in the chain. The two together dragged the ticker average
+    # from 0.163 to 13.53 on every collection taken after the close on an
+    # expiry day: one spike per day on the chart, with the real number crushed
+    # to a flat line beneath it.
+    #
+    # The comparison is by DATE and inclusive on purpose: a zero-day contract
+    # during its own session is real trading and belongs in the average; the
+    # same contract the evening after is not.
+    #
+    # Grouping still happens over every row, so a moment where nothing is
+    # priceable keeps its place in the series and carries NaN. Dropping it
+    # instead would draw a straight line across the gap.
+    priced = df.assign(_priced=df["expiry"] >= df["collected_at"].dt.normalize())
+    result = priced.groupby("collected_at").apply(weighted_avg, include_groups=False)
     return result.reset_index(name="iv_weighted_avg")
 
 

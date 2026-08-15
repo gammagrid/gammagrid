@@ -422,20 +422,40 @@ def check_iv_average_survives_a_contract_without_iv():
     legitimately reports no IV for part of a chain. The provider abstraction
     added here is exactly what makes that possible in this repo too, so the
     check comes with it rather than after it."""
+    moment = datetime(2026, 8, 12, 20, 0)
+    live = pd.Timestamp("2026-09-18")
     rows = [
-        {"collected_at": datetime(2026, 8, 12, 20, 0), "implied_volatility": 0.30, "volume": 100},
-        {"collected_at": datetime(2026, 8, 12, 20, 0), "implied_volatility": 0.50, "volume": 300},
+        {"collected_at": moment, "expiry": live, "implied_volatility": 0.30, "volume": 100},
+        {"collected_at": moment, "expiry": live, "implied_volatility": 0.50, "volume": 300},
         # Deep OTM, never traded, no IV quoted — the shape that broke it.
-        {"collected_at": datetime(2026, 8, 12, 20, 0), "implied_volatility": np.nan, "volume": 0},
+        {"collected_at": moment, "expiry": live, "implied_volatility": np.nan, "volume": 0},
     ]
     result = metrics.iv_weighted_average(pd.DataFrame(rows))
     assert len(result) == 1, result
     value = float(result.iloc[0]["iv_weighted_avg"])
     assert abs(value - (0.30 * 100 + 0.50 * 300) / 400) < 1e-12, value
 
+    # A contract whose expiry has passed carries no volatility, whatever the
+    # source reports for it. Found on the hosted side, where the provider
+    # returns a sentinel 20.0 for such contracts and they still arrive with the
+    # whole session's volume: on SPY that turned a ticker average of 0.163 into
+    # 13.53, once a day, every day. The comparison is by date and inclusive —
+    # a contract expiring today is real trading during today's session.
+    with_expired = pd.DataFrame([
+        {"collected_at": moment, "expiry": live, "implied_volatility": 0.30, "volume": 100},
+        {"collected_at": moment, "expiry": pd.Timestamp("2026-08-11"),
+         "implied_volatility": 20.0, "volume": 900_000},
+        {"collected_at": moment, "expiry": pd.Timestamp("2026-08-12"),
+         "implied_volatility": 0.30, "volume": 100},
+    ])
+    expired_out = float(metrics.iv_weighted_average(with_expired).iloc[0]["iv_weighted_avg"])
+    assert abs(expired_out - 0.30) < 1e-12, (
+        f"an expired contract's sentinel volatility reached the average: {expired_out}"
+    )
+
     # A day with no usable IV at all returns NaN rather than raising.
     only_nan = pd.DataFrame([
-        {"collected_at": datetime(2026, 8, 12, 20, 0), "implied_volatility": np.nan, "volume": 5},
+        {"collected_at": moment, "expiry": live, "implied_volatility": np.nan, "volume": 5},
     ])
     assert np.isnan(float(metrics.iv_weighted_average(only_nan).iloc[0]["iv_weighted_avg"]))
     print("IV-average checks passed")
