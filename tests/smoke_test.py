@@ -142,6 +142,48 @@ def check_archiving_moves_and_keeps(conn):
         cur.execute("DELETE FROM option_snapshots WHERE ticker = %s", (ticker,))
     print("Archiving checks passed (moved, not deleted; history stays whole)\n")
 
+
+def check_missing_numbers_survive_a_write(conn):
+    """A chain with nothing quoted for a contract must store, not explode.
+
+    Providers spell "not quoted" as NaN — yfinance does it throughout — and a
+    real chain carries it wherever a contract never traded. SQLite accepted
+    that; Postgres INTEGER has no NaN and rejects the statement, and since a
+    chain is written in one transaction the whole snapshot is lost rather than
+    one field. Found by collecting for real after the move: every ticker failed
+    with a range error while nothing was out of range.
+    """
+    ticker = "NANTEST"
+    moment = datetime.utcnow().replace(microsecond=0)
+    chain = pd.DataFrame([
+        {"expiry": "2026-09-18", "strike": 100.0, "option_type": "call",
+         "last_price": 1.0, "bid": 0.9, "ask": 1.1, "volume": 10,
+         "open_interest": 100, "implied_volatility": 0.3, "in_the_money": False},
+        # Never traded: no volume, no open interest, no price, no IV.
+        {"expiry": "2026-09-18", "strike": 250.0, "option_type": "call",
+         "last_price": float("nan"), "bid": float("nan"), "ask": float("nan"),
+         "volume": float("nan"), "open_interest": float("nan"),
+         "implied_volatility": float("nan"), "in_the_money": False},
+    ])
+    db.insert_snapshot(conn, ticker, moment, 100.0, chain)
+
+    stored = db.get_snapshots(conn, ticker, days=None)
+    assert len(stored) == 2, "the whole chain must be stored, including the untraded contract"
+    quiet = stored[stored["strike"] == 250.0].iloc[0]
+    for column in ("volume", "open_interest", "last_price", "implied_volatility"):
+        assert pd.isna(quiet[column]), f"{column} came back as {quiet[column]!r}"
+    # NULL rather than NaN in the column itself: NaN outranks every number in
+    # Postgres, so a stored NaN would pass `> 0` and win an ORDER BY.
+    nans = conn.execute(
+        "SELECT count(*) FROM option_snapshots WHERE ticker = %s AND implied_volatility = 'NaN'",
+        (ticker,),
+    ).fetchone()[0]
+    assert nans == 0, "missing values must be stored as NULL, not as NaN"
+
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM option_snapshots WHERE ticker = %s", (ticker,))
+    print("Missing-number checks passed (a chain with untraded contracts stores)\n")
+
 def main():
     # A clean slate, without dropping the database itself: the checks assert
     # counts, and a leftover row from a previous run makes them fail in a way
@@ -438,6 +480,7 @@ def main():
     db.remove_tracked_contract(conn, int(tracked.iloc[0]["id"]))
     assert db.get_tracked_contracts(conn, "TEST").empty
 
+    check_missing_numbers_survive_a_write(conn)
     check_scheduled_collection(conn)
     check_archiving_moves_and_keeps(conn)
 

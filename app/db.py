@@ -86,6 +86,30 @@ def insert_snapshot(
         value = getattr(row, name, None)
         return None if value is None or pd.isna(value) else float(value)
 
+    def whole_number(value):
+        """Missing counts become NULL, not NaN.
+
+        Providers use NaN for "not quoted" — yfinance does it throughout — and a
+        chain routinely carries it in volume and open interest for contracts
+        that never traded. SQLite accepted that happily. Postgres INTEGER has no
+        representation for NaN and rejects the whole statement with
+        NumericValueOutOfRange, which under one transaction per chain means the
+        entire snapshot is lost rather than one field. Found by running a real
+        collection after the move: every ticker failed, and the message pointed
+        at a range problem when nothing was out of range.
+        """
+        return None if value is None or pd.isna(value) else int(value)
+
+    def real_number(value):
+        """Same for the floating-point columns, where the failure is quieter.
+
+        DOUBLE PRECISION does accept NaN, so nothing raises — but NaN then
+        outranks every number in Postgres, so those rows pass `> 0` tests and
+        survive ORDER BY as maxima. Normalising at the boundary keeps "we have
+        no value" spelled one way everywhere below.
+        """
+        return None if value is None or pd.isna(value) else float(value)
+
     rows = [
         (
             ticker,
@@ -94,12 +118,12 @@ def insert_snapshot(
             row.expiry,
             row.strike,
             row.option_type,
-            row.last_price,
-            row.bid,
-            row.ask,
-            row.volume,
-            row.open_interest,
-            row.implied_volatility,
+            real_number(row.last_price),
+            real_number(row.bid),
+            real_number(row.ask),
+            whole_number(row.volume),
+            whole_number(row.open_interest),
+            real_number(row.implied_volatility),
             bool(row.in_the_money),
             greek(row, "delta"),
             greek(row, "gamma"),
