@@ -21,7 +21,11 @@ opens. Self-hosting stays free and open source either way.
 ## Quick start (no coding required)
 
 1. **Install Docker Desktop** — [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/).
-   It's free; just click through the installer like any other app.
+   It's free; just click through the installer like any other app. **Then start
+   it and wait until it says *Engine running*** (the whale icon turns green).
+   The first launch takes a minute or two and may install a Windows component
+   (WSL 2) or ask you to reboot — let it finish. Everything below talks to
+   Docker, so none of it works until Docker itself is up.
 2. **Download this project** — click the green **Code** button at the top of
    this page → **Download ZIP**, then unzip it. (Comfortable with git instead?
    `git clone` this repo.)
@@ -52,6 +56,48 @@ docker compose exec postgres pg_dump -U gammagrid gammagrid | gzip > gammagrid-b
 and the app no longer reads that file. `scripts/import_sqlite.py` copies it
 across in one command — see [UPGRADING.md](UPGRADING.md), which says per release
 what happens to the database you have already filled.
+
+## If something goes wrong
+
+**`failed to connect to the docker API at npipe:////./pipe/docker_engine`** —
+also seen as *"open //./pipe/docker_engine: The system cannot find the file
+specified"*, in your own language. Despite how it reads, this is not about a
+missing folder or a bad download: that "file" is the channel the `docker`
+command uses to reach the Docker engine, and it exists only while Docker
+Desktop is running. Start Docker Desktop, wait for *Engine running*, and run
+the command again.
+
+**`Cannot connect to the Docker daemon at unix:///var/run/docker.sock`** — the
+same thing on Mac or Linux. Start Docker Desktop (Mac) or `sudo systemctl start
+docker` (Linux).
+
+To check whether Docker is ready before trying again:
+
+```bash
+docker version
+```
+
+Two blocks — *Client* and *Server* — means the engine is running. Only *Client*
+followed by an error means it is not.
+
+**Docker Desktop itself won't start.** Usually virtualization is turned off in
+the BIOS/UEFI, or WSL 2 is missing; Docker Desktop names which one in its own
+error window. Those are Docker installation problems rather than GammaGrid
+ones, and Docker's own
+[Windows install guide](https://docs.docker.com/desktop/install/windows-install/)
+covers both.
+
+**`port is already allocated` on 8501 or 5432.** Something else on your machine
+is using that port — often an earlier copy of this app. `docker compose down`
+first, then start again.
+
+**The first run seems to hang.** It is downloading a few hundred megabytes of
+images. Progress lines that sit still for a while are normal on a slow
+connection; it only needs to happen once.
+
+Still stuck? [Open an issue](https://github.com/gammagrid/gammagrid/issues) with
+the command you ran and everything it printed — that is enough to work from,
+and it is how this section gets longer.
 
 ## What you get
 
