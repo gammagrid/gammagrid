@@ -4,6 +4,10 @@ Track **dealer gamma exposure (GEX)**, **max pain**, **open interest**, and the
 **IV surface** for your whole options watchlist — not just SPY. Self-hosted,
 open source, built on free market data.
 
+**US-listed options.** European and Asian listings have no options data through
+the free data source — most large non-US companies also trade in the US as ADRs,
+which do (`ASML`, `SAP`, `SHEL`, `NVO`, `BUD`). See the [FAQ](#faq).
+
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-B833E0.svg)](LICENSE)
 [![Runs on Docker](https://img.shields.io/badge/runs%20on-Docker-22C55E.svg)](#quick-start-no-coding-required)
 [![Hosted version: join the waitlist](https://img.shields.io/badge/hosted%20version-join%20the%20waitlist-2A332E.svg)](https://gammagrid.io/)
@@ -187,8 +191,22 @@ suggests it can amplify them. GammaGrid computes this via Black-Scholes as an
 approximation from options open interest — it is **not** a measure of actual
 market-maker positions, which aren't public data (see the disclaimer below).
 
+**Can I track European or Asian options — SAP.DE, ASML.AS, 7203.T?** No, and
+it is not a setting: the data is not there to fetch. Yahoo Finance returns
+**zero option expiries** for `SAP.DE`, `ASML.AS`, `AIR.PA` and `SHEL.L`
+(measured 2026-08-17, against 34 for `SPY`), so the chain a provider would have
+to return simply does not exist on this source. Eurex and Euronext options are
+a separate data product with a separate subscription.
+
+There is usually a way around it that works today: most large non-US companies
+also have US-listed ADRs with liquid US options — `ASML` (18 expiries), `NVO`
+(17), `SAP` (14), `SHEL` (13), `BUD` (11), all measured the same day. An ADR is
+not the same contract as the local one — different hours, different liquidity,
+a currency layer — but for positioning it is usually the question you were
+asking anyway. Add the plain symbol, without the exchange suffix.
+
 **Is this a real-time options flow scanner?** No — GammaGrid takes periodic
-snapshots of the option chain (on-demand, via the **Collect data** button), it
+snapshots of the option chain (on demand, or on a schedule you choose), it
 does not stream live trade-by-trade tape. If you need tick-by-tick sweep/block
 alerts, that's a different category of tool. GammaGrid is for tracking
 positioning and structure (GEX, max pain, OI, IV) across a watchlist over time.
@@ -213,8 +231,12 @@ In Docker the same thing is handled by `ENV PYTHONPATH=/app` in the
 `yfinance` is an unofficial wrapper around Yahoo Finance, with no SLA or
 official support. Expect possible data delays (15–20 minutes), irregular
 intraday open-interest updates, and temporary blocks under frequent requests.
-The app logs collection failures (visible on the dashboard after clicking
-**Collect data**) but makes no attempt to circumvent blocks.
+The app logs collection failures (visible on the dashboard in the collection
+log) but makes no attempt to circumvent blocks.
+
+**Coverage is US options only.** A non-US listing is not a failure you can fix
+by retrying or by waiting: the source returns no expiries for it at all (see
+the [FAQ](#faq) for the measurement and for the ADR route).
 
 ## Want it hosted, with zero setup?
 
