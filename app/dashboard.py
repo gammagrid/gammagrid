@@ -18,6 +18,8 @@ from app import collector, config, db, market_calendar, metrics
 from app.viewtime import (
     format_date,
     format_datetime,
+    timezone_label,
+    to_viewer,
     with_viewer_index,
 )
 
@@ -500,16 +502,27 @@ with st.sidebar:
                 "Collect once first and this will say how much disk a month of collection "
                 "costs for your watchlist."
             )
+        # Said here rather than in a FAQ, because this is where somebody picks a
+        # frequency and works out what it will cost. The figure above is the
+        # honest one precisely BECAUSE of this: the estimate already assumes the
+        # market is shut most of the week.
+        st.caption(
+            "**Outside market hours the collector does not run.** US options trade "
+            "09:30–16:00 New York on weekdays; while the market is shut the chain does not "
+            "change, so one snapshot per closed day is taken as a safety net and the rest "
+            "are skipped — roughly four fifths of the week not spent on duplicates."
+        )
     else:
         st.caption("Automatic collection is off. Use the button above to collect on demand.")
 
     with st.expander("📋 Collection log"):
+        st.caption(f"Times in your own timezone ({timezone_label()}).")
         runs = db.get_recent_runs(conn, limit=30)
         if runs.empty:
             st.caption("No collections yet.")
         else:
             runs_display = runs.copy()
-            runs_display["started_at"] = pd.to_datetime(runs_display["started_at"]).dt.strftime(
+            runs_display["started_at"] = to_viewer(runs_display["started_at"]).dt.strftime(
                 "%Y-%m-%d %H:%M:%S"
             )
             runs_display["oi_zero_fraction"] = runs_display["oi_zero_fraction"].map(

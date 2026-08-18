@@ -7,3 +7,12 @@ altair>=5.0
 matplotlib>=3.8
 plotly>=5.20
 psycopg[binary]>=3.1
+
+# The IANA timezone database, as a package rather than a hope. Everything about
+# the market calendar and about showing times in the reader's own zone goes
+# through zoneinfo, which reads the SYSTEM database — python:3.12-slim happens
+# to ship one, and an image built on anything slimmer does not. Then ZoneInfo
+# raises and the app does not start, on somebody else's machine, for a reason
+# that has nothing to do with their setup. One package removes the dependency on
+# the base image entirely.
+tzdata

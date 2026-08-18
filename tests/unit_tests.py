@@ -11,9 +11,11 @@ project's preference for small and readable over frameworks.
 Usage: python tests/unit_tests.py
 """
 
+import datetime as dt
 import os
 import sys
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -582,7 +584,46 @@ def check_provider_registry():
         assert greek in providers.CHAIN_COLUMNS, f"{greek} missing from the provider contract"
     print("provider registry checks passed")
 
+
+def check_timezone_database_is_available():
+    """Both daylight-saving transitions, resolved by the actual database.
+
+    This is a check on the ENVIRONMENT as much as on the code. Every market-hours
+    decision and every timestamp shown to a reader goes through zoneinfo, which
+    reads the system timezone database — `python:3.12-slim` ships one, an image
+    built on something slimmer does not, and the failure is ZoneInfo raising at
+    import time on somebody else's machine. `tzdata` is in requirements.txt so
+    the product carries its own copy; this asserts that whatever is being used
+    actually knows when the clocks move.
+    """
+    market = ZoneInfo("America/New_York")
+
+    def offset(day, hour=9, minute=30):
+        return dt.datetime(*day, hour, minute, tzinfo=market).utcoffset()
+
+    # Spring forward 2026 is 8 March, autumn back is 1 November.
+    assert offset((2026, 3, 7)) == dt.timedelta(hours=-5), "before the spring change: EST"
+    assert offset((2026, 3, 9)) == dt.timedelta(hours=-4), "after it: EDT"
+    assert offset((2026, 10, 31)) == dt.timedelta(hours=-4), "before the autumn change: EDT"
+    assert offset((2026, 11, 2)) == dt.timedelta(hours=-5), "after it: EST"
+
+    # And the consequence that matters: 09:30 in New York is a DIFFERENT UTC
+    # instant either side of a transition. A fixed offset would put the open an
+    # hour out for weeks at a time, in the direction of thinking the market is
+    # already trading when it is not.
+    from app import market_calendar as calendar
+
+    winter = dt.datetime(2026, 1, 5, 14, 30, tzinfo=dt.timezone.utc)   # 09:30 EST
+    summer = dt.datetime(2026, 8, 17, 13, 30, tzinfo=dt.timezone.utc)  # 09:30 EDT
+    assert calendar.state_from_clock(winter) == calendar.OPEN
+    assert calendar.state_from_clock(summer) == calendar.OPEN
+    assert calendar.state_from_clock(winter - dt.timedelta(hours=1)) == calendar.CLOSED
+    assert calendar.state_from_clock(summer - dt.timedelta(hours=1)) == calendar.CLOSED
+    print("Timezone-database checks passed (both DST transitions)")
+
+
 def main():
+    check_timezone_database_is_available()
     check_years_to_expiry()
     check_greeks_respond_to_time()
     check_put_call_ratio_matches_sql()
