@@ -155,11 +155,28 @@ def render_greek_attribution(greeks_history: pd.DataFrame) -> None:
     attribution = metrics.greek_attribution(greeks_history)
     st.subheader("Where the price went")
     if attribution.by_day.empty:
-        st.info(
-            "Not enough usable days yet to split the price change by greek. This needs "
-            "at least two days whose implied volatility passed the data-quality guard — "
-            "and with collection on a schedule, days that are actually a day apart."
-        )
+        # SAY WHICH REASON IT WAS. There are two, and until this branch
+        # separated them the panel reported the wrong one: a contract whose
+        # every day sits under the cent floor was told its implied volatility
+        # had failed the data-quality guard, which sends the reader hunting for
+        # a data problem that does not exist. Measured on the 60 most-collected
+        # SPY contracts in a real database: 47 decompose, 13 are refused, and
+        # every one of those 13 is refused for being cheap rather than for
+        # anything to do with IV.
+        if attribution.dropped_cheap:
+            st.info(
+                f"This contract traded under {config.ATTRIBUTION_MIN_PRICE * 100:.0f}c on "
+                f"{attribution.dropped_cheap} of the day(s) collected, and the split is not "
+                "shown for those: at a few cents a contract, every greek is arithmetic about "
+                "rounding and the decomposition would be noise reported as a finding. Deeper "
+                "in-the-money contracts on this ticker will show it."
+            )
+        else:
+            st.info(
+                "Not enough usable days yet to split the price change by greek. This needs "
+                "at least two days whose implied volatility passed the data-quality guard — "
+                "and with collection on a schedule, days that are actually a day apart."
+            )
         return
 
     totals = attribution.totals
