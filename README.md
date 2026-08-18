@@ -4,6 +4,14 @@ Track **dealer gamma exposure (GEX)**, **max pain**, **open interest**, and the
 **IV surface** for your whole options watchlist — not just SPY. Self-hosted,
 open source, built on free market data.
 
+**And it keeps what it collects.** Most free options tools draw the chain as it
+is this second and forget it a second later. GammaGrid stores every snapshot it
+takes, which is what lets it answer the questions the live chain cannot: how
+this contract's price split into delta, gamma, vega and theta, day by day; where
+open interest actually moved overnight; what the gamma profile looked like at
+10:15 last Tuesday. The live numbers are the part everybody has. The history is
+the product.
+
 **US-listed options.** European and Asian listings have no options data through
 the free data source — most large non-US companies also trade in the US as ADRs,
 which do (`ASML`, `SAP`, `SHEL`, `NVO`, `BUD`). See the [FAQ](#faq).
@@ -21,6 +29,9 @@ opens. Self-hosting stays free and open source either way.
 > programming experience needed — see [Quick start](#quick-start-no-coding-required) below.
 
 ![GEX Heatmap: strike × expiry gamma exposure matrix, with Call Wall, Put Wall, Gamma Flip, and Replay](docs/img/gex-heatmap.png)
+
+*Dealer gamma by strike and expiry, with the Call Wall, Put Wall and Gamma Flip
+marked. Replay steps the same grid back through every moment collected.*
 
 ## Quick start (no coding required)
 
@@ -43,6 +54,10 @@ opens. Self-hosting stays free and open source either way.
    (Older Docker installs: use `docker-compose up` instead — same effect.)
 5. **Open [http://localhost:8501](http://localhost:8501) in your browser.**
    That's it — GammaGrid is running.
+
+If it worked, **[star the repo](https://github.com/gammagrid/gammagrid)** — it
+takes a second, and stars are how anyone else finds this project. There is no
+marketing budget behind it.
 
 Your data lives in a Postgres database that `docker compose` starts alongside
 the app and keeps in a Docker volume, so it survives restarts. Press `Ctrl+C` to
@@ -117,6 +132,18 @@ and it is how this section gets longer.
   statistical outlier against that specific contract's own history, not a
   flat threshold
 - **Put/Call Ratio** and per-contract price/IV/greeks history with pinning
+
+And, because every snapshot is kept:
+
+- **Where the price went** — a per-contract waterfall splitting the day's price
+  change into delta, gamma, vega, theta and the residual. No entry price is
+  needed and none is asked for: this is a property of the contract, not of your
+  trade. The residual is always shown, because a decomposition that hides its
+  own error cannot be checked
+- **Historical Replay** of the gamma profile — step back through collected
+  moments and watch the walls move
+- **Expired contracts stay readable.** They drop out of the live chain on expiry
+  day and their history does not; both remain reachable from the Contract tab
 - Works for any ticker with a listed options chain — build your own watchlist,
   not a single fixed symbol
 
@@ -175,11 +202,18 @@ stays readable and still appears in every historical view.
 
 ## Screenshots
 
-| IV surface | Options screener |
-| --- | --- |
-| ![3D implied volatility surface across the option chain](docs/img/iv-surface.png) | ![Options screener with the full set of greeks and range filters](docs/img/screener.png) |
+**IV surface.** The whole chain at once: implied volatility across strikes and
+expiries, so a skew that steepened on one expiry is visible without opening it.
 
-All screenshots above are real GammaGrid output — SPY/QQQ/MSFT via a live
+![3D implied volatility surface across the option chain](docs/img/iv-surface.png)
+
+**Options screener.** Every greek, not just delta and IV — including vanna and
+charm — with range filters on each, and a click on any row opens that contract's
+own history.
+
+![Options screener with the full set of greeks and range filters](docs/img/screener.png)
+
+All screenshots here are real GammaGrid output — SPY/QQQ/MSFT via a live
 collection, no mockups.
 
 ## FAQ

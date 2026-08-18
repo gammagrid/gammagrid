@@ -546,6 +546,24 @@ with st.sidebar:
         )
 
     st.divider()
+
+    # A button, deliberately, and deliberately not a dialog. Measured over the
+    # fortnight to 18.08.2026: 64 people cloned this repository and 11 starred
+    # it. The ask does exist in the README — below the licence section, where
+    # nobody reading a quick start ever arrives. Somebody with the app open in
+    # front of them has already got further than any reader of the page.
+    #
+    # It sits here permanently rather than appearing after a successful
+    # collection: a prompt that waits for the moment you are pleased and then
+    # interrupts it is a trick, and the same trick costs us the collection
+    # result on the screen underneath. A button that is always in the same place
+    # can be pressed when the tool has earned it and ignored forever otherwise.
+    st.link_button(
+        "⭐ Star GammaGrid on GitHub",
+        "https://github.com/gammagrid/gammagrid",
+        use_container_width=True,
+        help="Stars are how people find this project — there is no marketing budget behind it.",
+    )
     st.caption("Questions or feedback: [hello@gammagrid.io](mailto:hello@gammagrid.io)")
 
 if not watchlist:
