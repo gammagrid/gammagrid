@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-18
+
+### Fixed
+- **"Where the price went" now says which reason refused the split.** The panel
+  has two: a contract whose implied volatility did not pass the data-quality
+  guard, and a contract too cheap for the arithmetic to mean anything — under
+  five cents, every greek is a statement about rounding. Only the first was ever
+  reported, so a cheap contract was told it had a data problem it did not have.
+  Measured on the sixty most-collected SPY contracts in a real database: 47
+  decompose, 13 are refused, and all 13 are refused for being cheap. The message
+  now names the price, says how many days it applies to, and points at the
+  contracts that will show a decomposition.
+
+### Changed
+- **The README says what the history is for.** The first screen promised dealer
+  GEX, max pain, open interest and an IV surface — which is what every option
+  chain viewer promises. What none of them do is keep the chain: the price
+  decomposition, the overnight open-interest move and the gamma profile as it
+  stood last Tuesday all exist because every snapshot is stored. That is now the
+  second paragraph rather than something you find by reading to the end.
+- **Asking for a star, where a star might be earned**: a button at the bottom of
+  the sidebar, and a line at the end of the quick start. Deliberately not a
+  dialog that waits for a successful collection and then interrupts it.
+
 ## [0.5.0] - 2026-08-18
 
 ### Added
@@ -387,7 +411,13 @@ Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.2.0...main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.5.1...main
+[0.5.1]: https://github.com/gammagrid/gammagrid/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/gammagrid/gammagrid/compare/v0.4.2...v0.5.0
+[0.4.2]: https://github.com/gammagrid/gammagrid/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/gammagrid/gammagrid/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/gammagrid/gammagrid/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/gammagrid/gammagrid/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/gammagrid/gammagrid/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/gammagrid/gammagrid/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/gammagrid/gammagrid/compare/v0.1.1...v0.1.2

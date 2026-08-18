@@ -39,6 +39,16 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.5.0 → v0.5.1
+
+**Risk: safe. No migration, no schema change, nothing touched in the database.**
+
+Text and one button. The panel that splits a contract's price change by greek
+now says which of its two reasons refused a decomposition; before, a contract
+that was simply too cheap was told its implied volatility had failed the
+data-quality guard, which is a different problem and sends you looking for one
+you do not have. No stored row changes and no number on any chart moves.
+
 ## v0.4.2 → v0.5.0
 
 **Risk: safe. One new table, nothing rewritten, no data touched.**
