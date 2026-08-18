@@ -3,6 +3,7 @@ metrics.py (calculations) and collector.py (data collection)."""
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 
 import altair as alt
@@ -13,7 +14,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 from matplotlib.colors import LinearSegmentedColormap
 
-from app import collector, config, db, metrics
+from app import collector, config, db, market_calendar, metrics
+from app.viewtime import (
+    format_date,
+    format_datetime,
+    with_viewer_index,
+)
 
 # Same 2x2 diagonal "chip" mark used as the favicon on gammagrid.io — keep
 # this data URI in sync with the teaser site's <link rel="icon"> if the mark
@@ -39,14 +45,6 @@ def _drop_stale_choice(key: str, options) -> None:
     die on a perfectly ordinary sequence of clicks."""
     if key in st.session_state and st.session_state[key] not in list(options):
         del st.session_state[key]
-
-
-def format_date(value: pd.Timestamp) -> str:
-    return pd.Timestamp(value).strftime("%Y-%m-%d")
-
-
-def format_datetime(value: pd.Timestamp) -> str:
-    return pd.Timestamp(value).strftime("%Y-%m-%d %H:%M")
 
 
 @st.cache_data(ttl=1800)
@@ -89,8 +87,13 @@ def render_option_detail(
         st.info("No history for the selected contract.")
         return
 
-    st.subheader("Option price")
-    st.line_chart(greeks_history.set_index("collected_at")["last_price"], color=BRAND_PURPLE)
+    price_column, attribution_column = st.columns(2)
+    with attribution_column:
+        render_greek_attribution(greeks_history)
+
+    with price_column:
+        st.subheader("Option price")
+        st.line_chart(with_viewer_index(greeks_history)["last_price"], color=BRAND_PURPLE)
     with st.expander("ℹ️ How to read this"):
         st.write(
             "Price history of this specific contract (last price at each collection). "
@@ -100,7 +103,7 @@ def render_option_detail(
         )
 
     st.subheader("Contract implied volatility")
-    st.line_chart(greeks_history.set_index("collected_at")["implied_volatility"], color=BRAND_GREEN)
+    st.line_chart(with_viewer_index(greeks_history)["implied_volatility"], color=BRAND_GREEN)
 
     latest_iv = greeks_history.iloc[-1]["implied_volatility"]
     rv = _cached_realized_volatility(selected_ticker)
@@ -127,13 +130,118 @@ def render_option_detail(
         target = left if i % 2 == 0 else right
         target.caption(greek.capitalize())
         target.line_chart(
-            greeks_history.set_index("collected_at")[greek],
+            with_viewer_index(greeks_history)[greek],
             color=BRAND_PURPLE if i % 2 == 0 else BRAND_GREEN,
         )
 
     with st.expander("📊 Interpreting current values and their trend"):
         for note in metrics.interpret_greeks(greeks_history):
             st.write(f"- {note}")
+
+
+def render_greek_attribution(greeks_history: pd.DataFrame) -> None:
+    """Where the contract's money went, split by greek.
+
+    A WATERFALL, because it is the only shape that shows the arithmetic: the
+    bars start at the price the contract had, each greek moves it, and the last
+    bar lands on the price it has now — so the residual is not a number beside
+    the chart, it is the bar that closes the gap.
+
+    In cents. The terms on a 19c option are hundredths of a dollar, and
+    "-0.476" invites a misread that "-47.6c" does not.
+    """
+    attribution = metrics.greek_attribution(greeks_history)
+    st.subheader("Where the price went")
+    if attribution.by_day.empty:
+        st.info(
+            "Not enough usable days yet to split the price change by greek. This needs "
+            "at least two days whose implied volatility passed the data-quality guard — "
+            "and with collection on a schedule, days that are actually a day apart."
+        )
+        return
+
+    totals = attribution.totals
+    labels = ["Start", "Delta", "Gamma", "Vega", "Theta", "Residual", "End"]
+    steps = [totals[name] * 100 for name in (*metrics.ATTRIBUTION_TERMS, "residual")]
+    figure = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["absolute", *["relative"] * 5, "total"],
+        x=labels,
+        y=[attribution.start_price * 100, *steps, 0],
+        text=waterfall_labels(attribution.start_price * 100, steps),
+        textposition="outside",
+        decreasing={"marker": {"color": BRAND_PURPLE}},
+        increasing={"marker": {"color": BRAND_GREEN}},
+        totals={"marker": {"color": "#8B8194"}},
+        connector={"line": {"color": "#3A3340"}},
+    ))
+    figure.update_layout(
+        height=300, margin={"l": 8, "r": 8, "t": 8, "b": 8},
+        showlegend=False, yaxis={"title": "¢ per share", "zeroline": True},
+    )
+    st.plotly_chart(figure, use_container_width=True)
+
+    cumulative = attribution.by_day[["day", *metrics.ATTRIBUTION_TERMS]].copy()
+    for name in metrics.ATTRIBUTION_TERMS:
+        cumulative[name] = cumulative[name].cumsum() * 100
+    st.caption("Running total by day, in cents — when each greek did its work")
+    st.line_chart(
+        with_viewer_index(cumulative, "day"), height=200,
+        color=[BRAND_GREEN, "#F5B342", BRAND_PURPLE, "#5AA9E6"],
+    )
+
+    # WHAT A DAY MEANS HERE, said in the interface and not only in the code.
+    # This product can be collected by hand, and then "a day" is whatever the
+    # person happened to press: today at 17:40, tomorrow at 11:05. Theta is
+    # charged per calendar day and stays honest; the delta term does not, and
+    # the difference lands in the residual looking like noise in the data rather
+    # than a consequence of the schedule.
+    spans = attribution.by_day["missing_trading_days"]
+    st.caption(
+        f"A day is the LAST collection of each trading day, New York time — "
+        f"{len(attribution.by_day)} interval(s) in this window. Collect on a schedule for "
+        "these numbers to mean what they say."
+    )
+    notes = []
+    if attribution.dropped_cheap:
+        notes.append(
+            f"{attribution.dropped_cheap} day(s) left out: the contract traded below "
+            f"{config.ATTRIBUTION_MIN_PRICE * 100:.0f}c there, where implied volatility "
+            "inverted from a one-cent quote makes every greek meaningless."
+        )
+    if attribution.dropped_unreliable:
+        notes.append(
+            f"{attribution.dropped_unreliable} day(s) left out: their implied volatility "
+            "failed the outlier guard, so the greeks are missing rather than wrong."
+        )
+    if int(spans.sum()):
+        notes.append(
+            f"{int(spans.sum())} trading day(s) inside the window were never collected — "
+            "their moves are folded into the neighbouring interval, not counted as zero. "
+            "The gamma term approximates a move locally; over a stretched interval it "
+            "approximates less well, and the difference lands in the residual."
+        )
+    residual_share = abs(totals["residual"]) / max(abs(totals["actual"]), 1e-9)
+    if residual_share > 0.5:
+        notes.append(
+            f"The residual is {residual_share:.0%} of the whole move: the model does not "
+            "explain this contract — the spread, a stale print or a rate move did more "
+            "than the greeks."
+        )
+    for note in notes:
+        st.caption(f"⚠️ {note}")
+
+
+def waterfall_labels(start: float, steps: list[float]) -> list[str]:
+    """Bar labels for the waterfall, including the total.
+
+    Computed here rather than from the `y` array, because Plotly IGNORES the y
+    value of a `measure="total"` bar and derives its height itself — so the
+    array carries a zero there, and a label built from it announces a contract
+    worth nothing. The total is the sum, and this is the one place that says so.
+    """
+    return [f"{start:.1f}¢", *(f"{value:+.1f}¢" for value in steps),
+            f"{start + sum(steps):.1f}¢"]
 
 
 def format_compact(value: float) -> str:
@@ -463,6 +571,19 @@ history_days = None if load_full_history else config.SNAPSHOT_HISTORY_DAYS
 page_source = db.active_source(conn, selected_ticker)
 latest_df = db.get_latest_snapshot(conn, selected_ticker, source=page_source)
 
+# What the collector last believed about the market, phrased by the calendar.
+# The app never asks the provider itself: a page render has no business making a
+# network call, and two processes asking separately would eventually disagree in
+# front of the reader.
+_market_note = market_calendar.status_note(
+    db.get_setting(conn, "market_state"),
+    db.get_setting(conn, "market_state_at"),
+    max(db.get_collector_interval(conn), 15),
+)
+
+if _market_note:
+    st.caption(_market_note)
+
 if latest_df.empty:
     st.info(f"No data for {selected_ticker}. Click “Collect data” on the left.")
     st.stop()
@@ -528,7 +649,7 @@ if active_view == "Overview":
     # numbers, a fraction of the work. metrics.put_call_ratio remains the
     # definition of the ratio and the oracle the tests check this against.
     pcr = db.get_put_call_ratio(conn, selected_ticker, days=history_days, source=page_source)
-    st.line_chart(pcr.set_index("collected_at")[["pcr_volume", "pcr_oi"]], color=[BRAND_PURPLE, BRAND_GREEN])
+    st.line_chart(with_viewer_index(pcr)[["pcr_volume", "pcr_oi"]], color=[BRAND_PURPLE, BRAND_GREEN])
     with st.expander("ℹ️ How to read this"):
         st.write(
             "The ratio of put to call volume/open interest. A value noticeably above "
@@ -917,7 +1038,7 @@ if active_view == "Volatility (IV)":
     # per collection. It also stops the chart changing under you as contracts
     # expire and move to the archive.
     iv_avg = db.get_iv_weighted_average(conn, selected_ticker, days=history_days, source=page_source)
-    st.line_chart(iv_avg.set_index("collected_at")["iv_weighted_avg"], color=BRAND_PURPLE)
+    st.line_chart(with_viewer_index(iv_avg)["iv_weighted_avg"], color=BRAND_PURPLE)
     with st.expander("ℹ️ How to read this"):
         st.write(
             "Rising average IV usually precedes an anticipated move (earnings, news) or "
@@ -978,14 +1099,50 @@ if active_view == "Contract":
                 st.rerun()
         st.divider()
 
+    # EXPIRED CONTRACTS. Their history is stored and perfectly readable; what
+    # they cannot do is appear in these selectors, because the lists are built
+    # from the LATEST snapshot and it has no row for something that no longer
+    # trades. On expiry day a contract simply vanishes from the dropdown — and
+    # if a stale expiry survives in the widget's state, the strike list under it
+    # comes back empty and the page shows a validly selected contract with no
+    # data at all.
+    #
+    # Off by default: on this database 7,098 of 26,894 contracts have already
+    # expired, a ratio that only grows, and always-on would bury the live chain
+    # under the archive.
+    expired = db.get_expired_contracts(conn, selected_ticker, source=page_source)
+    expired_expiries = []
+    if not expired.empty:
+        if st.checkbox(
+            f"Show expired contracts ({len(expired)} with collected history)",
+            key=f"show_expired_{selected_ticker}",
+            help="Contracts that have already expired. Nothing was deleted — they simply "
+                 "cannot appear in these lists on their own, because the lists come from "
+                 "the current chain.",
+        ):
+            expired_expiries = sorted(pd.Timestamp(e) for e in expired["expiry"].unique())
+
+    live_expiries = [pd.Timestamp(e) for e in expiries]
+    all_expiries = sorted(set(live_expiries) | set(expired_expiries))
+
+    def _format_expiry_option(expiry) -> str:
+        label = format_date(expiry)
+        return label if expiry in live_expiries else f"{label}  ⏳ expired"
+
     col1, col2, col3 = st.columns(3)
     # All three keyed by ticker for the same reason as the GEX expiry above —
     # and the strike list especially: strikes differ between tickers, so a
     # carried-over value can be one this ticker does not trade at all.
+    _drop_stale_choice(f"opt_expiry_{selected_ticker}", all_expiries)
     opt_expiry = col1.selectbox(
-        "Expiry", expiries, format_func=format_date, key=f"opt_expiry_{selected_ticker}"
+        "Expiry", all_expiries, format_func=_format_expiry_option,
+        key=f"opt_expiry_{selected_ticker}",
     )
-    opt_strikes = sorted(latest_df[latest_df["expiry"] == opt_expiry]["strike"].unique())
+    live_strikes = set(latest_df[latest_df["expiry"] == opt_expiry]["strike"].unique())
+    expired_strikes = set()
+    if expired_expiries:
+        expired_strikes = set(expired[expired["expiry"] == opt_expiry]["strike"].unique())
+    opt_strikes = sorted(live_strikes | expired_strikes)
     # A stored widget value that is no longer among the options makes Streamlit
     # raise, and the option lists here narrow as you go: strikes depend on the
     # expiry, and the sides quoted depend on the strike. Drop the stale value
@@ -998,14 +1155,32 @@ if active_view == "Contract":
     # "No history for the selected contract", which is true and useless.
     available_types = sorted(
         latest_df[(latest_df["expiry"] == opt_expiry) & (latest_df["strike"] == opt_strike)]["option_type"].unique()
-    ) or ["call", "put"]
+    )
+    if not available_types and expired_expiries:
+        available_types = sorted(
+            expired[(expired["expiry"] == opt_expiry) & (expired["strike"] == opt_strike)]["option_type"].unique()
+        )
+    available_types = available_types or ["call", "put"]
     _drop_stale_choice(f"opt_type_{selected_ticker}", available_types)
     opt_type = col3.selectbox("Type", available_types, key=f"opt_type_{selected_ticker}")
 
+    # THE WINDOW HAS TO COME OFF FOR AN EXPIRED CONTRACT. The day limit is
+    # measured back from now(), and an expired contract's history is entirely in
+    # the past — so the limit trims it silently, and once the contract is older
+    # than the limit it trims it to nothing. The page would then say "no history"
+    # about a contract whose history is sitting in the table.
+    is_expired = pd.Timestamp(opt_expiry) < pd.Timestamp(dt.date.today())
     contract_df = db.get_contract_history(
-        conn, selected_ticker, opt_expiry, opt_strike, opt_type, days=history_days,
-        source=page_source,
+        conn, selected_ticker, opt_expiry, opt_strike, opt_type,
+        days=None if is_expired else history_days, source=page_source,
     )
+    if is_expired and not contract_df.empty:
+        first, last = contract_df["collected_at"].min(), contract_df["collected_at"].max()
+        st.caption(
+            f"⏳ **Expired contract** — expired {format_date(opt_expiry)}. Stored history "
+            f"covers {format_date(first)} to {format_date(last)}, which starts when this "
+            "ticker was first collected rather than when the contract was listed."
+        )
     render_option_detail(
         conn, contract_df, selected_ticker, get_tracked(), opt_expiry, opt_strike, opt_type,
         key_prefix="opt",

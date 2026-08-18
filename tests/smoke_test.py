@@ -4,7 +4,9 @@ during development. Usage: python tests/smoke_test.py"""
 
 import os
 import sys
+from datetime import date as dt_date
 from datetime import datetime, timedelta
+from datetime import time as dt_time
 
 import numpy as np
 import pandas as pd
@@ -278,6 +280,20 @@ def check_missing_numbers_survive_a_write(conn):
     print("Missing-number checks passed (a chain with untraded contracts stores)\n")
 
 
+def _recent_trading_days(count: int) -> list:
+    """The most recent New York weekdays, oldest first.
+
+    Relative rather than fixed dates so the fixture never rots, and trading days
+    rather than calendar ones because that is what the daily metrics count.
+    """
+    found, day = [], datetime.utcnow().date()
+    while len(found) < count:
+        if day.isoweekday() <= 5:
+            found.append(day)
+        day -= timedelta(days=1)
+    return list(reversed(found))
+
+
 def check_narrow_reads_and_rollups(conn):
     """Every view asks for what it shows, and the two stored numbers agree with
     the functions that define them.
@@ -300,7 +316,12 @@ def check_narrow_reads_and_rollups(conn):
             cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
 
     expiry = (datetime.utcnow().date() + timedelta(days=30)).isoformat()
-    midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    # TRADING days, at hours that mean the same calendar date in UTC and in New
+    # York. Both halves matter now that daily metrics count trading days: a run
+    # of the suite on a Sunday would otherwise build its fixture out of weekend
+    # copies, and `midnight + 1h` is 21:00 of the PREVIOUS day in New York, so
+    # two moments meant as two days would collapse into one bucket.
+    days = _recent_trading_days(4)
 
     def chain(volume_a, volume_b):
         return pd.DataFrame([
@@ -315,11 +336,11 @@ def check_narrow_reads_and_rollups(conn):
     # Three closed days, the middle one collected twice so that "one snapshot
     # per day" has something to choose between, plus today.
     plan = [
-        (midnight - timedelta(days=3, hours=-16), chain(10, 90)),
-        (midnight - timedelta(days=2, hours=-10), chain(999, 999)),   # superseded
-        (midnight - timedelta(days=2, hours=-16), chain(20, 80)),
-        (midnight - timedelta(days=1, hours=-16), chain(30, 70)),
-        (midnight + timedelta(hours=1), chain(400, 40)),
+        (datetime.combine(days[0], dt_time(16, 0)), chain(10, 90)),
+        (datetime.combine(days[1], dt_time(10, 0)), chain(999, 999)),   # superseded
+        (datetime.combine(days[1], dt_time(16, 0)), chain(20, 80)),
+        (datetime.combine(days[2], dt_time(16, 0)), chain(30, 70)),
+        (datetime.combine(days[3], dt_time(14, 0)), chain(400, 40)),
     ]
     for moment, rows in plan:
         db.insert_snapshot(conn, ticker, moment, 100.0, rows)
@@ -397,6 +418,159 @@ def check_narrow_reads_and_rollups(conn):
             cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
     print("Narrow-read and rollup checks passed (stored numbers match the shared functions)\n")
 
+def check_greek_attribution():
+    """The decomposition has to add up, and refuse what it cannot explain.
+
+    The first assertion is the one that matters: start + every term + every
+    residual == end, exactly. The residual is defined as the leftover, so this
+    is true by construction — which is the point. It means the chart can never
+    quietly omit a contribution, and a reader who adds the bars gets the price.
+    """
+    def day(index, price, spot, iv, greeks=(0.012, 0.0008, 0.03, -0.012)):
+        delta, gamma, vega, theta = greeks
+        return {
+            "collected_at": pd.Timestamp("2026-08-10 20:00") + pd.Timedelta(days=index),
+            "last_price": price, "underlying_price": spot, "implied_volatility": iv,
+            "delta": delta, "gamma": gamma, "vega": vega, "theta": theta,
+        }
+
+    # Mon-Fri, a falling underlying and a rising IV: the shape of the GLD trade
+    # this feature was built from.
+    history = pd.DataFrame([
+        day(0, 0.19, 500.0, 0.20), day(1, 0.16, 498.5, 0.21), day(2, 0.13, 497.0, 0.22),
+        day(3, 0.10, 495.5, 0.23), day(4, 0.07, 494.0, 0.24),
+    ])
+    result = metrics.greek_attribution(history)
+    assert len(result.by_day) == 4, result.by_day
+    totals = result.totals
+    assert abs(result.start_price + totals["actual"] - result.end_price) < 1e-12, (
+        "start plus the actual moves must land exactly on the end price"
+    )
+    reconstructed = sum(totals[name] for name in (*metrics.ATTRIBUTION_TERMS, "residual"))
+    assert abs(reconstructed - totals["actual"]) < 1e-12, (
+        "the four terms plus the residual ARE the move — if this drifts, the chart is "
+        "showing a decomposition of something else"
+    )
+    # Signs: a falling underlying with a positive delta loses money, time decay
+    # always does, a rising IV on positive vega gains.
+    assert totals["delta"] < 0 and totals["theta"] < 0 and totals["vega"] > 0, totals
+
+    # Theta is per CALENDAR day, so a Friday-to-Monday interval charges three
+    # days of decay. Verified against the arithmetic rather than trusted.
+    friday_to_monday = pd.DataFrame([
+        day(4, 0.20, 500.0, 0.20),   # Friday 14.08
+        day(7, 0.17, 500.0, 0.20),   # Monday 17.08
+    ])
+    weekend = metrics.greek_attribution(friday_to_monday)
+    assert abs(weekend.totals["theta"] - (-0.012 * 3)) < 1e-9, weekend.totals
+    assert weekend.missing_trading_days == 0, "Saturday and Sunday are not missing days"
+
+    # A trading day that was never collected is reported, not silently folded in.
+    gap = pd.DataFrame([day(0, 0.20, 500.0, 0.20), day(2, 0.17, 500.0, 0.20)])
+    assert metrics.greek_attribution(gap).missing_trading_days == 1
+
+    # The cheap tail is refused: on a one-cent option the vega term outgrew the
+    # option's entire price on the real trade.
+    with_tail = pd.DataFrame([
+        day(0, 0.19, 500.0, 0.20), day(1, 0.16, 498.5, 0.21), day(2, 0.13, 497.0, 0.22),
+        day(3, 0.02, 495.0, 0.60), day(4, 0.01, 494.0, 1.41),
+    ])
+    trimmed = metrics.greek_attribution(with_tail)
+    assert trimmed.dropped_cheap == 2, trimmed.dropped_cheap
+    assert trimmed.end_price == 0.13, "the run has to stop where the price got meaningless"
+    assert abs(trimmed.start_price + trimmed.totals["actual"] - trimmed.end_price) < 1e-12, (
+        "dropping the tail must leave a CONTIGUOUS run, or the arithmetic stops closing"
+    )
+
+    # Rows the IV guard rejected arrive as NaN greeks: counted, never guessed at.
+    unreliable = pd.DataFrame([
+        day(0, 0.19, 500.0, 0.20), day(1, 0.16, 498.5, 0.21),
+        {**day(2, 0.13, 497.0, 0.22), "delta": float("nan"), "vega": float("nan")},
+        day(3, 0.10, 495.5, 0.23),
+    ])
+    guarded = metrics.greek_attribution(unreliable)
+    assert guarded.dropped_unreliable == 1, guarded.dropped_unreliable
+    # STITCHED, not dropped — the second of the two choices пункт 9 left open.
+    # The rejected day stops being a boundary, so the interval spans it using
+    # the greeks from its start: two intervals survive, not one, and the extra
+    # day is reported through missing_trading_days. The cost is second-order
+    # error (greeks held a day longer), and the interface has to say so instead
+    # of implying the day was excluded.
+    assert len(guarded.by_day) == 2, guarded.by_day
+    assert guarded.missing_trading_days == 1, (
+        "a bridged day has to surface somewhere, or the window silently covers less "
+        "than it claims"
+    )
+    assert abs(guarded.start_price + guarded.totals["actual"] - guarded.end_price) < 1e-12
+
+    # Nothing to say is said as nothing, not as zeros.
+    assert metrics.greek_attribution(pd.DataFrame()).by_day.empty
+    assert metrics.greek_attribution(history.head(1)).by_day.empty
+    assert metrics.greek_attribution(history.head(1)).totals["actual"] == 0.0
+
+    # The spot the greeks were computed against has to travel with them, or ΔS
+    # would be paired with the wrong snapshot.
+    assert "underlying_price" in metrics.contract_greeks_history(
+        pd.DataFrame(columns=["strike", "expiry", "option_type", "collected_at"]),
+        100.0, pd.Timestamp("2026-09-18"), "call",
+    ).columns
+    print("Greek-attribution checks passed")
+
+
+def check_expired_contracts_stay_reachable(conn):
+    """A contract that expired must still be findable, with its history.
+
+    The failure this guards is not a lost row — nothing is ever deleted — it is
+    a lost ROUTE: the Contract tab builds its lists from the latest snapshot, and
+    an expired contract is not in it. The registry is what puts it back on the
+    screen, and it has to be maintained by the same write that stores the chain,
+    or it lists contracts with no data and hides contracts that have some.
+    """
+    ticker = "EXPTEST"
+    with conn.cursor() as cur:
+        for table in ("option_snapshots", "option_snapshots_archive", "snapshot_iv_summary",
+                      "contract_volume_stats", "collection_runs", "contract_registry"):
+            cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
+
+    gone = (datetime.utcnow().date() - timedelta(days=40)).isoformat()
+    live = (datetime.utcnow().date() + timedelta(days=30)).isoformat()
+    rows = pd.DataFrame([
+        {"expiry": gone, "strike": 100.0, "option_type": "call", "last_price": 1.0,
+         "bid": 0.9, "ask": 1.1, "volume": 10, "open_interest": 100,
+         "implied_volatility": 0.3, "in_the_money": False},
+        {"expiry": live, "strike": 105.0, "option_type": "put", "last_price": 2.0,
+         "bid": 1.9, "ask": 2.1, "volume": 20, "open_interest": 200,
+         "implied_volatility": 0.4, "in_the_money": False},
+    ])
+    moment = datetime.utcnow().replace(microsecond=0) - timedelta(days=1)
+    db.insert_snapshot(conn, ticker, moment, 100.0, rows)
+
+    expired = db.get_expired_contracts(conn, ticker)
+    assert len(expired) == 1, expired.to_dict()
+    assert expired.iloc[0]["strike"] == 100.0
+    assert expired.iloc[0]["snapshots"] == 1, "the registry counts what was written"
+
+    # Collecting again must update the row rather than duplicate it: the
+    # registry is one row per contract, and that is the whole reason it is
+    # cheaper than a DISTINCT over the snapshots.
+    db.insert_snapshot(conn, ticker, moment + timedelta(hours=1), 100.0, rows)
+    expired = db.get_expired_contracts(conn, ticker)
+    assert len(expired) == 1 and expired.iloc[0]["snapshots"] == 2, expired.to_dict()
+
+    # And the history is genuinely reachable — including with the day window
+    # off, which is what the interface does for an expired contract, because
+    # the window is measured back from now() and would trim a past contract to
+    # nothing.
+    history = db.get_contract_history(conn, ticker, gone, 100.0, "call", days=None)
+    assert len(history) == 2, history
+
+    with conn.cursor() as cur:
+        for table in ("option_snapshots", "option_snapshots_archive", "snapshot_iv_summary",
+                      "contract_volume_stats", "collection_runs", "contract_registry"):
+            cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
+    print("Expired-contract checks passed (registry keeps them reachable)\n")
+
+
 def main():
     # A clean slate, without dropping the database itself: the checks assert
     # counts, and a leftover row from a previous run makes them fail in a way
@@ -409,28 +583,39 @@ def main():
     db.add_ticker(conn, "TEST")
     assert db.get_watchlist(conn) == ["TEST"]
 
-    base_day = datetime(2026, 7, 1, 21, 0)
+    # Six CONSECUTIVE TRADING days starting Monday 06.07.2026, not six calendar
+    # days. Daily metrics count trading days — the chain does not move while the
+    # market is shut, so a Saturday is a copy of Friday rather than a day — and a
+    # fixture that steps over a weekend shifts every day-over-day assertion below
+    # by one, for a reason that has nothing to do with the code under test.
+    #
+    # Hours are 13:00 and 20:00 UTC, which are 09:00 and 16:00 in New York: the
+    # same calendar date in both zones, so the fixture says what it looks like it
+    # says.
+    trading_days = [dt_date(2026, 7, d) for d in (6, 7, 8, 9, 10, 13)]
     # Days 1-5: one collection per day, OI grows a little day over day (95..100, OI 50..61).
     # Day 6: TWO collections (morning and evening) — the exact scenario from the bug: OI
     # doesn't change intraday (65->65) while volume grows as cumulative daily volume (200->500).
     daily_snapshots = [
-        # (offset_hours_from_base, volume, open_interest)
-        (0, 95, 50),
-        (24, 105, 52),
-        (48, 90, 55),
-        (72, 110, 58),
-        (96, 100, 61),
-        (120 - 12, 200, 65),  # day 6, morning
-        (120, 500, 65),       # day 6, evening — same OI as the morning
+        # (day index, hour UTC, volume, open_interest)
+        (0, 20, 95, 50),
+        (1, 20, 105, 52),
+        (2, 20, 90, 55),
+        (3, 20, 110, 58),
+        (4, 20, 100, 61),
+        (5, 13, 200, 65),  # day 6, morning
+        (5, 20, 500, 65),  # day 6, evening — same OI as the morning
     ]
+    base_day = datetime.combine(trading_days[0], dt_time(20, 0))
 
-    for i, (offset_hours, volume, oi) in enumerate(daily_snapshots):
-        moment = base_day + timedelta(hours=offset_hours)
+    for i, (day_index, hour, volume, oi) in enumerate(daily_snapshots):
+        moment = datetime.combine(trading_days[day_index], dt_time(hour, 0))
         db.insert_snapshot(
             conn, "TEST", moment, underlying_price=100.0 + i * 0.1,
             chain_df=make_chain(iv_shift=i * 0.01, strike_100_volume=volume, strike_100_oi=oi),
         )
-    latest_moment = base_day + timedelta(hours=daily_snapshots[-1][0])
+    last_day_index, last_hour = daily_snapshots[-1][0], daily_snapshots[-1][1]
+    latest_moment = datetime.combine(trading_days[last_day_index], dt_time(last_hour, 0))
     db.log_run(conn, latest_moment, latest_moment + timedelta(seconds=1), "TEST", "success")
 
     df = db.get_snapshots(conn, "TEST")
@@ -698,6 +883,8 @@ def main():
     check_scheduled_collection(conn)
     check_archiving_moves_and_keeps(conn)
     check_two_sources_never_mix(conn)
+    check_expired_contracts_stay_reachable(conn)
+    check_greek_attribution()
 
     print("ALL SMOKE CHECKS PASSED")
 

@@ -10,7 +10,7 @@ from datetime import datetime
 import pandas as pd
 import psycopg
 
-from app import config, migrate
+from app import config, market_calendar, migrate
 
 # pandas prefers SQLAlchemy and says so on every read against a plain DBAPI
 # connection. The advice does not apply here — this module owns every query and
@@ -239,6 +239,22 @@ def insert_snapshot(
             delta, gamma, theta, vega, source)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             rows,
+        )
+        # The contract registry, in the same transaction as the chain it
+        # describes: a registry that can lag behind the snapshots is a registry
+        # that lists contracts with no data and hides contracts that have some.
+        cur.execute(
+            """INSERT INTO contract_registry
+                   (ticker, source, expiry, strike, option_type,
+                    first_seen_at, last_seen_at, snapshots)
+               SELECT %(ticker)s, %(source)s, expiry, strike, option_type,
+                      %(at)s, %(at)s, 1
+               FROM option_snapshots
+               WHERE ticker = %(ticker)s AND source = %(source)s AND collected_at = %(at)s
+               ON CONFLICT (ticker, source, expiry, strike, option_type) DO UPDATE
+               SET last_seen_at = GREATEST(contract_registry.last_seen_at, EXCLUDED.last_seen_at),
+                   snapshots = contract_registry.snapshots + 1""",
+            {"ticker": ticker, "source": source, "at": collected_at},
         )
         # The moment's weighted-average IV, computed here and read back from
         # the rows just written rather than recomputed from chain_df in Python:
@@ -582,6 +598,13 @@ def _latest_moment(conn: psycopg.Connection, ticker: str, source: str | None = N
     return row[0] if row else None
 
 
+# `started_at` is stored naive in UTC, so it is read as UTC first and only then
+# converted — `started_at AT TIME ZONE 'America/New_York'` alone would read the
+# stored value AS New York time and shift it the wrong way.
+_MARKET_TIME = "((started_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/New_York')"
+_MARKET_DATE = f"{_MARKET_TIME}::date"
+
+
 def get_collection_moments(
     conn: psycopg.Connection,
     ticker: str,
@@ -617,10 +640,26 @@ def get_collection_moments(
         where += " AND started_at >= now() - make_interval(days => %(days)s)"
         params["days"] = days
     if per_day:
+        # A "day" is New York's, and only trading days count. Two corrections,
+        # both needed and both measured on the sibling product:
+        #
+        # The timezone one, because a collection at 01:15 UTC on Saturday is
+        # Friday 21:15 in New York — the evening of that trading day. Grouped by
+        # the UTC date it lands in Saturday's bucket, so "Friday's last
+        # snapshot" is really its 20:00 UTC one and the true post-close state is
+        # filed under the weekend.
+        #
+        # The weekend one, because the chain does not change while the market is
+        # closed: Saturday and Sunday hold copies of Friday. Counted as days
+        # they make OI Delta compare Friday with Friday and report no change,
+        # and they fill two sevenths of the Unusual Activity baseline with
+        # repetitions, which pulls the mean toward Friday and understates the
+        # spread.
         statement = f"""
-            SELECT DISTINCT ON (started_at::date) started_at
+            SELECT DISTINCT ON ({_MARKET_DATE}) started_at
             FROM collection_runs WHERE {where}
-            ORDER BY started_at::date DESC, started_at DESC
+              AND extract(isodow from {_MARKET_TIME}) <= 5
+            ORDER BY {_MARKET_DATE} DESC, started_at DESC
         """
     else:
         statement = f"""
@@ -655,6 +694,31 @@ def get_snapshots_at(
         conn,
         params={"ticker": ticker.upper(), "moments": list(moments), "source": scoped},
         parse_dates=["collected_at", "expiry"],
+    )
+
+
+def get_expired_contracts(
+    conn: psycopg.Connection, ticker: str, source: str | None = None
+) -> pd.DataFrame:
+    """Contracts of this ticker that have expired but still have collected
+    history, newest expiry first.
+
+    Read from contract_registry and never from option_snapshots: the equivalent
+    SELECT DISTINCT costs one index entry per snapshot per contract, so it grows
+    with collection time rather than with the size of the answer (measured at
+    152,409 entries read for 13,449 contracts — see the migration).
+    """
+    scoped = _scope(conn, ticker, source)
+    where = "ticker = %(ticker)s AND expiry < current_date"
+    if scoped is not None:
+        where += " AND source = %(source)s"
+    return pd.read_sql_query(
+        f"""SELECT expiry, strike, option_type, snapshots, first_seen_at, last_seen_at
+           FROM contract_registry WHERE {where}
+           ORDER BY expiry DESC, strike, option_type""",  # noqa: S608 — filter is a fixed string
+        conn,
+        params={"ticker": ticker.upper(), "source": scoped},
+        parse_dates=["expiry", "first_seen_at", "last_seen_at"],
     )
 
 
@@ -809,7 +873,10 @@ def volume_stats_are_current(
         f"SELECT max(through_day) FROM contract_volume_stats WHERE {where}",  # noqa: S608
         {"ticker": ticker.upper(), "source": scoped},
     ).fetchone()
-    return bool(row and row[0] and row[0] >= dt.date.today() - dt.timedelta(days=1))
+    # Measured in TRADING days: on a Monday "yesterday" is Sunday, which was
+    # never a collection day, so a baseline built through Friday would look
+    # stale on every pass and be rebuilt to the same numbers.
+    return bool(row and row[0] and row[0] >= market_calendar.last_completed_trading_day())
 
 
 def get_volume_stats(

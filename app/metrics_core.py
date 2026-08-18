@@ -36,16 +36,53 @@ from scipy.stats import norm
 
 from app import config
 
+MARKET_TZ = ZoneInfo("America/New_York")
+
+
+def market_dates(collected_at: pd.Series) -> pd.Series:
+    """`collected_at` as New York calendar dates.
+
+    Timestamps are stored naive in UTC throughout both products, so a naive
+    series is read as UTC and converted; an aware one is only converted. The
+    distinction is not cosmetic — a collection at 01:15 UTC on Saturday is
+    Friday 21:15 in New York, which is the evening of that trading day and the
+    most complete snapshot it has.
+    """
+    values = pd.to_datetime(collected_at)
+    if values.dt.tz is None:
+        values = values.dt.tz_localize("UTC")
+    return values.dt.tz_convert(MARKET_TZ)
+
 
 def _last_snapshot_per_day(df: pd.DataFrame) -> pd.DataFrame:
     """Collapses multiple intraday collections down to one (the latest) per
-    calendar day. Needed wherever values that aren't comparable within a day
+    TRADING day. Needed wherever values that aren't comparable within a day
     get compared: Yahoo's volume is cumulative since session open (grows until
     the close), while open_interest barely updates intraday — without this
     collapse, comparing "the last two snapshots" may compare two snapshots of
-    the same day instead of day over day."""
-    daily_latest = df.groupby(df["collected_at"].dt.date)["collected_at"].transform("max")
-    return df[df["collected_at"] == daily_latest]
+    the same day instead of day over day.
+
+    Two rules, both measured rather than assumed (эпик С-21):
+
+    A day is New York's, not UTC's. Grouping by the UTC date files Friday's
+    post-close snapshot under Saturday and then treats Friday's 20:00 UTC
+    collection as its last one.
+
+    Days when the market never opened do not count. Between two weekend
+    snapshots of SPY not one of 14,230 contracts changed its price, volume or
+    open interest — Saturday and Sunday are copies of Friday. Counted as days
+    they make day-over-day comparisons return "nothing changed" and give a
+    volume baseline two sevenths made of repetitions, which pulls the mean
+    toward Friday and understates the spread.
+    """
+    local = market_dates(df["collected_at"])
+    trading = df[local.dt.dayofweek < 5]
+    if trading.empty:
+        return trading
+    daily_latest = trading.groupby(market_dates(trading["collected_at"]).dt.date)[
+        "collected_at"
+    ].transform("max")
+    return trading[trading["collected_at"] == daily_latest]
 
 
 def put_call_ratio(df: pd.DataFrame) -> pd.DataFrame:
@@ -813,7 +850,10 @@ def contract_greeks_history(
         (df["strike"] == strike) & (df["expiry"] == expiry) & (df["option_type"] == option_type)
     ].sort_values("collected_at")
     if contract.empty:
-        return pd.DataFrame(columns=["collected_at", "last_price", "implied_volatility", *_GREEK_KEYS])
+        return pd.DataFrame(
+            columns=["collected_at", "last_price", "underlying_price",
+                     "implied_volatility", *_GREEK_KEYS]
+        )
 
     # Data-quality guard (see _mark_unreliable_iv): an IV that's a strong
     # outlier vs. this contract's own history, uncorroborated by any real
@@ -841,6 +881,11 @@ def contract_greeks_history(
         records.append({
             "collected_at": row.collected_at,
             "last_price": row.last_price,
+            # The spot this row's greeks were computed against (пункт 9). Carried
+            # out with them rather than joined back later: the attribution needs
+            # ΔS between two rows, and taking it from anywhere else risks pairing
+            # a price from one snapshot with a spot from another.
+            "underlying_price": row.underlying_price,
             "implied_volatility": iv,
             **greeks,
         })
@@ -968,3 +1013,134 @@ def iv_surface_grid(
         grid_z[nan_mask] = grid_z_nearest[nan_mask]
 
     return strikes, years, grid_z
+
+
+ATTRIBUTION_TERMS = ("delta", "gamma", "vega", "theta")
+
+
+class GreekAttribution:
+    """What each greek did to a contract's price, day by day.
+
+    `by_day` holds one row per interval — the four terms, the price change that
+    actually happened, and the residual. `totals` sums them, and start/end are
+    the prices the sum reconciles: start + every term + every residual == end,
+    exactly, by construction.
+    """
+
+    def __init__(self, by_day, start_price=None, end_price=None,
+                 dropped_cheap=0, dropped_unreliable=0, missing_trading_days=0):
+        self.by_day = by_day
+        self.start_price = start_price
+        self.end_price = end_price
+        self.dropped_cheap = dropped_cheap
+        self.dropped_unreliable = dropped_unreliable
+        self.missing_trading_days = missing_trading_days
+
+    @property
+    def totals(self) -> dict:
+        """Each term summed over the window, plus the residual and the net."""
+        if self.by_day.empty:
+            return {name: 0.0 for name in (*ATTRIBUTION_TERMS, "residual", "actual")}
+        return {name: float(self.by_day[name].sum())
+                for name in (*ATTRIBUTION_TERMS, "residual", "actual")}
+
+
+def greek_attribution(history: pd.DataFrame, min_price: float | None = None) -> GreekAttribution:
+    """Splits a contract's price change into what each greek did (пункт 9).
+
+        Δprice ≈ delta·ΔS + ½·gamma·ΔS² + vega·ΔIV + theta·Δt + residual
+
+    NO ENTRY POINT IS NEEDED, and that is the misunderstanding this function
+    exists to settle. Every input comes from the snapshots themselves — the
+    greeks as they stood at the start of an interval, the moves observed by its
+    end. This is a property of the CONTRACT. A position adds only a window, a
+    multiplier and the gap between the fill and the snapshot price; it does not
+    redistribute the greeks' shares.
+
+    DAILY, not per snapshot. Production collects every 15 minutes: over 96
+    intervals a day the theta term is 0.0104 days each and the delta term rides
+    on quote jitter, so summing them accumulates noise into the residual. One
+    row per trading day, via the same `_last_snapshot_per_day` every other daily
+    metric uses.
+
+    UNITS, verified against `_black_scholes_greeks` rather than assumed: theta
+    is per CALENDAR day (divided by 365) and vega per IV POINT (divided by 100),
+    so IV differences are multiplied by 100 and theta by elapsed calendar time —
+    which is why a Friday-to-Monday interval charges three days of decay, not
+    one.
+
+    THE RESIDUAL IS ALWAYS RETURNED. The decomposition explains a MODEL price:
+    IV is inverted from the price, the greeks come from IV, and everything the
+    model does not contain — the spread, a stale print, a rate move — lands
+    here. Small residual, the model explains this contract; large residual, it
+    does not, and that is a finding rather than something to hide.
+
+    Two stretches are refused rather than reported wrong, and both are counted
+    so the interface can say so:
+
+    - **Below `min_price`** (see config.ATTRIBUTION_MIN_PRICE): on a one-cent
+      option every greek is arithmetic about rounding.
+    - **Rows the IV guard rejected**, which arrive as NaN greeks.
+
+    What survives is the LONGEST CONTIGUOUS RUN of usable intervals. Contiguity
+    is not tidiness: the whole point of the output is that start + terms == end,
+    and a gap in the middle breaks that identity silently.
+    """
+    min_price = config.ATTRIBUTION_MIN_PRICE if min_price is None else min_price
+    columns = ["day", "actual", *ATTRIBUTION_TERMS, "residual", "missing_trading_days"]
+    empty = pd.DataFrame(columns=columns)
+    needed = ["last_price", "underlying_price", "implied_volatility", *ATTRIBUTION_TERMS]
+    if history.empty or not set(needed) <= set(history.columns):
+        return GreekAttribution(empty)
+
+    daily = _last_snapshot_per_day(history).sort_values("collected_at")
+    usable_rows = daily.dropna(subset=needed)
+    dropped_unreliable = len(daily) - len(usable_rows)
+    if len(usable_rows) < 2:
+        return GreekAttribution(empty, dropped_unreliable=dropped_unreliable)
+
+    candidates = []
+    rows = list(usable_rows.itertuples())
+    for previous, current in zip(rows, rows[1:]):
+        cheap = min(previous.last_price, current.last_price) < min_price
+        elapsed_days = (current.collected_at - previous.collected_at).total_seconds() / 86400
+        change_in_spot = current.underlying_price - previous.underlying_price
+        candidates.append((cheap, {
+            "day": current.collected_at,
+            "actual": current.last_price - previous.last_price,
+            "delta": previous.delta * change_in_spot,
+            "gamma": 0.5 * previous.gamma * change_in_spot ** 2,
+            "vega": previous.vega * (current.implied_volatility - previous.implied_volatility) * 100,
+            "theta": previous.theta * elapsed_days,
+            "missing_trading_days": max(
+                0,
+                int(np.busday_count(previous.collected_at.date(), current.collected_at.date())) - 1,
+            ),
+            "_start": previous.last_price,
+            "_end": current.last_price,
+        }))
+
+    best_start = best_length = run_start = run_length = 0
+    for index, (cheap, _) in enumerate(candidates):
+        if cheap:
+            run_length = 0
+            continue
+        run_start = index if run_length == 0 else run_start
+        run_length += 1
+        if run_length > best_length:
+            best_start, best_length = run_start, run_length
+    if best_length == 0:
+        return GreekAttribution(empty, dropped_cheap=len(candidates),
+                                dropped_unreliable=dropped_unreliable)
+
+    kept = [payload for _, payload in candidates[best_start:best_start + best_length]]
+    frame = pd.DataFrame(kept)
+    frame["residual"] = frame["actual"] - frame[list(ATTRIBUTION_TERMS)].sum(axis=1)
+    return GreekAttribution(
+        frame[columns],
+        start_price=float(kept[0]["_start"]),
+        end_price=float(kept[-1]["_end"]),
+        dropped_cheap=len(candidates) - best_length,
+        dropped_unreliable=dropped_unreliable,
+        missing_trading_days=int(frame["missing_trading_days"].sum()),
+    )

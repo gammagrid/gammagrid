@@ -39,6 +39,24 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.4.2 → v0.5.0
+
+**Risk: safe. One new table, nothing rewritten, no data touched.**
+
+Migration `0005_contract_registry.sql` creates `contract_registry` and fills it
+from the snapshots you already have. On a database with a few hundred thousand
+rows this takes seconds; it is one aggregation, run once, and it is the reason
+the expired-contract lists are a lookup rather than a scan.
+
+Nothing is deleted or rewritten. The registry is an index over the snapshots,
+not a second source of truth — it can be rebuilt from them at any time.
+
+**What changes in behaviour:** with collection on a schedule, the collector now
+takes ONE snapshot per closed day instead of one per interval. If you want the
+old behaviour back — collecting round the clock — there is no setting for it in
+this release; open an issue and say why, because the measurements say those
+snapshots are duplicates.
+
 ## v0.4.1 → v0.4.2
 
 **Risk: safe.** Start the new version. Nothing is rewritten and nothing is

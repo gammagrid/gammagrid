@@ -63,6 +63,14 @@ RISK_FREE_RATE = 0.05
 # this guard is allowed to suppress before it no longer trusts its own
 # reference and backs off entirely. All four numbers are starting
 # hypotheses, not final.
+# Greek attribution: below this contract price the decomposition is not shown
+# for that stretch of days. Measured on the real trade the feature was built
+# from: at 1c the provider's IV read 141%, and the vega term came out at +20.9c
+# — twenty times the option's whole price. IV is inverted FROM the price, so on
+# a one-cent quote a one-cent tick is a 100% move and every greek derived from
+# it is arithmetic about rounding. 5c is where that stops.
+ATTRIBUTION_MIN_PRICE = 0.05
+
 IV_OUTLIER_MIN_HISTORY_POINTS = 3
 IV_OUTLIER_REL_THRESHOLD = 0.5  # 50% deviation from the contract's median IV
 IV_OUTLIER_PRICE_COROBORATION_THRESHOLD = 0.15  # 15% deviation from median last_price counts as "moved"

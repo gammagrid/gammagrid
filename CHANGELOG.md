@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-18
+
+### Added
+- **Expired contracts are reachable again.** Their history was always stored, but
+  the Contract tab builds its lists from the latest chain — which has no row for
+  something that no longer trades — so a contract vanished from the dropdowns on
+  expiry day. A "Show expired contracts" toggle brings them back, marked `⏳`,
+  with the real range of collected history spelled out. On the database this was
+  built against that is 7,098 contracts that could not be opened before.
+- **Where the price went**: a per-contract waterfall splitting the price change
+  into delta, gamma, vega, theta and the residual, plus a running total by day.
+  No entry price is needed and none is asked for — this is a property of the
+  contract. The residual is always shown: a decomposition that hides its own
+  error cannot be checked.
+- **Times are shown in your own timezone**, labelled with it, everywhere an
+  instant appears. Aggregation is unaffected — daily metrics stay anchored to the
+  New York trading day, so the same data gives every reader the same numbers.
+
+### Changed
+- **The collector sleeps through a closed market**, taking one snapshot per
+  closed day instead of one per interval. Measured on a year of data: between two
+  adjacent weekend snapshots not one contract of 14,230 changed its price, volume
+  or open interest, while implied volatility moved on 13,727 — the provider
+  recomputing from a frozen price as the clock ticks. Those snapshots also broke
+  three views, so this is a correctness fix as much as a saving.
+- **Daily metrics count trading days**, in New York rather than UTC. A Saturday
+  is a copy of Friday, and counted as a day it made OI Delta compare Friday with
+  Friday, and filled two sevenths of the Unusual Activity baseline with
+  repetitions.
+
+### Database
+- New table `contract_registry`, one row per contract, backfilled from history on
+  first start. It replaces a `SELECT DISTINCT` whose cost grows with the number
+  of SNAPSHOTS rather than contracts — measured at 152,409 index entries read to
+  return 13,449 contracts.
+
 ## [0.4.2] - 2026-08-15
 
 ### Fixed

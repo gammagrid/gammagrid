@@ -240,8 +240,6 @@ def main():
     # views are rendered against fixtures written below, and a leftover row
     # from another run would change what is on screen.
     with empty_database():
-        from app import collector, db
-
         # The Contract view fetches daily prices to show realized volatility.
         # AppTest runs the script in this very process, so replacing the
         # function here is enough — and it has to be replaced: the checks in
@@ -252,6 +250,18 @@ def main():
         # indexed by date. Prices wobble rather than rise in a straight line —
         # realized volatility over a perfectly linear series is zero, and a
         # zero would exercise none of the formatting below it.
+        # THE READER IS IN PRAGUE, not in UTC. In bare mode `st.context.timezone`
+        # is None, the app falls back to UTC, and every conversion becomes the
+        # identity — which leaves this harness structurally blind to timezone
+        # bugs. It cost the sibling product a day of a missing chart: a lookup
+        # key was converted for display, every row lookup missed, and the page
+        # rendered its legitimate "no data yet" branch while the gate stayed
+        # green, because with UTC the wrong key happened to equal the right one.
+        from zoneinfo import ZoneInfo
+
+        from app import collector, db, viewtime
+        viewtime.viewer_timezone = lambda: ZoneInfo("Europe/Prague")
+
         collector.fetch_price_history = lambda ticker, period="6mo": pd.DataFrame(
             {"close": [100.0 + (i % 7) - 3 for i in range(60)]},
             index=pd.date_range("2026-05-01", periods=60, freq="D"),
