@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **The hosted version is open**, and the README says so where it can be seen
+  rather than at the bottom: [app.gammagrid.io](https://app.gammagrid.io/), free
+  while it is in beta. Nothing about self-hosting changes — this repository is
+  still the whole product, and the file that computes every number is
+  byte-identical in both, with a CI job that fails if it ever stops being.
+
 ## [0.5.1] - 2026-08-18
 
 ### Fixed

@@ -45,11 +45,12 @@ here may move, arrive in a different shape, or turn out not to be worth it.
 
 ## Bigger picture
 
-- **A hosted version** — the same dashboard, no Docker, no local setup,
-  running against your watchlist in a browser. The self-hosted, open-source
-  version stays free and fully functional either way; hosting just removes
-  the "install Docker" step for people who would rather not. Sign up for
-  updates at [gammagrid.io](https://gammagrid.io).
+- **~~A hosted version~~ — shipped, and open since 19.08.2026:**
+  [app.gammagrid.io](https://app.gammagrid.io/). The same dashboard with no
+  Docker and no local setup, free while it is in beta. The self-hosted,
+  open-source version stays free and fully functional either way — hosting only
+  removes the "install Docker" step for people who would rather not, and the
+  calculations are the same file in both.
 - **A premium data source adapter.** `yfinance` is unofficial and comes with
   the limitations described in the [README](README.md#data-source-limitations)
   (delayed data, occasional gaps, no SLA). A licensed, higher-reliability data

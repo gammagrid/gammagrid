@@ -18,11 +18,14 @@ which do (`ASML`, `SAP`, `SHEL`, `NVO`, `BUD`). See the [FAQ](#faq).
 
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-B833E0.svg)](LICENSE)
 [![Runs on Docker](https://img.shields.io/badge/runs%20on-Docker-22C55E.svg)](#quick-start-no-coding-required)
-[![Hosted version: join the waitlist](https://img.shields.io/badge/hosted%20version-join%20the%20waitlist-2A332E.svg)](https://gammagrid.io/)
+[![Hosted version: open, free in beta](https://img.shields.io/badge/hosted-open%2C%20free%20in%20beta-22C55E.svg)](https://app.gammagrid.io/)
 
-Prefer not to run it yourself? A hosted version is in the works —
-[leave an email on gammagrid.io](https://gammagrid.io/) and you'll hear when it
-opens. Self-hosting stays free and open source either way.
+**Don't want to run anything? It is hosted too, and open now** —
+**[app.gammagrid.io](https://app.gammagrid.io/)**. Sign in with Google or GitHub,
+add your tickers, and the collecting happens on our side. Free while it is in
+beta, no card. Self-hosting stays free and open source either way, and both run
+the same code: the file that computes the numbers is byte-identical in the two
+products, and CI fails if that ever stops being true.
 
 > **No coding required.** If you can install an app and copy-paste one command
 > into a terminal, you can run GammaGrid. No Python, no config files, no
@@ -274,8 +277,20 @@ the [FAQ](#faq) for the measurement and for the ADR route).
 
 ## Want it hosted, with zero setup?
 
-A hosted version of GammaGrid (no Docker, no local install) is planned. Join
-the list at **[gammagrid.io](https://gammagrid.io)** to hear when it's ready.
+It exists and it is open: **[app.gammagrid.io](https://app.gammagrid.io/)**. No
+Docker, no local install, no card — free while it is in beta. Sign in with
+Google or GitHub, add tickers, and a shared collector keeps them up to date
+whether or not you have the tab open.
+
+**What you give up by not self-hosting:** your watchlist and your collected
+history live on someone else's machine — ours. **What you get:** nothing to
+install or keep running, and a collector that does not stop when your laptop
+sleeps.
+
+**What is the same either way:** the calculations. `app/metrics_core.py` is
+byte-identical in both products and a CI job fails if that ever stops being
+true, so a number here and a number there are the same number, computed by the
+same code you can read in this repository.
 
 ## Get involved
 
