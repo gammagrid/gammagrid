@@ -299,6 +299,12 @@ Questions, feedback, or found a bug? Email
 GammaGrid is useful to you, starring the repo genuinely helps — it's the main
 signal used to decide what gets built next.
 
+## Related tools
+
+GammaGrid is self-hosted (or hosted at [app.gammagrid.io](https://app.gammagrid.io/)). If you want a hosted strike × expiry GEX heatmap with VEX, DEX, and an intraday view, without running Docker:
+
+- [Theta Vantage GEX Heatmap](https://thetavantage.com/greek-heatmap) — GEX, VEX, and DEX by strike and expiration.
+
 ## License
 
 [AGPL-3.0](LICENSE).
