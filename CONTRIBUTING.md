@@ -97,6 +97,22 @@ Use the GitHub issue templates. For security issues, see
   the view you are looking at renders, so a name defined in one view and read in
   another is a `NameError` on exactly the view nobody opened.
 
+### What will not be merged
+
+**Links to third-party products.** Pull requests that add a "Related tools",
+"Alternatives", "See also" or similar section pointing at another service are
+declined, however the section is framed. This is not about the tool being good
+or bad: a link in this README reads as a recommendation from the people who
+wrote GammaGrid, and that is not something a pull request can grant itself.
+
+If you have built something genuinely complementary and want it mentioned,
+email [hello@gammagrid.io](mailto:hello@gammagrid.io) and say what it does and
+why a GammaGrid user would want both. That is a conversation, not a diff.
+
+Documentation PRs that link to a standard, a paper, a library's own docs, or
+anything else that helps a reader understand the code are welcome and are not
+what this rule is about.
+
 ## Questions
 
 Email [hello@gammagrid.io](mailto:hello@gammagrid.io) or open an issue if
