@@ -117,9 +117,42 @@ first, then start again.
 images. Progress lines that sit still for a while are normal on a slow
 connection; it only needs to happen once.
 
+### When a ticker will not collect
+
+**"… has no options to collect on the current data source."** The ticker was
+refused when you added it, because the source has no option chain for that
+symbol at all. Usually a typo (`APPL` for `AAPL`) or a name that is not a
+tradeable symbol — an index (`NASDAQ`), a company name (`NVIDIA`), a currency
+pair (`BTCUSD`). The message names a better symbol to try where there is an
+honest one. If the source could not be reached to answer the question, the
+ticker is added rather than refused: a valid symbol rejected because Yahoo had
+a bad minute would be the worse mistake.
+
+**A ticker in the watchlist shows ⏸ and stops collecting.** Every collection it
+has ever had failed, and none has ever succeeded — six in a row is the point at
+which it stops being requested. That is almost always a symbol that does not
+exist, quietly failing since the day it was added. Nothing about it is deleted;
+correct the spelling and add it again, or remove it. A ticker that has ever
+collected once is never suspended, however badly the source is behaving — an
+outage fails everything at once, and a watchlist that emptied itself over a bad
+afternoon would be worse than one that keeps trying.
+
+**"The data source is limiting requests."** Yahoo has refused this
+installation, usually after too many requests in a short time, and collection
+pauses until the time shown in the sidebar. This is not the market being
+closed — that is a different message. Nothing is lost: the next pass collects
+as usual, and the chain in between did not change in a way any snapshot would
+have caught.
+
+**A collection log full of the same failure.** Look at the message rather than
+the count. `open_interest=0` across a whole chain almost always means the
+market was shut when it ran; anything naming a symbol means that symbol.
+
 Still stuck? [Open an issue](https://github.com/gammagrid/gammagrid/issues) with
-the command you ran and everything it printed — that is enough to work from,
-and it is how this section gets longer.
+the command you ran, everything it printed, and **the version from the bottom
+of the sidebar** — every installation runs a different one, and without it the
+first reply has to ask. That is enough to work from, and it is how this section
+gets longer.
 
 ## What you get
 
@@ -186,14 +219,21 @@ list.
 Collecting continuously fills a disk, so here is the arithmetic rather than a
 shrug. One stored row costs about 214 bytes, and one pass stores one row per
 contract in every watchlist ticker's chain — a few hundred for a small single
-name, ~14,000 for SPY:
+name, ~14,000 for SPY. The collector runs during the 6.5-hour session on the
+21 trading days in a month, plus one snapshot on each closed day:
 
 | Interval | Small watchlist (~1,000 contracts) | With an index ETF (~15,000) |
 |---|---|---|
 | Once a day | ~6 MB/month | ~96 MB/month |
-| Every 4 hours | ~39 MB/month | ~578 MB/month |
-| Hourly | ~154 MB/month | ~2.3 GB/month |
-| Every 15 minutes | ~617 MB/month | ~9.2 GB/month |
+| Every 4 hours | ~9 MB/month | ~138 MB/month |
+| Hourly | ~31 MB/month | ~467 MB/month |
+| Every 15 minutes | ~119 MB/month | ~1.8 GB/month |
+
+**These numbers used to be about five times larger,** because they assumed
+collection ran around the clock — which stopped being true in v0.5.0, when the
+collector began sleeping through a closed market. Only the three sub-daily rows
+moved: at one collection a day the interval is already longer than a session,
+so nothing changes.
 
 The sidebar shows this figure for **your** watchlist at the moment you choose an
 interval, computed from what you have already collected rather than from the
@@ -242,6 +282,10 @@ not the same contract as the local one — different hours, different liquidity,
 a currency layer — but for positioning it is usually the question you were
 asking anyway. Add the plain symbol, without the exchange suffix.
 
+Since the ticker check landed, a symbol with no chain is refused when you add
+it rather than accepted and then failing on every collection — so `SAP.DE`
+tells you immediately instead of filling the log for a week.
+
 **Is this a real-time options flow scanner?** No — GammaGrid takes periodic
 snapshots of the option chain (on demand, or on a schedule you choose), it
 does not stream live trade-by-trade tape. If you need tick-by-tick sweep/block
@@ -269,7 +313,9 @@ In Docker the same thing is handled by `ENV PYTHONPATH=/app` in the
 official support. Expect possible data delays (15–20 minutes), irregular
 intraday open-interest updates, and temporary blocks under frequent requests.
 The app logs collection failures (visible on the dashboard in the collection
-log) but makes no attempt to circumvent blocks.
+log) and makes no attempt to circumvent blocks — when the source says it is
+being asked too often, collection stops for a while and the sidebar says until
+when. Retrying through a block is what keeps a block in place.
 
 **Coverage is US options only.** A non-US listing is not a failure you can fix
 by retrying or by waiting: the source returns no expiries for it at all (see

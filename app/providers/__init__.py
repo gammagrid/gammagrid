@@ -10,10 +10,30 @@ The whole point of this package is that a second source is a new file here and
 nothing else. Write a class with the attributes and methods in
 `base.DataProvider` (it is a runtime-checkable Protocol, so
 `isinstance(mine, DataProvider)` tells you whether you have them all), return
-exactly `base.CHAIN_COLUMNS` from `fetch_ticker_snapshot`, and register it in
+at least `base.CHAIN_COLUMNS` from `fetch_ticker_snapshot`, and register it in
 `known_providers()` and `get_provider()` below. Import it lazily, the way this
 file already does for anything optional, so that people who do not use your
 provider do not have to install its dependencies.
+
+## What is optional, and why it is optional rather than required
+
+Two things improve the product when a source can supply them and change
+nothing when it cannot. Neither is in the Protocol, so a provider written
+before they existed is still a valid provider.
+
+- **`base.CHAIN_OPTIONAL_COLUMNS`** — today just `contract_symbol`, the
+  contract's own identifier. Return it as an extra column if you have it. It
+  is what distinguishes an adjusted series from the standard one when both
+  trade at the same strike and expiry, which happens after a split or a
+  special dividend. Without it the two are indistinguishable and one of them
+  is dropped arbitrarily; with it the standard series is kept.
+- **`underlying_has_options(ticker) -> bool | None`** — asked once, when
+  somebody types a ticker into the watchlist, so that a symbol with no chain
+  is refused with an explanation instead of failing forever. **`None` means
+  "could not find out" and lets the ticker through**, and a provider that does
+  not define the method at all reads as `None`. Keep that three-valued: a
+  valid symbol refused because your source had a bad minute is a worse failure
+  than the typo the check exists to catch.
 
 One thing to get right, because it is invisible until it is not: every row is
 stamped with `name` in `option_snapshots.source`, and the reads act on that
