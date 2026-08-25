@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-25
+
 ### Fixed
 - **A ticker with adjusted contracts collected nothing at all.** After a split
   or a special dividend an adjusted option series trades beside the standard
@@ -478,7 +480,8 @@ Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.5.1...main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.5.2...main
+[0.5.2]: https://github.com/gammagrid/gammagrid/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/gammagrid/gammagrid/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/gammagrid/gammagrid/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/gammagrid/gammagrid/compare/v0.4.1...v0.4.2

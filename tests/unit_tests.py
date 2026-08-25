@@ -786,9 +786,21 @@ def check_version_comes_from_the_changelog():
 
     assert settings.APP_VERSION.startswith("v"), settings.APP_VERSION
     assert settings._read_version() == settings.APP_VERSION
-    # Between releases the top heading is [Unreleased], and reporting the last
-    # tag flat would claim this build is that release when it is not.
-    assert "unreleased" in settings.APP_VERSION or settings.APP_VERSION[1].isdigit()
+    assert settings.APP_VERSION[1].isdigit(), settings.APP_VERSION
+
+    # AN EMPTY [Unreleased] HEADING IS NOT UNRELEASED WORK, and the first
+    # release cut after this function was written proved it the hard way: Keep
+    # a Changelog leaves that heading in the file forever, so the tagged build
+    # called itself "+unreleased". The section counts only when something is
+    # written under it.
+    import pathlib
+    lines = pathlib.Path(settings._CHANGELOG).read_text(encoding="utf-8").splitlines()
+    headings = [i for i, line in enumerate(lines) if line.startswith("## [")]
+    first, second = headings[0], headings[1]
+    has_unreleased_content = any(line.strip() for line in lines[first + 1:second])
+    assert ("+unreleased" in settings.APP_VERSION) == has_unreleased_content, (
+        settings.APP_VERSION, has_unreleased_content
+    )
     print(f"version check passed ({settings.APP_VERSION})")
 
 

@@ -172,25 +172,42 @@ def _read_version() -> str:
     useful: it means nothing to the person reading a screenshot, and there is
     no git inside the container to produce one anyway.
 
-    An unreleased checkout says so — "v0.5.1+unreleased" — because between two
-    releases the newest heading is [Unreleased], and reporting the last tag
-    flat would claim this is a released build when it is not. Someone running
-    from main is exactly the person whose bug report needs the distinction.
+    A checkout with unreleased work says so — "v0.5.2+unreleased" — because
+    reporting the last tag flat would claim this is a released build when it is
+    not. Somebody running from main is exactly the person whose bug report
+    needs that distinction.
+
+    WHETHER THERE IS UNRELEASED WORK IS DECIDED BY CONTENT, NOT BY THE
+    HEADING. Keep a Changelog leaves an empty `[Unreleased]` heading at the top
+    of the file permanently, so a build cut at a tag would otherwise call
+    itself "+unreleased" forever — which is what the first release after this
+    function was written actually did. The alternative was to delete the empty
+    heading at release time and put it back with the next change, and that is a
+    ritual step somebody eventually forgets. So the section counts only when
+    something is written under it.
 
     Failure is silent and returns "unknown": a missing or unreadable changelog
     must never be the reason the dashboard will not start.
     """
     try:
         with open(_CHANGELOG, encoding="utf-8") as handle:
-            headings = [
-                line[len("## ["):].split("]")[0]
-                for line in handle
-                if line.startswith("## [")
-            ]
+            lines = handle.read().splitlines()
     except OSError:
         return "unknown"
-    unreleased = bool(headings) and headings[0].lower() == "unreleased"
-    released = next((h for h in headings if h.lower() != "unreleased"), None)
+
+    headings = [i for i, line in enumerate(lines) if line.startswith("## [")]
+    if not headings:
+        return "unknown"
+
+    def name(index: int) -> str:
+        return lines[index][len("## ["):].split("]")[0]
+
+    unreleased = False
+    if name(headings[0]).lower() == "unreleased":
+        end = headings[1] if len(headings) > 1 else len(lines)
+        unreleased = any(line.strip() for line in lines[headings[0] + 1:end])
+
+    released = next((name(i) for i in headings if name(i).lower() != "unreleased"), None)
     if released is None:
         return "unknown"
     return f"v{released}+unreleased" if unreleased else f"v{released}"
