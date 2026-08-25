@@ -15,13 +15,23 @@ from __future__ import annotations
 import pandas as pd
 import yfinance as yf
 
-from app.providers.base import CHAIN_COLUMNS, ProviderStatus, with_retry
+from app.providers.base import (
+    CHAIN_COLUMNS,
+    CHAIN_OPTIONAL_COLUMNS,
+    ProviderStatus,
+    with_retry,
+)
 
 CHAIN_RENAMES = {
     "lastPrice": "last_price",
     "openInterest": "open_interest",
     "impliedVolatility": "implied_volatility",
     "inTheMoney": "in_the_money",
+    # Yahoo serves the contract's own OCC symbol, and it is the only thing that
+    # distinguishes an adjusted series from the standard one at the same strike
+    # and expiry. It used to be dropped on the way out of this function, which
+    # is what made a split-adjusted ticker fail to collect at all.
+    "contractSymbol": "contract_symbol",
 }
 
 
@@ -32,7 +42,33 @@ class YahooProvider:
     token: str | None = None  # nothing to authenticate with, nothing to scrub
 
     def _fetch_underlying_price(self, ticker_obj: yf.Ticker) -> float:
-        return float(ticker_obj.fast_info["lastPrice"])
+        """The spot price, or a refusal a person can act on.
+
+        `float(fast_info["lastPrice"])` used to be the whole body, and what a
+        user saw when it went wrong was one of these, verbatim, in the
+        collection log:
+
+            float() argument must be a string or a real number, not 'NoneType'
+            'currentTradingPeriod'
+
+        Neither says what happened or what to do, and neither is stable: the
+        same missing symbol raised a KeyError one week and a TypeError the
+        next, because yfinance's shape for "nothing here" changes with its
+        version. So the check is on the VALUE — there is no price — rather
+        than on the type of the explosion, and the message names both causes
+        the user can actually be in.
+        """
+        try:
+            price = ticker_obj.fast_info["lastPrice"]
+        except Exception:  # noqa: BLE001 — every shape of "not there" means the same thing
+            price = None
+        if price is None:
+            raise ValueError(
+                f"no price for {ticker_obj.ticker} — either the symbol does not exist, "
+                "or Yahoo Finance is rate-limiting this installation. Check the spelling "
+                "first; if it is right, wait a few minutes and collect again."
+            )
+        return float(price)
 
     def fetch_underlying_price(self, ticker: str) -> float:
         """Spot price on its own, without pulling a whole option chain.
@@ -64,7 +100,8 @@ class YahooProvider:
         for greek in ("delta", "gamma", "theta", "vega"):
             combined[greek] = None
 
-        return combined[CHAIN_COLUMNS]
+        extras = [name for name in CHAIN_OPTIONAL_COLUMNS if name in combined.columns]
+        return combined[CHAIN_COLUMNS + extras]
 
     def fetch_ticker_snapshot(self, ticker: str) -> tuple[float, pd.DataFrame]:
         ticker_obj = yf.Ticker(ticker)
@@ -87,6 +124,27 @@ class YahooProvider:
         if history.empty:
             return pd.DataFrame(columns=["close"])
         return history.rename(columns={"Close": "close"})[["close"]]
+
+    def underlying_has_options(self, ticker: str) -> bool | None:
+        """Does this symbol have options here at all — True, False, or "no idea".
+
+        Yahoo's answer is its expiry list: no expiries, no chain to collect.
+
+        THREE-VALUED ON PURPOSE. None means the question could not be answered
+        — Yahoo was unreachable, rate-limiting, or slow — and the caller must
+        let the ticker through on None. Refusing a valid symbol because a free
+        data source had a bad minute is a worse failure than the typo this
+        catches: the typo is visible in the collection log within the hour, and
+        a wrongly rejected ticker looks like the product being broken.
+
+        Not part of the DataProvider Protocol, and called through getattr, so
+        that a provider written before this existed is not suddenly an invalid
+        provider. A source that cannot answer simply does not offer the method.
+        """
+        try:
+            return bool(yf.Ticker(ticker).options)
+        except Exception:  # noqa: BLE001 — every failure means "could not find out"
+            return None
 
     def check_access(self) -> ProviderStatus:
         """yfinance needs no credentials, so there is nothing to verify beyond

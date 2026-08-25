@@ -57,6 +57,20 @@ CHAIN_COLUMNS = [
     "vega",
 ]
 
+# Columns a provider MAY add, and which nothing breaks without. Kept apart from
+# CHAIN_COLUMNS on purpose: that list is a contract third-party providers were
+# written against, and lengthening it would turn every one of them into a
+# broken provider overnight.
+#
+# `contract_symbol` — the contract's own identifier, as the exchange writes it
+# (OCC: root, expiry, type, strike). Two contracts can legitimately share a
+# strike, an expiry and a type: after a split or a special dividend an adjusted
+# series lives alongside the standard one, and only the symbol's root tells
+# them apart. Without it db.insert_snapshot has no way to choose between them
+# and the whole chain fails to store. See the dedupe there for what happens
+# when a provider does not supply this.
+CHAIN_OPTIONAL_COLUMNS = ["contract_symbol"]
+
 
 @dataclass(frozen=True)
 class ProviderStatus:
@@ -111,16 +125,62 @@ class DataProvider(Protocol):
         ...
 
 
+# What "the source is refusing to talk to you" looks like across libraries.
+# Matched on the exception's TYPE first, because that is the reliable half —
+# yfinance raises YFRateLimitError, and a type name cannot be confused with a
+# number that happened to appear in a message.
+#
+# The text markers are the fallback, and they are deliberately narrow. An
+# earlier draft matched a bare "999" (Yahoo's historical rate-limit code) and
+# would have matched any message quoting a strike of 999 or a chain of 999
+# rows. A misclassified failure here is expensive: it stops the whole pass.
+_RATE_LIMIT_MARKERS = (
+    "too many requests",
+    "rate limit",
+    "rate-limit",
+    "http error 429",
+    "error 429",
+    "status 429",
+    "http error 999",
+    "error 999",
+)
+
+
+def is_rate_limited(error: BaseException | str) -> bool:
+    """Is this failure the source telling us to slow down?
+
+    Separated from every other failure because the correct response is the
+    opposite one. A network blip deserves a retry; being throttled deserves
+    silence, and retrying is precisely what extends it.
+    """
+    if isinstance(error, BaseException) and "ratelimit" in type(error).__name__.lower():
+        return True
+    text = str(error).lower()
+    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
+
+
 def with_retry(fn, *args, **kwargs):
     """Exponential backoff around one network call. Deliberately catches broad
     Exception: data-source libraries raise assorted connection, parsing and
-    rate-limit types, and there is nothing useful to do differently per type at
-    this layer."""
+    rate-limit types.
+
+    WITH ONE EXCEPTION, and it is the reason this docstring changed. Retrying a
+    throttled request is not neutral — it is the thing that keeps the throttle
+    in place, and this helper did it three times per call, for every expiry, for
+    every ticker in the watchlist. One mistyped symbol was enough to burn half
+    a dozen requests before the first real ticker was reached, after which the
+    source refused the valid ones too and the run log blamed them. So a
+    rate-limit failure is raised immediately and the decision about what to do
+    next is taken a level up, where the whole pass can be stopped instead of
+    one call.
+    """
     last_error: Exception | None = None
     for attempt in range(config.MAX_FETCH_RETRIES):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
+            if is_rate_limited(exc):
+                raise
             last_error = exc
             if attempt < config.MAX_FETCH_RETRIES - 1:
                 time.sleep(config.BACKOFF_BASE_SECONDS * (2**attempt))

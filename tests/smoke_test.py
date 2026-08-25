@@ -17,7 +17,7 @@ import testdb  # noqa: E402
 
 testdb.configure()
 
-from app import collector, config, db, metrics  # noqa: E402
+from app import collector, config, db, market_calendar, metrics  # noqa: E402
 
 EXPIRY = "2026-09-18"
 STRIKES = [90, 95, 100, 105, 110]
@@ -85,7 +85,18 @@ def check_scheduled_collection(conn):
     hourly = db.estimated_growth_mb_per_month(conn, 60)
     quarter_hourly = db.estimated_growth_mb_per_month(conn, 15)
     assert quarter_hourly > hourly > 0, (hourly, quarter_hourly)
-    assert abs(quarter_hourly / hourly - 4) < 1e-9, "four times as often is four times the disk"
+    # NOT EXACTLY FOUR TIMES, and this assertion used to demand that it was.
+    # It held while the estimate assumed collection ran around the clock, so
+    # everything scaled with the interval and nothing else. It does not hold
+    # now that the calendar is in the formula: the collector takes one snapshot
+    # per closed day whatever the interval, and that part is a constant. So
+    # collecting four times as often costs a little under four times the disk,
+    # and the gap is the nine closed days in the month.
+    ratio = quarter_hourly / hourly
+    assert 3.5 < ratio < 4.0, (
+        f"expected a little under four times the disk, got {ratio:.2f}x — "
+        "above 4 would mean the closed-day floor has gone missing"
+    )
 
     db.set_setting(conn, "unit-probe", "value")
     assert db.get_setting(conn, "unit-probe") == "value"
@@ -159,10 +170,23 @@ def check_two_sources_never_mix(conn):
     deleted, and this asserts it rather than assuming it.
     """
     ticker = "SRCTEST"
-    yesterday = datetime.utcnow().replace(microsecond=0) - timedelta(days=1)
-    only_old = yesterday - timedelta(hours=2)   # yahoo alone
-    shared = yesterday - timedelta(hours=1)     # both, to the same instant
-    newest = yesterday                          # premium alone
+    # ANCHORED TO A TRADING DAY, NOT TO "YESTERDAY". This used to be
+    # `utcnow() - 1 day`, which meant the whole check ran on a Sunday every
+    # Monday — and get_collection_moments(per_day=True) excludes weekends on
+    # purpose, because a Saturday snapshot is a copy of Friday's chain. The
+    # volume baseline then had no days to build from and the check failed with
+    # "expected one row per contract, got 0", pointing at code that was right.
+    # A suite that cannot pass on a Monday is a suite people learn to re-run
+    # rather than read.
+    #
+    # 18:00 UTC is 14:00 in New York — inside the session on any trading day,
+    # in either half of the year, so the market-date conversion cannot land it
+    # on a neighbouring day.
+    anchor = market_calendar.last_completed_trading_day()
+    day = datetime.combine(anchor, dt_time(18, 0))
+    only_old = day - timedelta(hours=2)   # yahoo alone
+    shared = day - timedelta(hours=1)     # both, to the same instant
+    newest = day                          # premium alone
 
     def collected(moment, source, price, iv_shift, volume):
         db.insert_snapshot(

@@ -56,7 +56,25 @@ def truncate_all(conn) -> None:
     TRUNCATE rather than DROP: the shape belongs to the migrations, and a copy
     of it here would be a second definition to keep in step. RESTART IDENTITY
     so that checks asserting on row ids see the same numbers on every run.
+
+    THE DERIVED TABLES BELONG IN THIS LIST TOO, and leaving them out was a real
+    trap. contract_registry and snapshot_iv_summary are written by
+    insert_snapshot in the same transaction as the chain; emptying the chain
+    and not them leaves a registry describing contracts that no longer exist.
+    The next run then re-inserts a snapshot at a moment the registry already
+    knows, and the upsert fails with a cardinality violation that points at the
+    application code rather than at the leftovers that caused it.
     """
     with conn.cursor() as cur:
-        for table in ("option_snapshots", "collection_runs", "tracked_contracts", "watchlist"):
+        for table in (
+            "option_snapshots",
+            "option_snapshots_archive",
+            "contract_registry",
+            "snapshot_iv_summary",
+            "contract_volume_stats",
+            "collection_runs",
+            "tracked_contracts",
+            "watchlist",
+            "app_settings",
+        ):
             cur.execute(f"TRUNCATE {table} RESTART IDENTITY")  # noqa: S608 — fixed list above

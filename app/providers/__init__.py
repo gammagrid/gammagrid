@@ -32,18 +32,27 @@ above, so nothing stops you writing your own against whatever you subscribe to.
 
 from __future__ import annotations
 
-from app.providers.base import CHAIN_COLUMNS, DataProvider, ProviderStatus, with_retry
+from app.providers.base import (
+    CHAIN_COLUMNS,
+    CHAIN_OPTIONAL_COLUMNS,
+    DataProvider,
+    ProviderStatus,
+    is_rate_limited,
+    with_retry,
+)
 from app.providers.yahoo import YahooProvider
 
 DEFAULT_PROVIDER = "yahoo"
 
 __all__ = [
     "CHAIN_COLUMNS",
+    "CHAIN_OPTIONAL_COLUMNS",
     "DEFAULT_PROVIDER",
     "DataProvider",
     "ProviderStatus",
     "YahooProvider",
     "get_provider",
+    "is_rate_limited",
     "known_providers",
     "with_retry",
 ]

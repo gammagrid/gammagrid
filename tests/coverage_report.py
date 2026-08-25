@@ -43,6 +43,13 @@ MEASURED_MODULES = (
     "app/providers/base.py",
     "app/providers/yahoo.py",
     "app/providers/__init__.py",
+    # What to say to somebody whose ticker will never work. Pure functions with
+    # no dependencies, and the entire experience of getting a symbol wrong.
+    "app/suggestions.py",
+    # Almost all constants, and one function: the version the app reports about
+    # itself. Measured because a version that lies is worse than no version,
+    # and nothing else would notice it going wrong.
+    "app/config.py",
 )
 
 SUITES = ("tests.unit_tests", "tests.smoke_test")
@@ -62,6 +69,7 @@ EXEMPT = {
     "yahoo.YahooProvider._fetch_underlying_price": "network: Yahoo",
     "yahoo.YahooProvider._fetch_chain_for_expiry": "network: Yahoo",
     "yahoo.YahooProvider.check_access": "network: Yahoo",
+    "yahoo.YahooProvider.underlying_has_options": "network: Yahoo",
     # The Protocol is a declaration of the shape real providers implement, and
     # calling one of its methods executes nothing at all. A test for these would
     # assert that `...` returns None.

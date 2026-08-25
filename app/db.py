@@ -155,6 +155,76 @@ def _scope(conn: psycopg.Connection, ticker: str, source: str | None) -> str | N
 
 # --- snapshots ---
 
+def _contract_root(symbol: str | None) -> str | None:
+    """The root of an OCC contract symbol — everything before the date.
+
+    OCC symbols end in a fixed 15 characters: six of expiry date, one of type,
+    eight of strike. Whatever comes before that is the root, and it is the only
+    place an adjustment shows up: the standard series carries the plain ticker,
+    an adjusted one carries the ticker plus a digit (TSLL1, FCEL2).
+    """
+    if not symbol or len(symbol) <= 15:
+        return None
+    return symbol[:-15].strip().upper()
+
+
+def _one_contract_per_identity(chain_df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """One row per (expiry, strike, option_type), keeping the standard series.
+
+    THE FAILURE THIS PREVENTS. contract_registry is keyed on
+    (ticker, source, expiry, strike, option_type), and the upsert below feeds
+    it from the rows just written. When a chain contains two contracts sharing
+    that identity, Postgres refuses the whole statement:
+
+        ON CONFLICT DO UPDATE command cannot affect row a second time
+
+    and because the chain and the registry are written in one transaction, the
+    snapshot is lost with it. Not degraded — nothing at all is collected for
+    that ticker, on every cycle, for as long as the adjusted series exists. On
+    the hosted sibling this silently disabled TSLL, FCEL and NDX; none of them
+    had ever collected once. It is invisible from the outside because the
+    ticker looks perfectly ordinary.
+
+    Two contracts share an identity after a split or a special dividend: the
+    adjusted series (deliverable no longer 100 shares) trades beside the
+    standard one at the same strike and expiry. They are different instruments,
+    and the schema has no room for the difference — the strike and expiry are
+    the identity here.
+
+    WHICH ONE SURVIVES. The standard series: its root is the plain ticker,
+    while an adjusted root carries a digit. That is the contract almost all the
+    volume and open interest sits in, and the one a reader means by "the 100
+    strike". The other is dropped from THIS SNAPSHOT — nothing already stored
+    is touched, and no history is deleted, which is the rule this project does
+    not break.
+
+    WITHOUT A SYMBOL, the first row wins and the frame's own order decides. A
+    provider that serves no contract symbol cannot distinguish the two anyway,
+    and losing one contract beats losing the ticker.
+    """
+    if chain_df.empty:
+        return chain_df
+    identity = ["expiry", "strike", "option_type"]
+    if not chain_df.duplicated(subset=identity).any():
+        return chain_df
+
+    ranked = chain_df
+    if "contract_symbol" in chain_df.columns:
+        roots = chain_df["contract_symbol"].map(_contract_root)
+        # False sorts before True, so the standard series comes first and
+        # `keep="first"` takes it. A row with no symbol at all ranks last: it
+        # tells us nothing, and any row that does is a better answer.
+        ranked = chain_df.assign(
+            _adjusted=[root != ticker.strip().upper() for root in roots],
+            _unknown=roots.isna(),
+        ).sort_values(["_unknown", "_adjusted"], kind="stable")
+
+    deduped = ranked.drop_duplicates(subset=identity, keep="first")
+    # sort_index puts the survivors back in the provider's own order: ranking
+    # is how the winner is chosen, not how the chain is stored.
+    return deduped.drop(columns=["_adjusted", "_unknown"], errors="ignore").sort_index()
+
+
 def insert_snapshot(
     conn: psycopg.Connection,
     ticker: str,
@@ -175,6 +245,7 @@ def insert_snapshot(
     a provider that supplies some leaves the rest as None — stored as NULL, not
     0, because a zero delta is a real value a deep-OTM contract can have.
     """
+    chain_df = _one_contract_per_identity(chain_df, ticker)
     def greek(row, name: str):
         value = getattr(row, name, None)
         return None if value is None or pd.isna(value) else float(value)
@@ -435,6 +506,80 @@ def get_recent_runs(conn: psycopg.Connection, limit: int = 50) -> pd.DataFrame:
     )
 
 
+def unresolvable_tickers(
+    conn: psycopg.Connection, limit: int | None = None
+) -> dict[str, datetime]:
+    """Symbols that have failed enough times, and have never once worked.
+
+    WHY THIS EXISTS. A symbol that does not exist is asked for on every cycle,
+    forever, and fills the collection log with the same failure — which is how
+    a real failure stops being noticed. A typed-in `APPL` costs a request and a
+    log line every fifteen minutes until somebody spots it.
+
+    THE CONDITION THAT MATTERS is "has never produced a snapshot". It is what
+    separates "this symbol is imaginary" from "the data source was down": an
+    outage fails everything at once, including tickers that have been
+    collecting happily for months, and none of those may be suspended. It also
+    keeps the project's first rule intact — a symbol with history is a real
+    position somebody holds, and a delisting is precisely the case that would
+    otherwise be tidied away.
+
+    Because suspension only ever applies to a symbol with no successes at all,
+    "failures in a row" and "failures" are the same number, and no counter has
+    to be stored anywhere. One success and the symbol leaves this set for good;
+    the run log is the state.
+
+    NO MIGRATION, DELIBERATELY. The hosted sibling keeps a counter column on
+    its tickers table. Here the run log already holds one row per attempt and
+    is indexed by (ticker, source, started_at) — a second place holding the
+    same fact would have to be kept in step with it, and self-hosted upgrades
+    are somebody else's Sunday afternoon.
+
+    Returns {ticker: when it was suspended}, the suspending failure's own
+    timestamp, so the interface can say since when rather than just "off".
+    """
+    threshold = config.UNRESOLVABLE_AFTER_FAILURES if limit is None else limit
+    rows = conn.execute(
+        """SELECT ticker, min(started_at) FROM (
+               SELECT ticker, started_at,
+                      row_number() OVER (PARTITION BY ticker ORDER BY started_at) AS n
+               FROM collection_runs
+               WHERE status = 'failed'
+                 AND ticker NOT IN (SELECT ticker FROM collection_runs WHERE status = 'success')
+           ) ranked
+           WHERE n >= %(limit)s
+           GROUP BY ticker""",
+        {"limit": threshold},
+    ).fetchall()
+    return {row[0].upper(): row[1] for row in rows}
+
+
+def collection_depth(conn: psycopg.Connection) -> dict[str, dt.date]:
+    """First collection date per ticker — how much history each one has.
+
+    The product's whole argument is that history exists. Somebody who adds a
+    symbol today and opens the chart sees one point, which is the opposite of
+    the pitch, told to them silently by the product itself. This is what lets
+    the interface say so BEFORE they are disappointed rather than explain it
+    afterwards.
+
+    It is worse here than on the hosted version, where a database has been
+    filling since long before any given user arrived. A self-hosted install
+    starts empty: the first chart is one point BY CONSTRUCTION, and nothing on
+    screen says that this is the normal beginning rather than a broken tool.
+
+    Read from snapshot_iv_summary — one row per ticker per collection moment,
+    a few thousand rows against millions of option rows — so the aggregate
+    never touches option_snapshots. Whole table at once, for the caller to
+    cache: asking per keystroke would put a query on a text input.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT ticker, min(collected_at)::date FROM snapshot_iv_summary GROUP BY ticker"
+        )
+        return {row[0].upper(): row[1] for row in cur.fetchall()}
+
+
 # --- tracked contracts (spec FR14) ---
 
 def add_tracked_contract(
@@ -479,6 +624,41 @@ def set_setting(conn: psycopg.Connection, key: str, value: str) -> None:
 
 
 COLLECTOR_INTERVAL_KEY = "collector_interval_minutes"
+
+# When the data source last said "stop asking", expressed as the moment it is
+# reasonable to ask again. In app_settings rather than a new table: the setting
+# is one timestamp, it belongs to the installation rather than to any ticker,
+# and the table already exists — a self-hosted upgrade that needs no migration
+# is one fewer way for somebody's Sunday to go wrong.
+COOLDOWN_UNTIL_KEY = "provider_cooldown_until"
+
+
+def provider_cooldown_until(conn: psycopg.Connection) -> datetime | None:
+    """When the source may be asked again, or None if it may be asked now.
+
+    A cooldown in the past is not a cooldown — it is returned as None rather
+    than cleared, so that reading this never writes. The value is left behind
+    on purpose: it is the only record that throttling happened at all, and it
+    is worth seeing in app_settings when somebody asks why a morning is missing
+    from the history.
+    """
+    raw = get_setting(conn, COOLDOWN_UNTIL_KEY)
+    if not raw:
+        return None
+    try:
+        until = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return until if until > datetime.utcnow() else None
+
+
+def start_provider_cooldown(conn: psycopg.Connection, minutes: int | None = None) -> datetime:
+    """Stop talking to the source until this moment, and say when that is."""
+    span = config.PROVIDER_COOLDOWN_MINUTES if minutes is None else minutes
+    until = datetime.utcnow() + dt.timedelta(minutes=span)
+    set_setting(conn, COOLDOWN_UNTIL_KEY, until.isoformat())
+    conn.commit()
+    return until
 
 
 def get_collector_interval(conn: psycopg.Connection) -> int:
@@ -526,8 +706,54 @@ def estimated_growth_mb_per_month(conn: psycopg.Connection, interval_minutes: in
            FROM option_snapshots"""
     ).fetchone()
     rows_per_pass = float(row[0] or 0)
-    passes_per_month = (60 / interval_minutes) * 24 * 30
-    return rows_per_pass * passes_per_month * config.BYTES_PER_SNAPSHOT_ROW / 1_000_000
+    return (
+        rows_per_pass
+        * _passes_per_month(interval_minutes)
+        * config.BYTES_PER_SNAPSHOT_ROW
+        / 1_000_000
+    )
+
+
+# Trading days in an average month: 252 a year is the US market's own figure,
+# and 252/12 is 21. The remaining nine days of a 30-day month are weekends and
+# holidays, and the collector spends exactly one snapshot on each of them.
+_TRADING_DAYS_PER_MONTH = 21.0
+_CLOSED_DAYS_PER_MONTH = 9.0
+
+
+def _passes_per_month(interval_minutes: int) -> float:
+    """How many collections a month at this interval, given the calendar.
+
+    THIS USED TO MULTIPLY BY 24 AND BY 30 — it assumed collection ran around
+    the clock, every day. That stopped being true when the market calendar
+    landed in v0.5.0: the collector now sleeps through a closed market and
+    takes a single snapshot per closed day as a safety net. US options trade
+    6.5 hours on 21 days a month, so the old estimate was too high by roughly
+    a factor of five (2,880 passes a month against 555, at a 15-minute
+    interval).
+
+    The error was in the safe direction — it frightened people rather than
+    surprising them — which is exactly why it could have lived here for a
+    long time: nobody complains that the disk filled slower than promised. It
+    is still worth fixing, because the number is shown at the one moment
+    somebody decides whether to switch collection on at all, and a fivefold
+    exaggeration can make that decision for them.
+
+    Fractional passes per session are deliberate and not rounded up. At a
+    4-hour interval a 6.5-hour session gets 1.625 collections — some days two,
+    some days one — and rounding that to two would reintroduce a smaller
+    version of the same overstatement.
+
+    The session length is read from market_calendar rather than written down
+    again: it is the module that decides when the collector actually runs, so
+    a change there must move this number with it.
+    """
+    open_minutes = (
+        dt.datetime.combine(dt.date.min, market_calendar.CLOSE_TIME)
+        - dt.datetime.combine(dt.date.min, market_calendar.OPEN_TIME)
+    ).total_seconds() / 60
+    passes_per_session = max(open_minutes / interval_minutes, 1.0)
+    return _TRADING_DAYS_PER_MONTH * passes_per_session + _CLOSED_DAYS_PER_MONTH
 
 
 # --- archiving ---
@@ -544,20 +770,73 @@ def archive_expired_contracts(
 
     One transaction: an INSERT that committed without its DELETE would double
     every archived row, and the union means you would see them twice.
+
+    REACHED THROUGH contract_registry, NOT BY FILTERING ON `expiry`.
+    option_snapshots has no index on `expiry` alone — it appears only third in
+    idx_snapshots_contract_source, behind two equalities, where it cannot be
+    seeked. So the obvious `WHERE expiry < …` could be answered exactly one
+    way: a sequential scan of the whole hot table, in BOTH statements, on
+    every pass, whether or not anything qualified. The cost grows with the
+    table forever and is paid even on a day with no work to do. Measured on
+    the hosted sibling's 18.5M-row database: 4,912 ms and 333,025 blocks per
+    scan, on an empty day.
+
+    The registry answers the same question for almost nothing: it holds one row
+    per CONTRACT and indexes expiry (idx_registry_expiry). Its rows then reach
+    their snapshots through idx_snapshots_contract_source — the expensive index
+    this product already pays for, finally used for the shape it was built for.
+    Same database, same day: 7 blocks. A dedicated index on `expiry` was
+    considered instead and rejected — cheap on disk, but +21% on every insert,
+    and inserts are what this product does all day.
+
+    This matters more here than it did there. Self-hosted installations run on
+    whatever is spare — a single-board computer, a home server, the smallest
+    VPS — and two full table scans per pass cost more on those than on the
+    eight-core machine the numbers above came from.
+
+    WHY THE JOIN CANNOT MISS A CONTRACT: insert_snapshot writes the chain and
+    upserts the registry in one transaction, so a contract absent from the
+    registry is absent from the hot table too. If that invariant broke anyway,
+    the failure is benign — unmatched rows stay where they are. Nothing is
+    lost; growth is merely unbounded again, which shows up on disk rather than
+    silently.
     """
+    move, remove = archive_statements()
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO option_snapshots_archive
-               SELECT * FROM option_snapshots
-               WHERE expiry < current_date - make_interval(days => %s)""",
-            (grace_days,),
-        )
+        cur.execute(move, {"days": grace_days})
         moved = cur.rowcount
-        cur.execute(
-            "DELETE FROM option_snapshots WHERE expiry < current_date - make_interval(days => %s)",
-            (grace_days,),
-        )
+        cur.execute(remove, {"days": grace_days})
     return moved
+
+
+def archive_statements() -> tuple[str, str]:
+    """The two statements of an archiving pass — the move and the removal.
+
+    Built here rather than written inline so that a check can read them without
+    running them. The regression this guards is invisible in a result: both
+    shapes return exactly the same rows whether the planner reads seven blocks
+    or three hundred thousand, so nothing but the statement itself can tell the
+    fast version from the one that scans the whole table.
+    """
+    match = (
+        "r.ticker = o.ticker AND r.source = o.source AND r.expiry = o.expiry "
+        "AND r.strike = o.strike AND r.option_type = o.option_type"
+    )
+    horizon = "r.expiry < current_date - make_interval(days => %(days)s)"
+    # `o.*` rather than a column list: option_snapshots_archive is declared LIKE
+    # option_snapshots, so the two shapes cannot drift apart, and a migration
+    # that added a column to one and not the other would fail loudly here
+    # instead of writing every value into its neighbour's column.
+    move = (
+        "INSERT INTO option_snapshots_archive "  # noqa: S608 — fragments are literals above
+        f"SELECT o.* FROM contract_registry r JOIN option_snapshots o ON {match} "
+        f"WHERE {horizon}"
+    )
+    remove = (
+        f"DELETE FROM option_snapshots o USING contract_registry r "  # noqa: S608 — same
+        f"WHERE {match} AND {horizon}"
+    )
+    return move, remove
 
 
 # --- narrow reads: each view asks for what it shows ---

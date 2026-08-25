@@ -622,7 +622,355 @@ def check_timezone_database_is_available():
     print("Timezone-database checks passed (both DST transitions)")
 
 
+def _chain_row(expiry, strike, option_type, **extra):
+    row = {
+        "expiry": expiry, "strike": strike, "option_type": option_type,
+        "last_price": 1.0, "bid": 0.9, "ask": 1.1, "volume": 5,
+        "open_interest": 50, "implied_volatility": 0.25, "in_the_money": False,
+    }
+    row.update(extra)
+    return row
+
+
+def check_adjusted_contracts_do_not_break_collection():
+    """A chain carrying two contracts at one strike must still store.
+
+    THE FAILURE. After a split or a special dividend an adjusted series trades
+    alongside the standard one at the same strike, expiry and type — which is
+    exactly the key contract_registry is built on. The upsert then tries to
+    update one registry row twice in one statement and Postgres refuses the
+    whole thing:
+
+        ON CONFLICT DO UPDATE command cannot affect row a second time
+
+    Chain and registry are written in one transaction, so the snapshot dies
+    with it: not a degraded collection, none at all, on every cycle, for as
+    long as the adjusted series exists. Silent from the outside.
+
+    Run this against the code before the fix and it raises here rather than
+    asserting — which is the point of writing it with a real database.
+    """
+    conn = db.get_connection()
+    expiry = "2027-01-15"
+    # TSLL1 is the adjusted root: the plain ticker plus a digit. The standard
+    # series must be the one that survives — it is where the volume is, and it
+    # is what a reader means by "the 100 strike".
+    chain = pd.DataFrame([
+        _chain_row(expiry, 100.0, "call", contract_symbol="TSLL1270115C00100000",
+                   open_interest=3),
+        _chain_row(expiry, 100.0, "call", contract_symbol="TSLL270115C00100000",
+                   open_interest=4321),
+        _chain_row(expiry, 105.0, "put", contract_symbol="TSLL270115P00105000"),
+    ])
+    moment = datetime(2026, 8, 24, 15, 0)
+    db.insert_snapshot(conn, "TSLL", moment, 100.0, chain)
+
+    stored = db.get_snapshots(conn, "TSLL", days=None)
+    assert len(stored) == 2, f"one row per contract identity, got {len(stored)}"
+    survivor = stored[(stored["strike"] == 100.0) & (stored["option_type"] == "call")]
+    assert len(survivor) == 1, survivor
+    assert int(survivor["open_interest"].iloc[0]) == 4321, (
+        "the standard series must win, not whichever row came first"
+    )
+
+    # Without a symbol there is nothing to choose by, and losing one contract
+    # still beats losing the ticker.
+    blind = pd.DataFrame([
+        _chain_row(expiry, 200.0, "call"),
+        _chain_row(expiry, 200.0, "call"),
+    ])
+    db.insert_snapshot(conn, "BLIND", moment, 200.0, blind)
+    assert len(db.get_snapshots(conn, "BLIND", days=None)) == 1
+
+    assert db._contract_root("TSLL270115C00100000") == "TSLL"
+    assert db._contract_root("TSLL1270115C00100000") == "TSLL1"
+    assert db._contract_root("short") is None
+    conn.close()
+    print("adjusted-contract checks passed")
+
+
+def check_archiving_goes_through_the_registry():
+    """Expired contracts move, and the statements never filter on `expiry`.
+
+    WHY THE SHAPE IS ASSERTED AND NOT THE PLAN. option_snapshots has no index
+    on `expiry` alone — it sits third in a composite, behind two equalities,
+    where it cannot be seeked — so `WHERE expiry < …` can only be answered by
+    scanning the entire hot table, twice per pass, on every pass, including
+    days with nothing to archive. Measured on a real 18.5M-row database at
+    4,912 ms and 333,025 blocks per scan.
+
+    A check on the query plan would be the direct test and is not honest on a
+    database this size: with a few hundred rows the planner picks a sequential
+    scan for everything, correctly, and the assertion would fail on code that
+    is right. So this asserts the two things that survive being small — the
+    statements reach snapshots through contract_registry, and the move loses
+    nothing.
+    """
+    conn = db.get_connection()
+    move, remove = db.archive_statements()
+    for statement in (move, remove):
+        assert "contract_registry" in statement, statement
+        assert "o.expiry <" not in statement, (
+            "filtering the hot table by expiry is the scan this exists to avoid"
+        )
+        assert "r.expiry <" in statement, statement
+
+    old = (dt.date.today() - dt.timedelta(days=400)).isoformat()
+    live = (dt.date.today() + dt.timedelta(days=90)).isoformat()
+    moment = datetime(2026, 8, 24, 16, 0)
+    db.insert_snapshot(conn, "ARCH", moment, 50.0, pd.DataFrame([
+        _chain_row(old, 10.0, "call"),
+        _chain_row(live, 20.0, "call"),
+    ]))
+    moved = db.archive_expired_contracts(conn, grace_days=30)
+    assert moved == 1, f"exactly the expired contract moves, got {moved}"
+
+    # The hot table specifically, not db.get_snapshots — that reads both tables
+    # by design, so it would show the same two rows whether archiving worked or
+    # did nothing at all.
+    hot = conn.execute(
+        "SELECT expiry FROM option_snapshots WHERE ticker = 'ARCH'"
+    ).fetchall()
+    assert [str(row[0]) for row in hot] == [live], hot
+    archived = conn.execute(
+        "SELECT count(*) FROM option_snapshots_archive WHERE ticker = 'ARCH'"
+    ).fetchone()[0]
+    assert archived == 1, "the row is moved, never deleted"
+    # And the reader still sees both halves — which is the point of moving
+    # rather than deleting.
+    assert len(db.get_snapshots(conn, "ARCH", days=None)) == 2
+    conn.close()
+    print("archiving checks passed (registry join, nothing lost)")
+
+
+def check_disk_estimate_respects_the_market_calendar():
+    """The growth estimate must not assume collection runs around the clock.
+
+    It did, and was too high by roughly five: the collector has slept through a
+    closed market since v0.5.0, and the formula still multiplied by 24 hours
+    and 30 days. The error was in the safe direction, which is why it could
+    have lived a long time — nobody complains that the disk filled slower than
+    promised — but the number is shown at the one moment somebody decides
+    whether to switch collection on at all.
+    """
+    from app import db as database
+
+    naive_15 = (60 / 15) * 24 * 30  # what the old formula gave: 2,880
+    actual_15 = database._passes_per_month(15)
+    assert 500 < actual_15 < 620, actual_15
+    ratio = naive_15 / actual_15
+    assert 4.5 < ratio < 5.5, f"expected the old figure to be ~5x too high, got {ratio:.1f}"
+
+    # 21 trading days plus one snapshot on each of the nine closed ones.
+    assert actual_15 == 21 * (390 / 15) + 9, actual_15
+
+    # A four-hour interval gets a fraction of a pass per session, and rounding
+    # it up would bring back a smaller version of the same overstatement.
+    assert database._passes_per_month(240) < 21 * 2 + 9
+
+    # Never below one pass per trading day, however long the interval.
+    assert database._passes_per_month(100_000) == 21 + 9
+    print("disk-estimate checks passed")
+
+
+def check_version_comes_from_the_changelog():
+    """The app must be able to say which revision it is.
+
+    Every self-hosted installation runs a different one, updated whenever its
+    owner felt like it, so a screenshot without a version starts every support
+    conversation with a round of correspondence. Read from CHANGELOG.md rather
+    than a constant because the changelog cannot be forgotten at release time
+    and a constant can — and a version that lies is worse than none.
+    """
+    from app import config as settings
+
+    assert settings.APP_VERSION.startswith("v"), settings.APP_VERSION
+    assert settings._read_version() == settings.APP_VERSION
+    # Between releases the top heading is [Unreleased], and reporting the last
+    # tag flat would claim this build is that release when it is not.
+    assert "unreleased" in settings.APP_VERSION or settings.APP_VERSION[1].isdigit()
+    print(f"version check passed ({settings.APP_VERSION})")
+
+
+def check_hopeless_symbols_stop_being_asked_for():
+    """A symbol that has never worked is suspended; one with history never is.
+
+    That second half is the whole safeguard. A data source having a bad
+    afternoon fails everything at once, including tickers that have collected
+    happily for months — suspending those would delete a working watchlist over
+    an outage.
+    """
+    from app import config as settings
+
+    conn = db.get_connection()
+    limit = settings.UNRESOLVABLE_AFTER_FAILURES
+    started = datetime(2026, 8, 24, 9, 0)
+
+    for step in range(limit):
+        db.log_run(conn, started + dt.timedelta(minutes=step),
+                   started + dt.timedelta(minutes=step), "NOPE", "failed", "no such symbol")
+    suspended = db.unresolvable_tickers(conn)
+    assert "NOPE" in suspended, suspended
+    # The moment it was suspended is the moment of the failure that crossed the
+    # threshold — the sixth, not the first. "Failing since" and "given up on"
+    # are different dates, and the second is the one worth showing.
+    assert suspended["NOPE"] == started + dt.timedelta(minutes=limit - 1), suspended
+
+    # One short of the threshold is not suspended.
+    for step in range(limit - 1):
+        db.log_run(conn, started + dt.timedelta(minutes=step),
+                   started + dt.timedelta(minutes=step), "ALMOST", "failed", "no such symbol")
+    assert "ALMOST" not in db.unresolvable_tickers(conn)
+
+    # A symbol with a single success in its whole history is never suspended,
+    # however many times it has failed since.
+    db.log_run(conn, started, started, "REAL", "success", rows_fetched=10)
+    for step in range(limit * 3):
+        db.log_run(conn, started + dt.timedelta(minutes=step),
+                   started + dt.timedelta(minutes=step), "REAL", "failed", "provider down")
+    assert "REAL" not in db.unresolvable_tickers(conn), (
+        "an outage must never suspend a ticker that has collected before"
+    )
+
+    # And the collector acts on it rather than merely reporting it.
+    class Boom:
+        name = "yahoo"
+        price_history_source = "yahoo"
+        requires_token = False
+
+        def fetch_ticker_snapshot(self, ticker):
+            raise AssertionError(f"{ticker} must not be requested")
+
+    from app import collector
+
+    results = collector.collect_watchlist(conn, ["NOPE"], provider=Boom())
+    assert results["NOPE"].startswith("skipped"), results
+    conn.close()
+    print("suspension checks passed")
+
+
+def check_history_depth_is_known_before_the_chart():
+    """How much history a ticker has, without touching option_snapshots.
+
+    A self-hosted database starts empty, so the first chart is a single point
+    by construction. Saying so before somebody adds the ticker is the whole
+    fix; reading it from the rollup rather than the hot table is what keeps it
+    affordable enough to say on a text input.
+    """
+    conn = db.get_connection()
+    first = datetime(2026, 8, 20, 15, 0)
+    for step in range(3):
+        db.insert_snapshot(conn, "DEEP", first + dt.timedelta(days=step), 100.0,
+                           pd.DataFrame([_chain_row("2027-01-15", 100.0, "call")]))
+    depth = db.collection_depth(conn)
+    assert depth["DEEP"] == first.date(), depth
+    assert "NEVERCOLLECTED" not in depth
+    conn.close()
+    print("history-depth checks passed")
+
+
+def check_being_throttled_stops_the_whole_pass():
+    """Rate limiting is the one failure that must not be retried.
+
+    Retrying a throttled source is what extends the throttling, and with_retry
+    did it three times per call for every expiry of every ticker. One mistyped
+    symbol was enough to burn half a dozen requests before the first valid
+    ticker was reached, after which the source refused that one too — and the
+    log blamed the ticker that was fine.
+    """
+    from app import collector, providers
+
+    assert providers.is_rate_limited("HTTP Error 429: Too Many Requests")
+    assert providers.is_rate_limited(RuntimeError("Yahoo error 999"))
+
+    class YFRateLimitError(Exception):
+        pass
+
+    assert providers.is_rate_limited(YFRateLimitError("slow down"))
+    # A strike or a row count that happens to contain 999 is not throttling.
+    assert not providers.is_rate_limited("collected 999 rows")
+    assert not providers.is_rate_limited(ValueError("Empty option chain"))
+
+    calls = []
+
+    def counted():
+        calls.append(1)
+        raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+    try:
+        providers.with_retry(counted)
+    except RuntimeError:
+        pass
+    assert len(calls) == 1, f"a throttled call must not be retried, made {len(calls)}"
+
+    conn = db.get_connection()
+    db.set_setting(conn, db.COOLDOWN_UNTIL_KEY, "")
+
+    class Throttled:
+        name = "yahoo"
+        price_history_source = "yahoo"
+        requires_token = False
+
+        def fetch_ticker_snapshot(self, ticker):
+            raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+    results = collector.collect_watchlist(conn, ["ONE", "TWO", "THREE"], provider=Throttled())
+    assert results["ONE"].startswith("failed"), results
+    assert "limiting requests" in results["ONE"], results["ONE"]
+    # The rest of the watchlist is not attempted at all — and is not blamed.
+    for ticker in ("TWO", "THREE"):
+        assert results[ticker].startswith("skipped"), results[ticker]
+    assert db.provider_cooldown_until(conn) is not None
+
+    # And while the cooldown holds, nothing goes near the source.
+    class Boom:
+        name = "yahoo"
+        price_history_source = "yahoo"
+        requires_token = False
+
+        def fetch_ticker_snapshot(self, ticker):
+            raise AssertionError("the source must not be touched during a cooldown")
+
+    during = collector.collect_watchlist(conn, ["ONE"], provider=Boom())
+    assert during["ONE"].startswith("skipped"), during
+
+    db.set_setting(conn, db.COOLDOWN_UNTIL_KEY, "")
+    conn.commit()
+    assert db.provider_cooldown_until(conn) is None
+    conn.close()
+    print("rate-limit checks passed")
+
+
+def check_suggestions_name_a_way_forward():
+    """A refusal that only says no leaves the person where they were."""
+    from app import suggestions
+
+    assert suggestions.suggest("APPL", ["AAPL", "SPY"]) == "AAPL"
+    assert suggestions.suggest("NVIDIA", ["NVDA", "SPY"]) == "NVDA"
+    # Not a spelling problem at all: no amount of similarity reaches IBIT.
+    assert suggestions.suggest("BTCUSD", []) == "IBIT"
+    assert suggestions.suggest("NDX", []) == "QQQ"
+    # Nothing honest to offer is None, not a guess.
+    assert suggestions.suggest("EURUSD", []) is None
+    assert suggestions.suggest("ZZZZ", ["AAPL", "SPY"]) is None
+    assert suggestions.suggest("", ["AAPL"]) is None
+
+    assert "AAPL" in suggestions.refusal("APPL", ["AAPL"])
+    assert "options exchanges" in suggestions.refusal("EURUSD", [])
+    assert "as it trades" in suggestions.refusal("ZZZZ", [])
+    print("suggestion checks passed")
+
+
 def main():
+    # Start from an empty database, like the other two suites already do. This
+    # one did not, and got away with it only because nothing it left behind
+    # collided with itself — until a check inserted a snapshot at a moment a
+    # leftover registry row already described, and the failure surfaced as a
+    # cardinality violation inside application code that was working correctly.
+    reset = db.get_connection()
+    testdb.truncate_all(reset)
+    reset.close()
+
     check_timezone_database_is_available()
     check_years_to_expiry()
     check_greeks_respond_to_time()
@@ -637,6 +985,14 @@ def main():
     check_pricing_inputs()
     check_unpriceable_contracts_are_skipped()
     check_contracts_backing_expiry()
+    check_adjusted_contracts_do_not_break_collection()
+    check_archiving_goes_through_the_registry()
+    check_disk_estimate_respects_the_market_calendar()
+    check_version_comes_from_the_changelog()
+    check_hopeless_symbols_stop_being_asked_for()
+    check_history_depth_is_known_before_the_chart()
+    check_being_throttled_stops_the_whole_pass()
+    check_suggestions_name_a_way_forward()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

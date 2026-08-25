@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **A ticker with adjusted contracts collected nothing at all.** After a split
+  or a special dividend an adjusted option series trades beside the standard
+  one at the same strike, expiry and type — which is exactly the identity the
+  contract registry is keyed on. The registry upsert then tried to touch one
+  row twice in a single statement, Postgres refused the whole statement, and
+  because the chain and the registry are written in one transaction the
+  snapshot died with it. Not a partial collection: none at all, on every cycle,
+  for as long as the adjusted series existed, with nothing on screen to say so.
+  The chain is now reduced to one contract per identity before it is stored,
+  and the standard series is the one kept — it is where the volume and open
+  interest are. Nothing already collected is touched.
+- **The spot price failing produced an error nobody could act on.** A mistyped
+  symbol showed `float() argument must be a string or a real number, not
+  'NoneType'` in the collection log, and sometimes `'currentTradingPeriod'`
+  instead — the same missing symbol raises different types depending on the
+  yfinance version. The check is now on the value rather than on the type of
+  the explosion, and the message names the two causes you can actually be in:
+  the symbol does not exist, or the source is limiting requests.
+- **Being rate-limited made it worse, and blamed the wrong ticker.** The retry
+  helper treated "you are asking too often" like a network blip and tried
+  again, three times per call, for every expiry of every ticker — which is
+  precisely what extends a rate limit. One mistyped symbol could burn a dozen
+  requests before the first valid ticker was reached, after which the source
+  refused that one too and the log recorded the failure against a ticker that
+  was perfectly fine. Rate limiting is now recognised, never retried, and stops
+  the whole pass; the sidebar says so and names the time collection resumes.
+- **The monthly disk estimate was about five times too high.** It multiplied by
+  24 hours and 30 days, which stopped being true in v0.5.0 when the collector
+  began sleeping through a closed market. It now counts trading sessions and
+  the one snapshot taken per closed day. The figure is shown at the moment you
+  decide whether to switch collection on, and a fivefold exaggeration is enough
+  to make that decision for you.
+- **Archiving read the entire snapshot table twice on every pass**, including
+  passes with nothing to archive, because filtering on `expiry` cannot use any
+  index this schema has. Expired contracts are now found through the contract
+  registry, which indexes exactly that. On a large database the difference was
+  measured at 333,025 blocks against 7. Nothing about what gets archived
+  changes.
+
+### Added
+- **A ticker is checked before it is added.** `APPL`, `NASDAQ` and `BTCUSD`
+  used to be accepted in silence and then fail on every collection forever.
+  They are now refused with the answer instead of just the refusal — the
+  correct spelling, or the fund that tracks what you asked for. If the source
+  cannot answer the question, the ticker is accepted: a valid symbol rejected
+  because Yahoo had a bad minute is a worse failure than the typo this catches.
+- **A symbol that has never once collected stops being asked for** after six
+  consecutive failures, and says so in the watchlist rather than only in the
+  log. Only ever a symbol with no history at all — an outage fails everything
+  at once, and a ticker that has been collecting for months must survive one.
+  Nothing is deleted, and one success lifts it permanently.
+- **The app says which version it is**, in the footer of the sidebar. Every
+  self-hosted installation runs a different one and nobody remembers which, so
+  a screenshot of a problem used to start with a round of correspondence. Read
+  from `CHANGELOG.md`, so it cannot drift out of step with the release.
+- **How much history a ticker has, before you add it.** A new install starts
+  empty, so the first chart is a single point by construction — which reads as
+  a broken tool rather than as the beginning of a history.
+
 ### Changed
 - **The hosted version is open**, and the README says so where it can be seen
   rather than at the bottom: [app.gammagrid.io](https://app.gammagrid.io/), free

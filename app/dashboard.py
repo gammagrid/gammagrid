@@ -14,7 +14,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from matplotlib.colors import LinearSegmentedColormap
 
-from app import collector, config, db, market_calendar, metrics
+from app import collector, config, db, market_calendar, metrics, providers, suggestions
 from app.viewtime import (
     format_date,
     format_datetime,
@@ -47,6 +47,31 @@ def _drop_stale_choice(key: str, options) -> None:
     die on a perfectly ordinary sequence of clicks."""
     if key in st.session_state and st.session_state[key] not in list(options):
         del st.session_state[key]
+
+
+@st.cache_data(ttl=1800)
+def _cached_has_options(ticker: str) -> bool | None:
+    """Does this symbol have a chain to collect — asked once per symbol.
+
+    Cached because it is a network call sitting behind a button somebody may
+    press twice, and because the answer for a given symbol does not change
+    within half an hour. `None` is cached too, and deliberately: when the
+    source could not answer, the ticker is accepted, so there is nothing to
+    re-ask.
+
+    Called through getattr rather than as a plain method — a provider written
+    against the published interface need not have this, and a missing method
+    means "cannot find out", which is the same as None.
+    """
+    check = getattr(providers.get_provider(), "underlying_has_options", None)
+    return None if check is None else check(ticker)
+
+
+@st.cache_data(ttl=1800)
+def _cached_collection_depth() -> dict[str, dt.date]:
+    """First collection date per ticker. Half an hour is right for a fact that
+    only changes when a ticker is collected for the very first time."""
+    return db.collection_depth(db.get_connection())
 
 
 @st.cache_data(ttl=1800)
@@ -438,19 +463,58 @@ with st.sidebar:
         help="Data comes from Yahoo Finance (yfinance) — not every ticker or every "
         "options chain is available there.",
     ).strip().upper()
-    if st.button("Add") and new_ticker:
-        db.add_ticker(conn, new_ticker)
-        st.rerun()
-
     watchlist = db.get_watchlist(conn)
+
+    # WHAT THIS TELLS SOMEBODY BEFORE THEY COMMIT. Two different things, and
+    # both used to be silence:
+    #
+    #   * a symbol with no chain to collect (APPL, NASDAQ, BTCUSD) was accepted
+    #     without a word and then failed on every cycle forever;
+    #   * a symbol that IS valid still starts its history today, so the first
+    #     chart is a single point — on a fresh install, always. Somebody who
+    #     was promised history and sees one dot concludes the tool is broken,
+    #     and they are not wrong to.
+    depth = _cached_collection_depth()
+    if new_ticker:
+        since = depth.get(new_ticker)
+        if since:
+            st.caption(f"Already collected since {since:%d %b %Y}.")
+        else:
+            st.caption(
+                "History for a new ticker starts at the first collection — the first "
+                "chart will have one point, and fills in from there."
+            )
+
+    if st.button("Add") and new_ticker:
+        # `is False` and not `not ...`: None means the source could not answer,
+        # and a ticker must never be refused on that. A false negative here
+        # looks like the product being broken; a false positive shows up in the
+        # collection log within the hour and is suspended by itself after six.
+        if _cached_has_options(new_ticker) is False:
+            st.error(suggestions.refusal(new_ticker, watchlist))
+        else:
+            db.add_ticker(conn, new_ticker)
+            _cached_collection_depth.clear()
+            st.rerun()
+
+    # Symbols that stopped being asked for. Marked in the list itself rather
+    # than only in the log: the watchlist is where somebody looks to find out
+    # what the tool is doing, and "quietly not collecting" is indistinguishable
+    # from "collecting fine" without a mark here.
+    suspended = db.unresolvable_tickers(conn)
     current_ticker = st.session_state.get("selected_ticker")
     for ticker in watchlist:
         col1, col2 = st.columns([3, 1])
         if col1.button(
-            ticker,
+            f"⏸ {ticker}" if ticker in suspended else ticker,
             key=f"select_ticker_{ticker}",
             type="primary" if ticker == current_ticker else "secondary",
             use_container_width=True,
+            help=(
+                f"Not being collected: every attempt has failed since "
+                f"{suspended[ticker]:%d %b %Y}, and nothing has ever been collected for it. "
+                "Check the spelling, or remove it. Nothing has been deleted."
+            ) if ticker in suspended else None,
         ):
             st.session_state["selected_ticker"] = ticker
             st.rerun()
@@ -476,6 +540,10 @@ with st.sidebar:
         for ticker, status in results.items():
             if status == "success":
                 st.success(f"{ticker}: OK")
+            elif status.startswith("skipped"):
+                # A deliberate decision not to try is not an error, and dressing
+                # it in red teaches people to ignore the red.
+                st.warning(f"{ticker}: {status}")
             else:
                 st.error(f"{ticker}: {status}")
 
@@ -520,9 +588,16 @@ with st.sidebar:
                 "costs for your watchlist."
             )
         # Said here rather than in a FAQ, because this is where somebody picks a
-        # frequency and works out what it will cost. The figure above is the
-        # honest one precisely BECAUSE of this: the estimate already assumes the
-        # market is shut most of the week.
+        # frequency and works out what it will cost.
+        #
+        # This comment used to claim the estimate above "already assumes the
+        # market is shut most of the week". It did not — the formula multiplied
+        # by 24 hours and 30 days, and overstated the answer roughly fivefold.
+        # The sentence was written in the same change that added the calendar:
+        # the consequence for the neighbouring function was reasoned out in
+        # words and never carried into the code. A comment asserting a property
+        # the code does not have is worse than no comment, because it is what
+        # the next reader checks INSTEAD of the formula.
         st.caption(
             "**Outside market hours the collector does not run.** US options trade "
             "09:30–16:00 New York on weekdays; while the market is shut the chain does not "
@@ -531,6 +606,20 @@ with st.sidebar:
         )
     else:
         st.caption("Automatic collection is off. Use the button above to collect on demand.")
+
+    # A cooldown that nobody can see is indistinguishable from the tool being
+    # broken — and worse, from the market simply being closed, which is a state
+    # this sidebar already describes a few lines above. Said in full: what
+    # happened, and when it stops.
+    cooldown_until = db.provider_cooldown_until(conn)
+    if cooldown_until is not None:
+        st.warning(
+            f"**The data source is limiting requests.** Collection is paused until "
+            f"{to_viewer(pd.Series([cooldown_until])).dt.strftime('%H:%M').iloc[0]} "
+            f"({timezone_label()}). This is not the market being closed — it is Yahoo "
+            "Finance refusing requests from this installation, usually after too many "
+            "in a short time. Nothing is lost; the next pass collects as usual."
+        )
 
     with st.expander("📋 Collection log"):
         st.caption(f"Times in your own timezone ({timezone_label()}).")
@@ -582,6 +671,17 @@ with st.sidebar:
         help="Stars are how people find this project — there is no marketing budget behind it.",
     )
     st.caption("Questions or feedback: [hello@gammagrid.io](mailto:hello@gammagrid.io)")
+    # The revision, in the footer of the sidebar rather than in the header.
+    # Every self-hosted installation is a different version — people update
+    # when they feel like it and do not remember when — so a screenshot with no
+    # version in it starts every support conversation with a round of
+    # correspondence. One arrived with two collection errors and had to be
+    # dated by which caption was MISSING from it.
+    #
+    # Here specifically because this is the corner people photograph: the
+    # collection log is directly above, and it is what they are looking at when
+    # something has gone wrong. The header gets cropped.
+    st.caption(f"GammaGrid {config.APP_VERSION}")
 
 if not watchlist:
     st.info("Add a ticker to the watchlist on the left to get started.")

@@ -11,6 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY .streamlit ./.streamlit
+# The changelog is not documentation here, it is data: config.APP_VERSION reads
+# its top heading, and that is the only thing telling a screenshot which
+# revision it came from. Without this line the app runs and reports "unknown",
+# which is precisely the state this was meant to end.
+COPY CHANGELOG.md .
 # The upgrade path ships with the product. scripts/import_sqlite.py is what
 # UPGRADING.md tells people to run to bring a pre-Postgres database across, and
 # a documented command that fails because the file was never copied in is worse

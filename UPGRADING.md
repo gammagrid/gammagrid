@@ -39,6 +39,33 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.5.1 → next release
+
+**Risk: safe. No migration, no schema change, nothing rewritten and nothing
+deleted.**
+
+Everything in this release is code and text. The suspension of hopeless
+symbols, the rate-limit cooldown and the version display all read state that
+already exists — the collection log and `app_settings` — precisely so that an
+upgrade does not need a schema change.
+
+**What you may notice on the first run.**
+
+- **A ticker in your watchlist may appear with a ⏸ mark.** That means every
+  collection it has ever had has failed and none has ever succeeded — it is
+  almost always a typo that has been quietly failing for a while. It stops
+  being requested; nothing about it is deleted, and removing or correcting it
+  is up to you.
+- **A ticker with adjusted contracts starts collecting for the first time.**
+  If one of yours has been failing since you added it and you never found out
+  why, this is the likely reason. There is no backfill: history begins now,
+  because the failed collections never stored anything to recover.
+- **The estimated monthly disk figure drops by roughly a factor of five.** The
+  old number was wrong, not the new one. Nothing about your database changed.
+- **Adding a ticker can now refuse it.** Only when the data source says the
+  symbol has no options at all. If the source cannot be reached, the ticker is
+  accepted as before.
+
 ## v0.5.0 → v0.5.1
 
 **Risk: safe. No migration, no schema change, nothing touched in the database.**

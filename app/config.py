@@ -148,3 +148,70 @@ UNUSUAL_HISTORY_DAYS = 60
 # Nothing is deleted; the point is only to keep the table every live query
 # reads from carrying years of contracts that can never trade again.
 CONTRACT_ARCHIVE_GRACE_DAYS = int(os.environ.get("CONTRACT_ARCHIVE_GRACE_DAYS", "30"))
+
+
+# --- which revision this is ---
+
+# Read from CHANGELOG.md rather than written down here, and that is the whole
+# point of the choice. A constant in the code is one more place to remember to
+# bump at release time, and a version that lies is worse than no version at
+# all: it makes a support answer confidently wrong. The changelog's top heading
+# is already mandatory to update — the project's own rule — so it cannot be
+# forgotten without the omission being obvious in the release itself.
+#
+# `--build-arg` was the third option and was rejected: almost everyone installs
+# with a plain `docker compose up`, and a version that only appears for people
+# who passed a flag is a version that is missing exactly when it is needed.
+_CHANGELOG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "CHANGELOG.md")
+
+
+def _read_version() -> str:
+    """The release this code came from, as a person would name it.
+
+    Returns the tag ("v0.5.1"). A commit hash would be more precise and less
+    useful: it means nothing to the person reading a screenshot, and there is
+    no git inside the container to produce one anyway.
+
+    An unreleased checkout says so — "v0.5.1+unreleased" — because between two
+    releases the newest heading is [Unreleased], and reporting the last tag
+    flat would claim this is a released build when it is not. Someone running
+    from main is exactly the person whose bug report needs the distinction.
+
+    Failure is silent and returns "unknown": a missing or unreadable changelog
+    must never be the reason the dashboard will not start.
+    """
+    try:
+        with open(_CHANGELOG, encoding="utf-8") as handle:
+            headings = [
+                line[len("## ["):].split("]")[0]
+                for line in handle
+                if line.startswith("## [")
+            ]
+    except OSError:
+        return "unknown"
+    unreleased = bool(headings) and headings[0].lower() == "unreleased"
+    released = next((h for h in headings if h.lower() != "unreleased"), None)
+    if released is None:
+        return "unknown"
+    return f"v{released}+unreleased" if unreleased else f"v{released}"
+
+
+APP_VERSION = _read_version()
+
+
+# How many failures in a row make a symbol hopeless rather than unlucky. Six is
+# an hour and a half at the fastest interval the product allows — long enough
+# that a data source having a bad afternoon is not mistaken for a symbol that
+# does not exist.
+#
+# The count only ever applies to a symbol that has NEVER produced a snapshot.
+# See db.unresolvable_tickers for why that single condition is what separates
+# "this ticker is imaginary" from "the provider was down".
+UNRESOLVABLE_AFTER_FAILURES = int(os.environ.get("UNRESOLVABLE_AFTER_FAILURES", "6"))
+
+
+# How long to leave the data source alone after it has refused us. Half an hour
+# is a guess made in the safe direction: too short and the cooldown does not
+# work, too long and the only cost is a gap in the history — which the next
+# pass fills in, because the chain is a snapshot and not a stream.
+PROVIDER_COOLDOWN_MINUTES = int(os.environ.get("PROVIDER_COOLDOWN_MINUTES", "30"))
