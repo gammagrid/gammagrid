@@ -973,6 +973,45 @@ def check_suggestions_name_a_way_forward():
     print("suggestion checks passed")
 
 
+def check_rollup_fixture_does_not_depend_on_the_weekday():
+    """The rollup fixture means the same thing on every day of the year.
+
+    A CLASS OF DEFECT RATHER THAN AN INCIDENT. Three checks in this repository
+    built their data from "today" or "yesterday" while the code under them
+    counted New York trading days, and each one failed on a specific weekday
+    inside code that was correct. The last of them was live: `main` was red
+    from Sunday 23.08 because the stored volume baseline saw four days of
+    history and the reference saw three — 115 against 20 — and it went green on
+    Monday by itself, which is the worst way for a check to be fixed.
+
+    So the fixture builder is checked directly, over a year and a week of
+    anchors: that covers every weekday, both daylight-saving changes and a leap
+    of the year boundary, and it costs a millisecond.
+
+    THE INVARIANT IS THE ONE `db.rebuild_volume_stats` READS: the newest day of
+    the fixture is the anchor itself, and every completed day is strictly
+    before it. That is what makes "exclude today" and "exclude the last day of
+    the fixture" the same sentence no matter when the suite runs.
+    """
+    for offset in range(371):
+        anchor = dt.date(2026, 1, 1) + dt.timedelta(days=offset)
+        days = testdb.rollup_fixture_days(closed=3, today=anchor)
+        assert len(days) == 4, (anchor, days)
+        assert days[-1] == anchor, (anchor, days)
+        completed = days[:-1]
+        assert completed == sorted(completed), (anchor, days)
+        assert len(set(completed)) == 3, (anchor, days)
+        assert all(day < anchor for day in completed), (anchor, days)
+        assert all(day.isoweekday() <= 5 for day in completed), (anchor, days)
+
+    # The anchor defaults to the same clock the rule under check reads. Not
+    # `market_calendar.last_completed_trading_day()`, and not "yesterday":
+    # `db.rebuild_volume_stats` cuts on `dt.date.today()`, so anything else
+    # here is a second definition of today waiting to disagree with the first.
+    assert testdb.rollup_fixture_days()[-1] == dt.date.today()
+    print("rollup fixture checks passed (371 anchors, every weekday)")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -1005,6 +1044,7 @@ def main():
     check_history_depth_is_known_before_the_chart()
     check_being_throttled_stops_the_whole_pass()
     check_suggestions_name_a_way_forward()
+    check_rollup_fixture_does_not_depend_on_the_weekday()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

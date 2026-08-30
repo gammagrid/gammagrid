@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **The checks no longer pass or fail depending on the day of the week.** The
+  volume-baseline check built its data out of trading days while the code
+  under it excludes the current calendar day, so at a weekend it counted four
+  days of history against a reference of three — 115 against 20 — and CI on
+  `main` was red from a Sunday until a Monday fixed it without anybody
+  touching the code. A red mark that heals by itself teaches people not to
+  read the checks. The fixture and the rule it verifies now read the same
+  clock, and the builder is verified over a year of anchors so that every
+  weekday, both daylight-saving changes and the year boundary are covered.
+
 ## [0.5.2] - 2026-08-25
 
 ### Fixed

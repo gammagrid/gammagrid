@@ -17,6 +17,7 @@ say it is disposable is refused, loudly, before anything is opened.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 from urllib.parse import urlparse
 
@@ -78,3 +79,39 @@ def truncate_all(conn) -> None:
             "app_settings",
         ):
             cur.execute(f"TRUNCATE {table} RESTART IDENTITY")  # noqa: S608 — fixed list above
+
+
+def rollup_fixture_days(closed: int = 3, today: dt.date | None = None) -> list[dt.date]:
+    """`closed` completed trading days, oldest first, then TODAY itself.
+
+    THE LAST DAY IS TODAY'S CALENDAR DATE, NOT THE LATEST TRADING DAY, and that
+    is the entire point of this helper.
+
+    Rollups that exclude the day being judged — the volume baseline in
+    `db.rebuild_volume_stats` is the one that matters — cut on
+    `dt.date.today()`: a calendar date, read from this same clock, because
+    volume accumulates within a session and today's partial figure is not
+    comparable with completed days. A fixture built only out of TRADING days
+    disagrees with that rule every weekend. Run on a Sunday, its newest day is
+    Friday, Friday is strictly before today, and the stored baseline counts four
+    days while the reference the check compares it against counts three.
+    Measured on Sunday 30.08.2026: 115 against 20, with the suite pointing at
+    code that was working correctly.
+
+    That is the expensive half of the failure. A check that breaks on Saturday
+    and passes on Monday teaches people not to look at the checks, and in a
+    public repository a red mark on `main` is read as a statement about the
+    project rather than about the calendar.
+
+    The completed days are trading days, because the daily metrics count
+    trading days and a fixture of weekend copies would collapse into one
+    bucket. They are strictly before today so that the two rules can never
+    disagree about the newest one — whatever day of the week it is.
+    """
+    anchor = today or dt.date.today()
+    completed, day = [], anchor - dt.timedelta(days=1)
+    while len(completed) < closed:
+        if day.isoweekday() <= 5:
+            completed.append(day)
+        day -= dt.timedelta(days=1)
+    return [*reversed(completed), anchor]

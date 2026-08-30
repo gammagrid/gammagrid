@@ -304,20 +304,6 @@ def check_missing_numbers_survive_a_write(conn):
     print("Missing-number checks passed (a chain with untraded contracts stores)\n")
 
 
-def _recent_trading_days(count: int) -> list:
-    """The most recent New York weekdays, oldest first.
-
-    Relative rather than fixed dates so the fixture never rots, and trading days
-    rather than calendar ones because that is what the daily metrics count.
-    """
-    found, day = [], datetime.utcnow().date()
-    while len(found) < count:
-        if day.isoweekday() <= 5:
-            found.append(day)
-        day -= timedelta(days=1)
-    return list(reversed(found))
-
-
 def check_narrow_reads_and_rollups(conn):
     """Every view asks for what it shows, and the two stored numbers agree with
     the functions that define them.
@@ -340,12 +326,13 @@ def check_narrow_reads_and_rollups(conn):
             cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
 
     expiry = (datetime.utcnow().date() + timedelta(days=30)).isoformat()
-    # TRADING days, at hours that mean the same calendar date in UTC and in New
-    # York. Both halves matter now that daily metrics count trading days: a run
-    # of the suite on a Sunday would otherwise build its fixture out of weekend
-    # copies, and `midnight + 1h` is 21:00 of the PREVIOUS day in New York, so
-    # two moments meant as two days would collapse into one bucket.
-    days = _recent_trading_days(4)
+    # Three completed TRADING days and then today, at hours that mean the same
+    # calendar date in UTC and in New York. Every half of that matters, and the
+    # reasons are written out in testdb.rollup_fixture_days: the daily metrics
+    # count trading days, the baseline's cut-off is a calendar `today`, and
+    # `midnight + 1h` is 21:00 of the PREVIOUS day in New York, so two moments
+    # meant as two days would collapse into one bucket.
+    days = testdb.rollup_fixture_days(closed=3)
 
     def chain(volume_a, volume_b):
         return pd.DataFrame([
@@ -357,8 +344,9 @@ def check_narrow_reads_and_rollups(conn):
              "implied_volatility": 0.60, "in_the_money": False},
         ])
 
-    # Three closed days, the middle one collected twice so that "one snapshot
-    # per day" has something to choose between, plus today.
+    # Three completed days, the middle one collected twice so that "one snapshot
+    # per day" has something to choose between, plus today — whose partial
+    # figures both the stored baseline and the reference must leave out.
     plan = [
         (datetime.combine(days[0], dt_time(16, 0)), chain(10, 90)),
         (datetime.combine(days[1], dt_time(10, 0)), chain(999, 999)),   # superseded
@@ -374,9 +362,17 @@ def check_narrow_reads_and_rollups(conn):
     assert len(moments) == 5, moments
     assert moments == sorted(moments, reverse=True), "newest first, as the Replay list expects"
 
+    # HOW MANY DAILY BUCKETS THE FIXTURE HAS DEPENDS ON THE WEEKDAY, and saying
+    # so out loud is the fix rather than the problem. The last moment carries
+    # today's calendar date: on a weekday that is a fourth trading day, on a
+    # weekend it is a copy of Friday that the per-day grouping drops on purpose
+    # (see the SQL in db.get_collection_moments). Both are right, and a check
+    # that assumed one of them was red on `main` from a Sunday until a Monday
+    # fixed it without anybody touching the code.
     per_day = db.get_collection_moments(conn, ticker, days=None, per_day=True)
-    assert len(per_day) == 4, per_day
-    assert per_day[1] == plan[3][0], "a day collected twice must be represented by its later pass"
+    today_is_a_trading_day = dt_date.today().isoweekday() <= 5
+    assert len(per_day) == (4 if today_is_a_trading_day else 3), per_day
+    assert per_day[-2] == plan[2][0], "a day collected twice must be represented by its later pass"
 
     latest = db.get_latest_snapshot(conn, ticker)
     assert len(latest) == 2 and latest["collected_at"].nunique() == 1, latest
@@ -410,15 +406,24 @@ def check_narrow_reads_and_rollups(conn):
     latest_iv = float(stored_iv.iloc[-1]["iv_weighted_avg"])
     assert abs(latest_iv - (0.20 * 400 + 0.60 * 40) / 440) < 1e-12, latest_iv
 
-    # The volume baseline: closed days only, and equal to the shared function
+    # The volume baseline: completed days only, and equal to the shared function
     # fed the same rows.
     assert not db.volume_stats_are_current(conn, ticker), "nothing computed yet"
     db.rebuild_volume_stats(conn, ticker, days=None)
     assert db.volume_stats_are_current(conn, ticker), "a rebuild must satisfy the worker"
 
     stored_stats = db.get_volume_stats(conn, ticker)
+    # THE REFERENCE IS FILTERED BY THE RULE UNDER CHECK, not by a second one
+    # that resembles it. db.rebuild_volume_stats keeps moments whose date is
+    # strictly before `dt.date.today()`, so the reference does the same and
+    # lets metrics.volume_stats apply the trading-day collapse itself — it
+    # drops weekends exactly as the SQL does. Filtering instead by "before the
+    # last moment of the fixture" is the same sentence only on a weekday: at a
+    # weekend the newest fixture day is Friday, genuinely complete, counted by
+    # the code and dropped by the reference. That divergence is what put four
+    # days against three and 115 against 20.
     closed_days = everything[
-        everything["collected_at"].dt.normalize() < pd.Timestamp(plan[-1][0]).normalize()
+        everything["collected_at"].dt.normalize() < pd.Timestamp(dt_date.today())
     ]
     expected_stats = metrics.volume_stats(closed_days)
     keys = ["expiry", "strike", "option_type"]
@@ -430,8 +435,11 @@ def check_narrow_reads_and_rollups(conn):
             joined[f"{column}_stored"].to_numpy(dtype=float),
             rtol=1e-9, equal_nan=True,
         ), f"{column}: {joined.to_dict()}"
-    # Today is excluded and the superseded pass does not count: the call's
-    # baseline is 10, 20, 30 rather than anything containing 999 or 400.
+    # The newest moment is excluded and the superseded pass does not count: the
+    # call's baseline is 10, 20, 30 rather than anything containing 999 or 400.
+    # Three points on every day of the week — on a weekday because today is
+    # partial, at a weekend because a weekend is not a trading day. Two
+    # different reasons, one number, which is why it is worth pinning.
     call_stats = stored_stats[stored_stats["strike"] == 100.0].iloc[0]
     assert call_stats["history_points"] == 3, call_stats.to_dict()
     assert abs(call_stats["avg_volume"] - 20.0) < 1e-9, call_stats.to_dict()
@@ -441,6 +449,7 @@ def check_narrow_reads_and_rollups(conn):
                       "contract_volume_stats", "collection_runs"):
             cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
     print("Narrow-read and rollup checks passed (stored numbers match the shared functions)\n")
+
 
 def check_greek_attribution():
     """The decomposition has to add up, and refuse what it cannot explain.
