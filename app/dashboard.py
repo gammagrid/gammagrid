@@ -1265,8 +1265,8 @@ if active_view == "Volatility (IV)":
         st.caption(
             f"The earliest {pending_moments:,} point(s) of this chart still carry the data "
             "source's own volatility, from before this product started solving it from the "
-            "contract's price. They are being recomputed in the background, a batch per "
-            "collection — nothing to run, and the rest of this page is unaffected."
+            "contract's price. They are being recomputed in the background while the "
+            "collector runs — nothing to start, and the rest of this page is unaffected."
         )
     with st.expander("ℹ️ How to read this"):
         st.write(

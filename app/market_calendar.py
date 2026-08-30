@@ -314,7 +314,14 @@ def state(provider=None, moment: dt.datetime | None = None) -> tuple[str, str]:
         if answer is not None:
             result = (answer, f"{key} status endpoint")
         else:
-            result = (state_from_clock(moment), "clock, New York")
+            # WHICH OF THE TWO ANSWERED, because this string is the whole
+            # explanation in the collection log. "clock, New York" printed on a
+            # holiday would describe the behaviour this release removed, and
+            # somebody reading the log to find out why nothing was collected
+            # would conclude the calendar is not installed.
+            how = ("NYSE calendar" if _exchange_calendar() is not None
+                   else "clock, New York")
+            result = (state_from_clock(moment), how)
     except Exception:  # noqa: BLE001
         # Deciding is not allowed to be the thing that stops collection. An
         # unexplained failure here resolves to "open", because a duplicate

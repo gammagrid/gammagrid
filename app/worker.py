@@ -201,13 +201,19 @@ def run_forever() -> None:
                 archive_if_due(conn)
                 collected = collect_once(conn)
                 rebuild_stale_volume_stats(conn)
-                catch_up_own_iv(conn)
                 # The day's slot is spent only once something was stored: a
                 # provider that was briefly unreachable would otherwise cost the
                 # whole day's snapshot, and a closed day has no second chance.
                 if closed and collected:
                     take_closed_market_slot(conn, today)
                 log.info("Collected %s ticker(s).", collected)
+
+            # OUTSIDE THE BRANCH ABOVE, because this is database work and not
+            # collection. Nested inside it, the catch-up stopped for the whole
+            # of a weekend the moment the day's single closed-market snapshot
+            # had been taken — which is exactly when a machine has time for it.
+            # Costs one index-only read per ticker once there is nothing left.
+            catch_up_own_iv(conn)
         except Exception:
             # A failed pass must not end the worker: the usual causes are a
             # source that is briefly unreachable and a machine that just woke

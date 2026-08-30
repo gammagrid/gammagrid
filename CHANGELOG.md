@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   where a price does not determine a volatility the source's number still
   stands, so nothing disappears off a chart. The source's own value is kept
   alongside ours rather than replaced.
+- **The collection log names the exchange calendar when it is the calendar
+  that answered.** It said "clock, New York" either way, which on a holiday
+  described exactly the behaviour that was removed — and somebody reading the
+  log to find out why nothing was collected would have concluded the calendar
+  was not installed.
 - **The stored volatility average catches up to the new model on its own.**
   One number in this product is stored rather than computed as it is drawn:
   the volume-weighted average per collection, which is what the Volatility
