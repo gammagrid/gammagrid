@@ -9,20 +9,26 @@ page is about direction.
 
 ## Shipped so far
 
-Through v0.5.2. The list below is what the tool does today, not a history —
+Through v0.6.0. The list below is what the tool does today, not a history —
 the changelog has the history.
 
 - Multi-ticker watchlist, collected on demand or on a schedule you choose —
   and not while the market is shut, where the chain does not change
 - Put/Call Ratio, Max Pain, approximate dealer GEX (profile + strike × expiry
   heatmap with Call/Put Walls, Gamma Flip, Replay)
-- IV surface, skew slice, volume-weighted average IV
+- IV surface, skew slice, volume-weighted average IV — with implied volatility
+  solved from the contract's price rather than taken from the data source
 - Full-greeks options screener with range filters
 - Unusual activity detection, day-over-day OI delta
 - Per-contract history with pinning, including contracts that have expired
 - Per-contract price attribution: what delta, gamma, vega and theta each did
 - A data source is a plug-in: the interface is small and documented, and Yahoo
   is simply the one that ships
+- A watchlist you search rather than spell: by company name as well as by
+  symbol, with the answer for a symbol that will never collect given as you
+  type rather than after a week of silent failures
+- A trading calendar that knows about holidays and half-days, so nothing is
+  collected on a day the market never opened
 - Docker quick start, no coding required
 
 ## Being considered

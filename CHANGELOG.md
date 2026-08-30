@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-30
+
 ### Added
 - **The Add-ticker box is a search box.** Type `Apple` and get AAPL, type
   `tesla` and get TSLA — by company name as well as by symbol, filtering as
@@ -581,7 +583,8 @@ Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.5.2...main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.6.0...main
+[0.6.0]: https://github.com/gammagrid/gammagrid/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/gammagrid/gammagrid/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/gammagrid/gammagrid/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/gammagrid/gammagrid/compare/v0.4.2...v0.5.0
