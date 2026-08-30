@@ -104,6 +104,39 @@ def suggest(ticker: str, known: list[str] | set[str] | None = None) -> str | Non
     return matches[0] if matches and matches[0] != candidate else None
 
 
+def source_refusal(ticker: str, substitute: str | None, provider: str = "the current data source") -> str:
+    """What to say about a symbol the data source will not serve.
+
+    SEPARATE FROM `refusal` BECAUSE THE REASON IS DIFFERENT, and the difference
+    is the whole point. "SPX has no options" is false, the person typing SPX
+    knows it is false, and a message somebody knows to be wrong devalues every
+    other message this product prints. What is true is narrower and more
+    useful: the symbol is real, its options are real, and the limitation is on
+    our side of the line.
+
+    THE SUBSTITUTE IS PASSED IN RATHER THAN LOOKED UP HERE. Which symbols a
+    source refuses is a fact about the SOURCE — a licensed feed serves SPX,
+    Yahoo has no endpoint for it — so the provider carries the map
+    (`unsupported_symbols`) for the same reason it carries its own interval
+    floor. Keeping it here would mean this module had to know which provider is
+    active, and that is exactly the shape worth avoiding.
+    """
+    candidate = (ticker or "").strip().upper()
+    head = (
+        f"“{candidate}” is a real symbol with listed options, but {provider} "
+        "does not serve its option chain, so there would be nothing to collect."
+    )
+    if substitute:
+        return (
+            f"{head} **{substitute}** tracks the same underlying and is fully "
+            "supported — the analytics carry over."
+        )
+    return (
+        f"{head} There is no honest substitute: an ETF on VIX futures is a "
+        "different instrument with its own term structure, not a proxy for the index."
+    )
+
+
 def refusal(ticker: str, known: list[str] | set[str] | None = None) -> str:
     """The whole message a person sees, suggestion included when there is one.
 

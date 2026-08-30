@@ -65,12 +65,16 @@ costs nothing.
   and the line disappears when there are none left. On a year of
   fifteen-minute collection this takes a few dozen collection cycles. Turning
   the schedule off simply pauses it.
-
 - **Nothing is collected on market holidays.** Previously a holiday looked
   like a normal weekday and produced a day of duplicate snapshots. Those
   duplicates are still in your database — this project does not delete
   collected data — and they still count as trading days in the metrics built
   on daily history. New ones stop appearing.
+- **An index symbol in your watchlist stops being requested and explains
+  itself.** SPX, XSP, NDX, RUT, DJX and VIX have never collected anything here
+  and never could: Yahoo serves no option chain for a cash-settled index. They
+  now say so on the page, and name what tracks the same underlying. Removing
+  them is up to you; nothing about them is deleted.
 - **A new dependency, `exchange_calendars`.** `docker compose up --build`
   installs it with everything else. Running from source needs
   `pip install -r requirements.txt` again — and if you skip it, the

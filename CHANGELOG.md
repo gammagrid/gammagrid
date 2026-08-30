@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   somebody has to remember to update — including unscheduled closures and the
   real 13:00 close of a half-day. The import is optional: without the package
   the behaviour is exactly what it was, weekends and session hours.
+- **Symbols this data source will not serve now say so, and say what to use
+  instead.** SPX, XSP, NDX, RUT and DJX are real, listed, heavily traded index
+  options; Yahoo has no chain endpoint for any of them. Adding one used to be
+  accepted and then failed on every cycle with "the symbol does not exist or
+  the source is limiting requests" — a claim the person who typed SPX knows to
+  be false, which costs every other message this product prints its
+  credibility. The provider now declares what it refuses and what tracks the
+  same underlying (SPX → SPY, NDX → QQQ, RUT → IWM, DJX → DIA; VIX maps to
+  nothing on purpose, because an ETF on VIX futures is a different
+  instrument). Used in three places: the refusal when adding, a banner on the
+  ticker's page, and a filter in the collector, which no longer spends a
+  request per cycle on a symbol the source has already refused.
 
 ### Changed
 - **Implied volatility is solved from the contract's price rather than taken
@@ -46,16 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   of a live chain). Self-hosted installs feel this more than a server does —
   this runs on somebody's own machine, and rarely a dedicated one.
 
-### Internal
-- New migration `0006_own_implied_volatility.sql`: one nullable column on
-  `snapshot_iv_summary` and a partial index over the rows still to be
-  recomputed. Additive, so a rollback to an older version survives it.
-- `app/metrics_core.py` is byte-identical to the hosted product's copy again.
-  It had drifted by 563 lines and eleven functions — the implied-volatility
-  solver, the batched GEX path and max pain over time — while both products
-  went on describing it as shared, which is the worst of the three possible
-  states: a false guarantee exactly where the numbers are computed.
-
 ### Fixed
 - **The checks no longer pass or fail depending on the day of the week.** The
   volume-baseline check built its data out of trading days while the code
@@ -66,6 +68,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   read the checks. The fixture and the rule it verifies now read the same
   clock, and the builder is verified over a year of anchors so that every
   weekday, both daylight-saving changes and the year boundary are covered.
+
+### Internal
+- `app/metrics_core.py` is byte-identical to the hosted product's copy again.
+  It had drifted by 563 lines and eleven functions — the implied-volatility
+  solver, the batched GEX path and max pain over time — while both products
+  went on describing it as shared, which is the worst of the three possible
+  states: a false guarantee exactly where the numbers are computed.
+- New migration `0006_own_implied_volatility.sql`: one nullable column on
+  `snapshot_iv_summary` and a partial index over the rows still to be
+  recomputed. Additive, so a rollback to an older version survives it.
 
 ## [0.5.2] - 2026-08-25
 

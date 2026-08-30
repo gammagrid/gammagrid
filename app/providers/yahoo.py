@@ -35,10 +35,60 @@ CHAIN_RENAMES = {
 }
 
 
+# What these instruments are called at Yahoo, where they are index QUOTES
+# rather than option chains. Yahoo has no chain for any of them, so nothing in
+# this file collects them — but the price history behind realized volatility is
+# a different endpoint, and it answers for the caret form.
+#
+# ONE TRANSLATION, IN ONE PLACE. The sibling product learned this the expensive
+# way: the map was wired into the spot lookup alone, and the price-history
+# lookup then failed with "possibly delisted; no price data found" for every
+# index ticker. Nothing crashed, because that caller swallows failures and
+# returns nothing — so realized volatility was simply absent, with no symptom.
+# One translation used in one of two places is the same bug twice.
+INDEX_SYMBOLS = {
+    "SPX": "^GSPC",
+    "XSP": "^XSP",
+    "NDX": "^NDX",
+    "RUT": "^RUT",
+    "VIX": "^VIX",
+    "DJX": "^DJI",
+}
+
+
+def _yahoo_symbol(ticker: str) -> str:
+    """What Yahoo calls this instrument. The single place the translation
+    happens, so that adding a lookup elsewhere cannot forget it."""
+    return INDEX_SYMBOLS.get(ticker.upper(), ticker)
+
+
 class YahooProvider:
     name = "yahoo"
     price_history_source = "yahoo"
     requires_token = False
+
+    # WHAT YAHOO WILL NOT SERVE, AND WHAT TO OFFER INSTEAD.
+    #
+    # These are not broken symbols and not typos. SPX, XSP, NDX, RUT and DJX
+    # are listed, real and heavily traded; Yahoo has no chain endpoint for a
+    # cash-settled index, which is a limitation of this source and not of the
+    # options market. Telling somebody who trades SPX that it "has no options"
+    # is plainly false, they know it is false, and it costs every other message
+    # this product prints its credibility.
+    #
+    # The substitutes track the same underlying, so the analytics carry over:
+    # SPY holds the S&P 500 that SPX and the mini XSP are written on, QQQ holds
+    # the Nasdaq 100 behind NDX.
+    #
+    # VIX MAPS TO NOTHING ON PURPOSE. An ETF on VIX futures is a different
+    # instrument with its own term structure, not a proxy for the index, and
+    # offering one would be worse than offering nothing.
+    unsupported_symbols = {
+        "SPX": "SPY", "SPXW": "SPY", "XSP": "SPY",
+        "NDX": "QQQ", "NDXP": "QQQ",
+        "RUT": "IWM", "DJX": "DIA",
+        "VIX": None, "VIXW": None,
+    }
     token: str | None = None  # nothing to authenticate with, nothing to scrub
 
     def _fetch_underlying_price(self, ticker_obj: yf.Ticker) -> float:
@@ -78,7 +128,7 @@ class YahooProvider:
         figure is built on — and a vendor that sells only option chains has no
         way to supply it.
         """
-        return with_retry(self._fetch_underlying_price, yf.Ticker(ticker))
+        return with_retry(self._fetch_underlying_price, yf.Ticker(_yahoo_symbol(ticker)))
 
     def _fetch_chain_for_expiry(self, ticker_obj: yf.Ticker, expiry: str) -> pd.DataFrame:
         chain = ticker_obj.option_chain(expiry)
@@ -120,7 +170,7 @@ class YahooProvider:
         it doesn't write to the database, doesn't take part in snapshot quality
         checks, and doesn't depend on how many days of option chains have
         already been collected."""
-        history = with_retry(lambda: yf.Ticker(ticker).history(period=period))
+        history = with_retry(lambda: yf.Ticker(_yahoo_symbol(ticker)).history(period=period))
         if history.empty:
             return pd.DataFrame(columns=["close"])
         return history.rename(columns={"Close": "close"})[["close"]]

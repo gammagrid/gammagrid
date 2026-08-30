@@ -486,11 +486,22 @@ with st.sidebar:
             )
 
     if st.button("Add") and new_ticker:
+        # THE SOURCE'S OWN ANSWER COMES FIRST, and it is a different answer
+        # from the one below. "SPX has no options" is false and the person
+        # typing SPX knows it; what is true is that this source serves no chain
+        # for it. Asked before the network check because the network check
+        # would say False for the same symbol, for the wrong reason — and
+        # because it needs no request at all.
+        _refused = getattr(providers.get_provider(), "unsupported_symbols", {}) or {}
+        if new_ticker in _refused:
+            st.error(suggestions.source_refusal(
+                new_ticker, _refused[new_ticker], providers.get_provider().name
+            ))
         # `is False` and not `not ...`: None means the source could not answer,
         # and a ticker must never be refused on that. A false negative here
         # looks like the product being broken; a false positive shows up in the
         # collection log within the hour and is suspended by itself after six.
-        if _cached_has_options(new_ticker) is False:
+        elif _cached_has_options(new_ticker) is False:
             st.error(suggestions.refusal(new_ticker, watchlist))
         else:
             db.add_ticker(conn, new_ticker)
@@ -759,6 +770,21 @@ _market_note = market_calendar.status_note(
 
 if _market_note:
     st.caption(_market_note)
+
+# A SYMBOL THIS SOURCE WILL NOT SERVE, said before anything else on the page.
+# Without it the screen is indistinguishable from a ticker that has simply not
+# been collected yet — and the person looking at it typed a symbol they know is
+# real, so "no data, click Collect" reads as the product being broken. The
+# substitute comes from the provider, so it is right by construction rather
+# than by a list somebody has to remember to update.
+_refused_here = getattr(providers.get_provider(), "unsupported_symbols", {}) or {}
+if selected_ticker in _refused_here:
+    st.error(
+        suggestions.source_refusal(
+            selected_ticker, _refused_here[selected_ticker], providers.get_provider().name
+        ),
+        icon="⛔",
+    )
 
 if latest_df.empty:
     st.info(f"No data for {selected_ticker}. Click “Collect data” on the left.")

@@ -128,6 +128,17 @@ honest one. If the source could not be reached to answer the question, the
 ticker is added rather than refused: a valid symbol rejected because Yahoo had
 a bad minute would be the worse mistake.
 
+**"… is a real symbol with listed options, but the source does not serve its
+option chain."** For SPX, XSP, NDX, RUT, DJX and VIX, and it is not a typo:
+these are listed, heavily traded, cash-settled index options, and Yahoo has no
+chain endpoint for any of them. The message names what tracks the same
+underlying — SPY for SPX and XSP, QQQ for NDX, IWM for RUT, DIA for DJX — so
+the analytics carry over. VIX is offered nothing on purpose: an ETF on VIX
+futures is a different instrument with its own term structure, not a proxy for
+the index, and pointing you at one would be worse than saying nothing. A
+licensed data feed serves these chains; which symbols are refused is a property
+of the source, not of the market.
+
 **A ticker in the watchlist shows ⏸ and stops collecting.** Every collection it
 has ever had failed, and none has ever succeeded — six in a row is the point at
 which it stops being requested. That is almost always a symbol that does not
@@ -322,6 +333,12 @@ when. Retrying through a block is what keeps a block in place.
 **Coverage is US options only.** A non-US listing is not a failure you can fix
 by retrying or by waiting: the source returns no expiries for it at all (see
 the [FAQ](#faq) for the measurement and for the ADR route).
+
+**Cash-settled index options are not served either.** SPX, XSP, NDX, RUT, DJX
+and VIX have no chain endpoint at Yahoo, however real and liquid they are. They
+are refused with the ETF that tracks the same underlying, rather than accepted
+and left to fail forever — see [When a ticker will not
+collect](#when-a-ticker-will-not-collect).
 
 **Implied volatility here is ours, not Yahoo's.** The source omits it on part
 of a chain and reports figures that do not reproduce the quoted price on

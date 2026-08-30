@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from app import config, db, iv_backfill, providers
+from app import config, db, iv_backfill, providers, suggestions
 
 
 def fetch_ticker_snapshot(
@@ -111,9 +111,29 @@ def collect_watchlist(
             for ticker in tickers
         }
 
+    # SYMBOLS THE SOURCE ITSELF REFUSES ARE NOT ASKED FOR, and this is not the
+    # same thing as the suspension below. Suspension is inferred from a run of
+    # failures — we conclude a symbol is hopeless. This is the provider telling
+    # us in advance, so there is nothing to infer and nothing to retry: SPX is
+    # a real, listed, heavily traded index option that Yahoo has no chain
+    # endpoint for, and asking anyway costs a request per ticker per cycle
+    # against a source that limits requests, plus a failure logged against a
+    # symbol that is perfectly fine.
+    #
+    # NOT WRITTEN TO THE RUN LOG, for the same reason a suspended ticker is
+    # not: the log records attempts, and filling it with decisions not to
+    # attempt is how a log stops being read. The reason is returned to the
+    # caller, which is what the screen shows.
+    refused = getattr(active, "unsupported_symbols", {}) or {}
+
     suspended = db.unresolvable_tickers(conn)
     failed_this_pass: list[str] = []
     for index, ticker in enumerate(tickers):
+        if ticker.upper() in refused:
+            results[ticker] = "skipped: " + suggestions.source_refusal(
+                ticker, refused[ticker.upper()], active.name
+            )
+            continue
         if ticker.upper() in suspended:
             results[ticker] = (
                 "skipped: no snapshot has ever been collected for this symbol after "
