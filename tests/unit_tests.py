@@ -1012,6 +1012,53 @@ def check_rollup_fixture_does_not_depend_on_the_weekday():
     print("rollup fixture checks passed (371 anchors, every weekday)")
 
 
+def check_the_collector_knows_about_holidays():
+    """Thanksgiving is not a trading day, and the calendar is what says so.
+
+    WHY THIS IS NOT A SMALL THING HERE. The clock path used to carry the gap in
+    writing — "on Thanksgiving it says open" — and the reason it was acceptable
+    was that a provider with a status endpoint answered first and never reached
+    it. This product ships one source, Yahoo, and Yahoo has no such endpoint:
+    the path with the gap in it was the only path. The cost of a wrong answer
+    is a full collection pass against a source that limits requests, plus one
+    more "trading day" in the history that OI Delta and the Unusual Activity
+    baseline stand on.
+
+    HALF-DAYS ARE THE HALF A HAND-WRITTEN LIST WOULD HAVE GOT WRONG. The day
+    after Thanksgiving is a session, and it closes at 13:00 New York.
+
+    THE LAST BLOCK IS THE ROLLBACK. With the package hidden, the same call
+    returns "open" for the same instant — so this check is verifying the
+    calendar rather than the calendar's absence, and the documented degradation
+    is exercised rather than asserted about.
+    """
+    from app import market_calendar as mc
+
+    # 2026: Thanksgiving falls on 26 November, the half-day on the 27th.
+    # 15:00 UTC is 10:00 in New York, inside any regular session.
+    assert mc.state_from_clock(dt.datetime(2026, 11, 26, 15, 0)) == mc.CLOSED
+    assert mc.state_from_clock(dt.datetime(2026, 11, 18, 15, 0)) == mc.OPEN
+    # The half-day: open at 12:00 New York, shut at 13:30.
+    assert mc.state_from_clock(dt.datetime(2026, 11, 27, 17, 0)) == mc.OPEN
+    assert mc.state_from_clock(dt.datetime(2026, 11, 27, 18, 30)) == mc.CLOSED
+
+    # What the reader is shown, on the evening before a holiday: the next open
+    # is Friday morning, not Thursday morning. Seventeen hours against forty.
+    hours = mc.seconds_until_open(dt.datetime(2026, 11, 25, 22, 0)) / 3600
+    assert 40 < hours < 42, hours
+    assert "1d" in mc.time_to_open_phrase(dt.datetime(2026, 11, 25, 22, 0))
+
+    calendar, package = mc._XNYS, mc._xcals
+    try:
+        mc._XNYS, mc._xcals = None, None
+        assert mc.state_from_clock(dt.datetime(2026, 11, 26, 15, 0)) == mc.OPEN, \
+            "without the package this must degrade to weekends and hours, not fail"
+        assert mc.seconds_until_open(dt.datetime(2026, 11, 25, 22, 0)) / 3600 < 20
+    finally:
+        mc._XNYS, mc._xcals = calendar, package
+    print("market-calendar checks passed (holidays, half-days, and the fallback)")
+
+
 def check_the_batched_gex_path_returns_the_old_numbers():
     """One matrix per render, and the numbers are the ones from three passes.
 
@@ -1175,6 +1222,7 @@ def main():
     check_being_throttled_stops_the_whole_pass()
     check_suggestions_name_a_way_forward()
     check_rollup_fixture_does_not_depend_on_the_weekday()
+    check_the_collector_knows_about_holidays()
     check_the_batched_gex_path_returns_the_old_numbers()
     check_the_solver_stands_aside_where_it_should()
     print("\nALL UNIT CHECKS PASSED")

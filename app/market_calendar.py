@@ -11,11 +11,19 @@ compares two copies of Friday, the Unusual Activity baseline takes two sevenths
 of its days from duplicates, and the volatility chart draws a rise on a closed
 market.
 
-TWO SOURCES, IN THIS ORDER. The provider is asked first because it is
-authoritative: Massive's own status endpoint knows about holidays and half-days,
-which a hardcoded calendar would not and which would go stale once a year
-without anybody noticing. The clock is the fallback, for Yahoo (no such
-endpoint) and for the minutes when the provider is unreachable.
+THREE SOURCES, IN THIS ORDER. A provider that can say is asked first, because
+it is authoritative about its own market data. Then the exchange calendar,
+which knows about holidays and half-days and updates with a package version
+rather than with somebody's memory. The bare clock is last, and is reached only
+when the calendar package is not installed.
+
+THE MIDDLE ONE IS THE ONLY ONE THIS PRODUCT ACTUALLY HAS. Yahoo — the source
+that ships here, and for most installations the only one — serves no status
+endpoint, so `market_status` is absent and the first step is skipped every
+time. That is what makes the exchange calendar load-bearing rather than a
+belt-and-braces second opinion: without it, a holiday is a full collection pass
+against a source that limits requests, and one more "trading day" in a history
+that OI Delta and the Unusual Activity baseline are built on.
 
 EXTENDED HOURS COUNT AS CLOSED, and this is a measurement rather than an
 opinion: in the pre-market window the underlying price inside the chain
@@ -29,6 +37,8 @@ import datetime as dt
 import logging
 import time
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 log = logging.getLogger(__name__)
 
@@ -87,21 +97,87 @@ def last_completed_trading_day(moment: dt.datetime | None = None) -> dt.date:
     return day
 
 
+# The exchange's own calendar, if it is installed.
+#
+# WHY A PACKAGE AND NOT A TABLE. The objection to a holiday list is that
+# somebody has to remember to update it, and that objection is correct — a
+# table nobody maintains is wrong from its second year onwards, silently, in
+# the direction of collecting on a day the market never opened.
+# `exchange_calendars` ships the XNYS calendar including half-days and
+# unscheduled closures, and it updates with a version bump instead.
+#
+# THE IMPORT IS OPTIONAL, and that is deliberate rather than defensive. The
+# package is in requirements.txt, so the Docker quick start has it; somebody
+# running from source with an older environment, or with a stripped-down set of
+# dependencies, gets exactly the behaviour this file had before — weekends and
+# session hours, no holidays — instead of an application that will not start.
+try:  # pragma: no cover — both branches are exercised by the checks, not by the import
+    import exchange_calendars as _xcals
+except ImportError:  # pragma: no cover
+    _xcals = None
+
+_XNYS = None
+
+
+def _exchange_calendar():
+    """The NYSE calendar, built once, or None when the package is absent.
+
+    Built lazily rather than at import: constructing it parses a few decades of
+    sessions, and a module import should not do that for a process that may
+    never ask about the market.
+    """
+    global _XNYS
+    if _xcals is None:
+        return None
+    if _XNYS is None:
+        _XNYS = _xcals.get_calendar("XNYS")
+    return _XNYS
+
+
+def _session_bounds(day: dt.date):
+    """(open, close) as New York wall times for a trading day, or None.
+
+    None means two different things on purpose — the exchange is closed that
+    day, or we have no calendar to ask — and both lead to the same fallback
+    below. Half-days come back with their real 13:00 close, which is the half
+    of this a hand-written holiday list would have got wrong.
+    """
+    calendar = _exchange_calendar()
+    if calendar is None:
+        return None
+    stamp = pd.Timestamp(day)
+    try:
+        if not calendar.is_session(stamp):
+            return None
+        opens = calendar.session_open(stamp).tz_convert(MARKET_TZ)
+        closes = calendar.session_close(stamp).tz_convert(MARKET_TZ)
+    except Exception:  # noqa: BLE001 — a calendar that cannot answer is not a closed market
+        log.exception("Exchange calendar could not answer for %s — using the clock.", day)
+        return None
+    return opens.time(), closes.time()
+
+
 def state_from_clock(moment: dt.datetime | None = None) -> str:
-    """Regular session only: weekdays, 09:30–16:00 New York.
+    """Regular session only: weekdays, 09:30–16:00 New York, holidays excluded.
 
     Via zoneinfo rather than a fixed offset: the US and Europe change to summer
     time on different dates, so "UTC minus four hours" is wrong twice a year
     for a week at a time — and wrong in the direction of thinking the market is
     already open when it is not.
 
-    KNOWN GAP: this path does not know about holidays. On Thanksgiving it says
-    "open" and we collect one day of duplicates. Accepted deliberately — a
-    handful of days a year is cheaper than a holiday table somebody has to
-    remember to update, and providers that answer the status endpoint never
-    reach this code.
+    HOLIDAYS AND HALF-DAYS come from the exchange calendar when it is
+    installed, which in a Docker install it always is. Without it this degrades
+    to what this function used to be — weekends and session hours only — rather
+    than to a failure; see the note above `_exchange_calendar`.
     """
     local = to_market_time(moment)
+    bounds = _session_bounds(local.date())
+    if bounds is not None:
+        opens, closes = bounds
+        return OPEN if opens <= local.time() < closes else CLOSED
+    if _exchange_calendar() is not None:
+        # The calendar answered and said this is not a trading day at all.
+        return CLOSED
     if local.isoweekday() > 5:
         return CLOSED
     return OPEN if OPEN_TIME <= local.time() < CLOSE_TIME else CLOSED
@@ -116,9 +192,13 @@ def seconds_until_open(moment: dt.datetime | None = None) -> float:
     where the gap between "now" and "09:30 tomorrow" is 23 or 25 hours rather
     than 24.
 
-    Holidays are not consulted — this only shortens a sleep, and waking at
-    09:30 on a holiday costs one idle cycle. The provider still has the last
-    word on whether anything is collected.
+    Holidays ARE consulted when the exchange calendar is installed, and a
+    half-day's real open is used.
+
+    Why that matters beyond the length of a sleep: this number is also what the
+    reader is shown as "opens in 3h 20m". On the eve of Thanksgiving a
+    weekday-only answer is seventeen hours and the true one is forty-one, and a
+    product that invents a market open is worse than one that says nothing.
     """
     local = to_market_time(moment)
     # EVERY comparison and subtraction below happens in UTC, and that is the
@@ -132,17 +212,23 @@ def seconds_until_open(moment: dt.datetime | None = None) -> float:
     # it.
     now_utc = local.astimezone(dt.timezone.utc)
     day = local.date()
-    for _ in range(8):  # a week plus one, so the loop cannot run away
+    for _ in range(12):  # a week plus a long holiday weekend, and still bounded
         # Each candidate is BUILT from a date and a wall-clock time, never
         # derived from the previous one: adding a day to an aware datetime
         # keeps the offset it already had, which is the same trap from the
         # other end.
-        candidate = dt.datetime.combine(day, OPEN_TIME, tzinfo=MARKET_TZ)
+        bounds = _session_bounds(day)
+        if bounds is None and _exchange_calendar() is not None:
+            # The calendar answered and this is not a session at all.
+            day += dt.timedelta(days=1)
+            continue
+        opens = bounds[0] if bounds is not None else OPEN_TIME
+        candidate = dt.datetime.combine(day, opens, tzinfo=MARKET_TZ)
         candidate_utc = candidate.astimezone(dt.timezone.utc)
-        if candidate_utc > now_utc and day.isoweekday() <= 5:
+        if candidate_utc > now_utc and (bounds is not None or day.isoweekday() <= 5):
             return (candidate_utc - now_utc).total_seconds()
         day += dt.timedelta(days=1)
-    raise RuntimeError("no market open found within a week")  # unreachable
+    raise RuntimeError("no market open found within two weeks")  # unreachable
 
 
 def time_to_open_phrase(now: dt.datetime | None = None) -> str:

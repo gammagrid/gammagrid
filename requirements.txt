@@ -8,6 +8,18 @@ matplotlib>=3.8
 plotly>=5.20
 psycopg[binary]>=3.1
 
+# The exchange's trading calendar: holidays, half-days and unscheduled
+# closures for XNYS. app/market_calendar.py imports it optionally — without it
+# the collector falls back to weekends and session hours, which is what it did
+# before and which believes the market is open on Thanksgiving. That costs a
+# full pass against a source that limits requests, and adds a day to the
+# history that OI Delta and the Unusual Activity baseline are built on.
+#
+# A package rather than a list of dates in this repository, because a list is
+# correct until the year it is not and nobody notices; this updates with a
+# version bump. Requires Python 3.10+, which the image (3.12) has.
+exchange_calendars>=4.13
+
 # The IANA timezone database, as a package rather than a hope. Everything about
 # the market calendar and about showing times in the reader's own zone goes
 # through zoneinfo, which reads the SYSTEM database — python:3.12-slim happens

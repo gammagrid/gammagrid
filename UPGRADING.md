@@ -66,6 +66,17 @@ costs nothing.
   fifteen-minute collection this takes a few dozen collection cycles. Turning
   the schedule off simply pauses it.
 
+- **Nothing is collected on market holidays.** Previously a holiday looked
+  like a normal weekday and produced a day of duplicate snapshots. Those
+  duplicates are still in your database — this project does not delete
+  collected data — and they still count as trading days in the metrics built
+  on daily history. New ones stop appearing.
+- **A new dependency, `exchange_calendars`.** `docker compose up --build`
+  installs it with everything else. Running from source needs
+  `pip install -r requirements.txt` again — and if you skip it, the
+  application still starts and simply keeps its old, holiday-blind calendar
+  rather than failing.
+
 ## v0.5.1 → v0.5.2
 
 **Risk: safe. No migration, no schema change, nothing rewritten and nothing

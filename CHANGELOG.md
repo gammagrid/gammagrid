@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Holidays and half-days are known to the collector.** Until now the
+  question "is the market open" was answered by a clock that knew about
+  weekends and nothing else, and it said "open" on Thanksgiving: a full
+  collection pass against a source that limits requests, and one more
+  "trading day" in the history that OI Delta and the Unusual Activity
+  baseline stand on. The trading calendar now comes from the
+  `exchange_calendars` package — a version bump rather than a list of dates
+  somebody has to remember to update — including unscheduled closures and the
+  real 13:00 close of a half-day. The import is optional: without the package
+  the behaviour is exactly what it was, weekends and session hours.
+
 ### Changed
 - **Implied volatility is solved from the contract's price rather than taken
   from the data source.** Yahoo leaves it missing on part of a chain and
