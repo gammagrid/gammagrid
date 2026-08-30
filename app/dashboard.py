@@ -1071,8 +1071,18 @@ if active_view == "GEX Heatmap":
         matrix_band = matrix_full[(matrix_full.index >= lower) & (matrix_full.index <= upper)]
 
         walls = metrics.dealer_walls(snapshot_df, as_of=as_of, expiries=shown_expiries)
-        flip = metrics.gamma_flip_price(snapshot_df, as_of=as_of, expiries=shown_expiries)
-        net_by_expiry = metrics.net_gex_by_expiry(snapshot_df, as_of=as_of, expiries=shown_expiries)
+        # BOTH READ OFF THE MATRIX ABOVE instead of pricing the chain again.
+        # `gamma_flip_price` and `net_gex_by_expiry` each rebuilt it
+        # internally, so this screen evaluated the same greeks three times over
+        # — and every slider on it reruns the whole script, so the cost was
+        # paid on each nudge. Measured on the hosted product, whose matrix is
+        # the same function: 854.6 ms to 66.7 ms on a 13,160-contract SPY
+        # chain, and the numbers coming out are bit-for-bit the ones that went
+        # in before (max |Δ| = 0 over 357 × 10 cells of a live chain). The flip
+        # still walks the full strike range rather than the displayed band —
+        # `matrix_full` is the unbanded matrix.
+        flip = metrics.gamma_flip_from_matrix(matrix_full)
+        net_by_expiry = metrics.net_gex_from_matrix(matrix_full, expiries=shown_expiries)
         total_net_gex = net_by_expiry["net_gex"].sum()
 
         col_price, col_call, col_put, col_flip, col_zone = st.columns(5)

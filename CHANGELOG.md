@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **The GEX Heatmap prices the chain once per render instead of three
+  times.** The matrix, the gamma flip and the per-expiry net GEX each used to
+  build their own copy of the same greeks, on a screen whose two sliders rerun
+  the whole script on every nudge. The flip and the per-expiry figures are now
+  read off the matrix that was already built. Measured on the sibling product,
+  which runs the same function: 854.6 ms to 66.7 ms on a 13,160-contract SPY
+  chain, with the numbers on screen unchanged (max |Δ| = 0 over 357 × 10 cells
+  of a live chain). Self-hosted installs feel this more than a server does —
+  this runs on somebody's own machine, and rarely a dedicated one.
+
 ### Internal
 - `app/metrics_core.py` is byte-identical to the hosted product's copy again.
   It had drifted by 563 lines and eleven functions — the implied-volatility
