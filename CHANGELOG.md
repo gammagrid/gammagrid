@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **The Add-ticker box is a search box.** Type `Apple` and get AAPL, type
+  `tesla` and get TSLA — by company name as well as by symbol, filtering as
+  you type. A symbol the directory does not list can still be typed in the same
+  box, so there is one door rather than two, and the list is ordered so that
+  what you already watch comes first and a primary listing beats the funds
+  named after it. Behind it is the public Cboe directory of symbols with listed
+  US options, downloaded on first use and refreshed weekly. Nothing about your
+  watchlist is sent anywhere to obtain it, nothing else in the product depends
+  on it, and without it the box behaves exactly as it did before — a field you
+  type a symbol into.
 - **One answer to "that symbol will not work", given as you type.** Four kinds
   of wrong used to be answered by three mechanisms in three voices, with holes
   between them: `SAP.DE`, `BTCUSDT` and `9988.HK` got nothing at all while the
@@ -91,6 +101,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   solver, the batched GEX path and max pain over time — while both products
   went on describing it as shared, which is the worst of the three possible
   states: a false guarantee exactly where the numbers are computed.
+- New migration `0007_symbol_catalogue.sql`: one table for the downloaded
+  symbol directory. Additive and disposable — it holds no collected data, only
+  a copy of a public file that the next refresh rebuilds.
 - New migration `0006_own_implied_volatility.sql`: one nullable column on
   `snapshot_iv_summary` and a partial index over the rows still to be
   recomputed. Additive, so a rollback to an older version survives it.

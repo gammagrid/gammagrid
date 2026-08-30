@@ -46,6 +46,10 @@ MEASURED_MODULES = (
     # What to say to somebody whose ticker will never work. Pure functions with
     # no dependencies, and the entire experience of getting a symbol wrong.
     "app/suggestions.py",
+    # The symbol directory behind the Add-ticker search box. Measured because a
+    # catalogue that quietly fails to load looks exactly like an empty one, and
+    # the box degrades so gracefully that nobody would notice.
+    "app/catalogue.py",
     # The one number this product stores rather than solves as it draws, and the
     # background task that brings it onto our own model. Measured because a
     # backfill that quietly does nothing looks exactly like a backfill that has
@@ -83,6 +87,10 @@ EXEMPT = {
     "base.DataProvider.check_access": "Protocol declaration, empty body",
     "base.with_retry": "retries a network call; only reachable through the ones above",
     "db.get_connection": "used by every check; not a behaviour to assert",
+    # The one outbound call that is not to the data source. Its parse is checked
+    # against the real header, which is the half that actually breaks; the
+    # download around it is urllib and a User-Agent.
+    "catalogue.fetch_directory": "network: downloads the directory from Cboe",
 }
 
 COVERAGE_FLOOR = 100.0  # percent, excluding EXEMPT

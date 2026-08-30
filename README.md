@@ -119,14 +119,31 @@ connection; it only needs to happen once.
 
 ### When a ticker will not collect
 
-**"… has no options to collect on the current data source."** The ticker was
-refused when you added it, because the source has no option chain for that
-symbol at all. Usually a typo (`APPL` for `AAPL`) or a name that is not a
-tradeable symbol — an index (`NASDAQ`), a company name (`NVIDIA`), a currency
-pair (`BTCUSD`). The message names a better symbol to try where there is an
-honest one. If the source could not be reached to answer the question, the
-ticker is added rather than refused: a valid symbol rejected because Yahoo had
-a bad minute would be the worse mistake.
+**"… has no listed options, so there is nothing to collect for it."** Usually a
+typo (`APPL` for `AAPL`) or a name that is not a tradeable symbol — an index
+(`NASDAQ`), a company name (`NVIDIA`), a currency pair (`BTCUSD`). The message
+names a better symbol to try where there is an honest one, and for most of
+these it appears as you type rather than after you press Add. If the source
+could not be reached to answer the question, the ticker is added rather than
+refused: a valid symbol rejected because Yahoo had a bad minute would be the
+worse mistake.
+
+**"… is a listing on a non-US exchange."** `SAP.DE`, `ASML.AS`, `SHEL.L`,
+`9988.HK`. This product covers options listed in the US, and those chains do
+not exist here at all — but most large non-US companies also trade in the US as
+ADRs, which do have options. The message names the US symbol where there is
+one: SAP, ASML, SHEL, BABA.
+
+**"… has no US-listed options of its own."** A currency pair, a metal or an
+index by its popular name: `BTCUSD`, `XAUUSD`, `NASDAQ`. There is no spelling
+of these that will ever collect, so the answer is a different instrument —
+IBIT, GLD, QQQ — and it is offered in the search box itself, one line under
+what you typed.
+
+**The search box has no company names in it.** The symbol directory has not
+been downloaded yet — it arrives on the collector's next pass, and until then
+the box still accepts any symbol you type. If it never arrives, check whether
+the machine can reach `cboe.com`; nothing else in the product depends on it.
 
 **"… is a real symbol with listed options, but the source does not serve its
 option chain."** For SPX, XSP, NDX, RUT, DJX and VIX, and it is not a typo:
@@ -181,6 +198,11 @@ gets longer.
   statistical outlier against that specific contract's own history, not a
   flat threshold
 - **Put/Call Ratio** and per-contract price/IV/greeks history with pinning
+- **A watchlist you can search rather than spell.** Type `Apple` and get AAPL;
+  type `BTCUSDT` and the list itself offers `BTCUSDT → IBIT`. Behind it is the
+  directory of every symbol with listed US options, so a symbol that will never
+  collect is answered before you commit to it instead of failing quietly for a
+  week
 
 And, because every snapshot is kept:
 

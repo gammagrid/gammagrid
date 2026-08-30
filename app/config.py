@@ -157,6 +157,14 @@ UNUSUAL_HISTORY_DAYS = 60
 # our number, and only the historical average is catching up.
 IV_BACKFILL_MOMENTS_PER_PASS = int(os.environ.get("IV_BACKFILL_MOMENTS_PER_PASS", "50"))
 
+# How often the symbol directory behind the Add-ticker search box is downloaded
+# again. Weekly rather than nightly, and the difference is who is paying for it:
+# this product runs on somebody's own machine, the file changes by a handful of
+# rows a week, and a daily request to a third party is not something to sign an
+# installation up for without a reason. A missing catalogue is fetched
+# immediately whatever this says — see app/catalogue.py.
+CATALOGUE_REFRESH_DAYS = int(os.environ.get("CATALOGUE_REFRESH_DAYS", "7"))
+
 # Contracts expired longer ago than this move to option_snapshots_archive.
 # Nothing is deleted; the point is only to keep the table every live query
 # reads from carrying years of contracts that can never trade again.

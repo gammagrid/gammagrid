@@ -2,6 +2,7 @@
 network and no real yfinance. Not part of a pytest suite — just a quick run
 during development. Usage: python tests/smoke_test.py"""
 
+import datetime as dt
 import os
 import sys
 from datetime import date as dt_date
@@ -17,7 +18,15 @@ import testdb  # noqa: E402
 
 testdb.configure()
 
-from app import collector, config, db, iv_backfill, market_calendar, metrics  # noqa: E402
+from app import (  # noqa: E402
+    catalogue,
+    collector,
+    config,
+    db,
+    iv_backfill,
+    market_calendar,
+    metrics,
+)
 
 EXPIRY = "2026-09-18"
 STRIKES = [90, 95, 100, 105, 110]
@@ -573,6 +582,160 @@ def check_stored_volatility_catches_up_to_our_model(conn):
     print("Own-volatility catch-up checks passed (stored averages reach our model by themselves)\n")
 
 
+
+def check_the_search_box_orders_what_it_offers(conn):
+    """The list handed to the browser, and the order that makes it useful.
+
+    THE ORDER IS THE FEATURE. The box filters in the browser, so the ranking has
+    to be decided before anybody types — and "APPLE" matches AAPL, APLE and AAPX
+    while only one of them is Apple. Fewest words in the company name wins,
+    because a primary listing is called "TESLA INC" and the things derived from
+    it are called "TESLA 1X SHORT DAILY ETF". Ahead of everything: what this
+    installation already watches.
+
+    THE ALIAS ROWS ARE THE OTHER HALF. Somebody pasting BTCUSDT out of an
+    exchange reads `BTCUSDT → IBIT` in the list and picks it, instead of
+    committing the symbol, reading a sentence and typing IBIT by hand. They come
+    last, and they are dropped where the spelling is itself a listed symbol —
+    GOLD is a real company, and a query matching both must find it first.
+    """
+    watched = "CATTEST"
+    directory = [
+        ("CATTEST", "CATALOGUE TEST CORP"),
+        ("CTA", "CTA ONE"),
+        ("CTB", "CTB TWO WORD NAME"),
+        ("CTC", "CTC THREE WORD LONGER NAME"),
+        ("IBIT", "ISHARES BITCOIN TRUST"),
+        ("GOLD", "GOLD MINING CORP"),
+    ]
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM option_symbols WHERE symbol = ANY(%s)",
+                    ([symbol for symbol, _ in directory],))
+    assert catalogue.load(conn, directory) == len(directory)
+
+    # Re-running the same file changes nothing and raises nothing: the refresh
+    # is a weekly upsert, and a directory that repeats a symbol — which is
+    # somebody else's file, and has happened — must not take the load down.
+    assert catalogue.load(conn, [*directory, ("CTA", "CTA ONE RENAMED")]) == len(directory) + 1
+
+    listed = catalogue.symbols(conn)
+    assert {symbol for symbol, _ in directory} <= listed, listed
+
+    rows = catalogue.options(conn, watched=[watched])
+    # THE ALIAS ROWS CARRY A REAL SYMBOL TOO — `BTCUSDT → IBIT` is offered as
+    # IBIT, which is the whole point of it — so they have to be told apart by
+    # the label rather than by the symbol. Reading them as ordinary rows made
+    # an earlier version of this check compare IBIT's alias with itself and
+    # pass without asserting anything.
+    ours = [(symbol, label) for symbol, label in rows if symbol in listed and "→" not in label]
+    order = [symbol for symbol, _ in ours]
+    assert order[0] == watched, ("what this installation watches comes first", order[:6])
+    # Fewer words first, among the symbols this check owns.
+    for shorter, longer in (("CTA", "CTB"), ("CTB", "CTC")):
+        assert order.index(shorter) < order.index(longer), order
+
+    # The company name is what makes a list of four-letter symbols legible.
+    labels = dict(ours)
+    assert labels["CTA"].startswith("CTA · CTA ONE"), labels["CTA"]
+
+    # The alias rows: appended, pointing at a symbol the directory holds, and
+    # carrying the arrow rather than silently swapping one symbol for another.
+    aliases = [label for symbol, label in rows if "→" in label]
+    assert any(label.startswith("BTCUSDT → IBIT") for label in aliases), aliases
+    assert not any(label.startswith("GOLD →") for label in aliases), \
+        "GOLD is a listed company here, so the alias must not shadow it"
+    # Compared as positions in the SAME list, which is the list the browser
+    # searches: every alias sits after every real row, so a query matching both
+    # finds the security first.
+    positions = {label: index for index, (_, label) in enumerate(rows)}
+    first_alias = min(positions[label] for label in aliases)
+    assert positions[labels["IBIT"]] < first_alias, \
+        "the real symbol is found before the alias underneath it"
+
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM option_symbols WHERE symbol = ANY(%s)",
+                    ([symbol for symbol, _ in directory],))
+    print("Search-box checks passed (order, labels, and the alias rows)\n")
+
+
+def check_the_directory_is_fetched_once_and_then_left_alone(conn):
+    """Lazy, then weekly, and never a reason for anything else to fail.
+
+    THE CADENCE IS THE POINT. This is the only outbound call in this product
+    that is not to the data source, and it runs on somebody else's machine. A
+    file of 5,300 symbols that changes by a handful of rows a week does not
+    justify a nightly request, so: fetch when it is missing, then leave it for a
+    week.
+
+    A FAILED DOWNLOAD STILL MARKS THE ATTEMPT — otherwise a third party being
+    unreachable turns into a request every fifteen minutes, which is both rude
+    and useless. The exception is an EMPTY catalogue, where the box does not
+    work at all and the next cycle is right to try again.
+    """
+    # THIS ONE EMPTIES THE WHOLE TABLE, and it is the exception that has to be
+    # argued rather than assumed. Every other check here owns its rows by
+    # ticker; the behaviour under check is literally "what happens when the
+    # catalogue is empty", which cannot be scoped to a subset. It is safe here
+    # for a reason that does not generalise: this table holds no collected data
+    # — it is a downloaded copy of somebody else's public file, rebuilt by the
+    # next refresh — and testdb refuses to open anything but a disposable
+    # database.
+    original = catalogue.fetch_directory
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM option_symbols")
+        cur.execute("DELETE FROM app_settings WHERE key = %s", (catalogue._REFRESHED_KEY,))
+
+    calls = []
+
+    def fake(*args, **kwargs):
+        calls.append(1)
+        return [("FETCHED", "FETCHED CORP")]
+
+    def explode(*args, **kwargs):
+        calls.append(1)
+        raise OSError("Cboe is unreachable")
+
+    try:
+        # Empty: fetched at once, whatever the schedule says.
+        catalogue.fetch_directory = fake
+        assert catalogue.refresh_if_due(conn) == 1, "an empty catalogue is filled immediately"
+        assert len(calls) == 1
+        # Filled and fresh: not asked again, and the second call costs one
+        # setting read rather than a request.
+        assert catalogue.refresh_if_due(conn) == 0
+        assert len(calls) == 1, "a fresh catalogue must not be downloaded again"
+
+        # Due again: the marker is aged rather than the clock moved, because the
+        # rule under check is "how old is what we have".
+        stale = (dt.date.today() - dt.timedelta(days=config.CATALOGUE_REFRESH_DAYS)).isoformat()
+        db.set_setting(conn, catalogue._REFRESHED_KEY, stale)
+        assert catalogue.refresh_if_due(conn) == 1
+        assert len(calls) == 2
+
+        # A FAILURE IS SURVIVED, NOT RETRIED. The catalogue we hold stays, the
+        # attempt is marked, and nothing the caller does depends on the answer.
+        db.set_setting(conn, catalogue._REFRESHED_KEY, stale)
+        catalogue.fetch_directory = explode
+        assert catalogue.refresh_if_due(conn) == 0, "a download that failed is not an error"
+        assert len(calls) == 3
+        assert catalogue.symbols(conn) == {"FETCHED"}, "what we already had is untouched"
+        assert catalogue.refresh_if_due(conn) == 0
+        assert len(calls) == 3, "a failed attempt still costs a week, not fifteen minutes"
+
+        # Unless there is nothing to keep: then the next cycle tries again,
+        # because the box does not work at all until this succeeds.
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM option_symbols")
+        assert catalogue.refresh_if_due(conn) == 0
+        assert len(calls) == 4, "an empty catalogue is worth retrying"
+    finally:
+        catalogue.fetch_directory = original
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM option_symbols")
+            cur.execute("DELETE FROM app_settings WHERE key = %s", (catalogue._REFRESHED_KEY,))
+    print("Directory refresh checks passed (lazy, then weekly, and never fatal)\n")
+
+
 def check_greek_attribution():
     """The decomposition has to add up, and refuse what it cannot explain.
 
@@ -1040,6 +1203,8 @@ def main():
     check_two_sources_never_mix(conn)
     check_expired_contracts_stay_reachable(conn)
     check_stored_volatility_catches_up_to_our_model(conn)
+    check_the_search_box_orders_what_it_offers(conn)
+    check_the_directory_is_fetched_once_and_then_left_alone(conn)
     check_greek_attribution()
 
     print("ALL SMOKE CHECKS PASSED")

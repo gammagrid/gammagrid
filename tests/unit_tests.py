@@ -1332,6 +1332,48 @@ def check_the_solver_stands_aside_where_it_should():
     print("IV solver checks passed (VIX and a missing spot keep the source's number)")
 
 
+def check_the_directory_parse_survives_the_real_header():
+    """The header is what breaks this, and the failure is silent.
+
+    Cboe's file starts `Company Name, Stock Symbol, DPM Name, Post/Station` —
+    with a space after each comma, so the raw field names carry a leading
+    blank. Read without stripping, the file parses cleanly into ZERO symbols:
+    nothing raises, the catalogue empties, and the search box goes quiet with
+    no error anywhere. That is why the parse is a separate function from the
+    download, and why it is checked against the real header rather than a tidy
+    one.
+    """
+    from app import catalogue
+
+    payload = (
+        "Company Name, Stock Symbol, DPM Name, Post/Station\n"
+        "APPLE INC, AAPL, Citadel Securities, 5/1\n"
+        "STATE STR SPDR S&P 500 ETF TR TR UNIT, SPY, Citadel Securities, 6/2\n"
+    )
+    rows = catalogue.parse_directory(payload)
+    assert rows == [("AAPL", "APPLE INC"), ("SPY", "STATE STR SPDR S&P 500 ETF TR TR UNIT")], rows
+
+    # A row the file truncates is skipped, not guessed at.
+    assert catalogue.parse_directory(
+        "Company Name, Stock Symbol\nAPPLE INC, AAPL\nBROKEN\n"
+    ) == [("AAPL", "APPLE INC")]
+
+    # EVERY FAILURE RAISES, because the caller's answer to a raise is "keep the
+    # catalogue we already have". A parse that returned an empty list instead
+    # would be indistinguishable from a market with no listed options.
+    for broken, why in (
+        ("", "no header at all"),
+        ("Company Name, Ticker\nAPPLE INC, AAPL\n", "the symbol column renamed"),
+        ("Company Name, Stock Symbol\n", "a header and nothing under it"),
+    ):
+        try:
+            catalogue.parse_directory(broken)
+        except ValueError:
+            continue
+        raise AssertionError(f"parsed {why!r} without complaining")
+    print("directory parse checks passed (the real header, and every way it fails)")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -1364,6 +1406,7 @@ def main():
     check_history_depth_is_known_before_the_chart()
     check_being_throttled_stops_the_whole_pass()
     check_suggestions_name_a_way_forward()
+    check_the_directory_parse_survives_the_real_header()
     check_rollup_fixture_does_not_depend_on_the_weekday()
     check_the_collector_knows_about_holidays()
     check_symbols_the_source_will_not_serve_are_explained()

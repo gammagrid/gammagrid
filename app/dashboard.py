@@ -14,7 +14,16 @@ import streamlit as st
 import streamlit.components.v1 as components
 from matplotlib.colors import LinearSegmentedColormap
 
-from app import collector, config, db, market_calendar, metrics, providers, suggestions
+from app import (  # noqa: I001 — grouped by what they are, not alphabetised
+    catalogue,
+    collector,
+    config,
+    db,
+    market_calendar,
+    metrics,
+    providers,
+    suggestions,
+)
 from app.viewtime import (
     format_date,
     format_datetime,
@@ -47,6 +56,22 @@ def _drop_stale_choice(key: str, options) -> None:
     die on a perfectly ordinary sequence of clicks."""
     if key in st.session_state and st.session_state[key] not in list(options):
         del st.session_state[key]
+
+
+# The catalogue, cached. It is ~5,300 rows and the file behind it is downloaded
+# weekly, so re-reading it on every rerun would be a query per click for an
+# answer that cannot have moved.
+#
+# Five minutes rather than an hour, and the reason is not the file: the ORDER
+# depends on what this installation watches, so a symbol just added should reach
+# the top of the list within a rerun or two rather than at the top of the hour.
+#
+# Caching does not reduce what crosses the wire — the whole list goes to the
+# browser on every rerun — and that is the price of filtering without a round
+# trip. It is also why this list is not made longer than it has to be.
+@st.cache_data(ttl=300)
+def _cached_catalogue_options(_conn, watched: tuple[str, ...]) -> list[tuple[str, str]]:
+    return catalogue.options(_conn, list(watched))
 
 
 @st.cache_data(ttl=1800)
@@ -457,13 +482,66 @@ st.caption(
 
 with st.sidebar:
     st.header("Watchlist")
-    new_ticker = st.text_input(
-        "Add ticker",
-        placeholder="AAPL",
-        help="Data comes from Yahoo Finance (yfinance) — not every ticker or every "
-        "options chain is available there.",
-    ).strip().upper()
     watchlist = db.get_watchlist(conn)
+
+    # ONE BOX THAT FILTERS AS YOU TYPE, and it replaced a plain text field for a
+    # reason that has nothing to do with looks. A field you can only type into
+    # is a field you can only be wrong in: it cannot tell somebody that what
+    # they want exists under another name, because it does not know what
+    # exists. `APPL`, `NVIDIA`, `NASDAQ` and `BTCUSD` all have the shape of a
+    # ticker, and all of them used to be accepted and then fail forever.
+    #
+    # A SELECTBOX HOLDING THE WHOLE CATALOGUE FILTERS IN THE BROWSER, on every
+    # keystroke, and empties the moment the box is cleared. A server-side search
+    # cannot: Streamlit hands a text field's value to Python only when it loses
+    # focus, so somebody typing "Apple" would see nothing at all until they
+    # clicked elsewhere — and if they went straight for the Add button instead,
+    # they would never see a suggestion.
+    #
+    # `accept_new_options` makes the same widget the fallback for a symbol the
+    # directory does not list, so there is one door instead of two — and it is
+    # what keeps this working on an installation whose catalogue is empty
+    # because the download failed or the worker has never run.
+    #
+    # `filter_mode="contains"` rather than the default fuzzy match: fuzzy
+    # re-sorts by its own score and throws away the ordering this list was built
+    # with, and that ordering is most of what makes the search useful.
+    _options = _cached_catalogue_options(conn, tuple(watchlist))
+    _label_to_symbol = {label: symbol for symbol, label in _options}
+    # The directory as a set — the only statement this product holds that a
+    # string is a real security with listed options. It is what tells "AAPX,
+    # deliberately typed" apart from "APPL, mistyped", and what resolves SAP.DE
+    # to SAP without a map of European companies.
+    _catalogue_symbols = set(_label_to_symbol.values())
+    _choice = st.selectbox(
+        "Add ticker",
+        options=list(_label_to_symbol),
+        index=None,
+        placeholder="AAPL or Apple",
+        accept_new_options=True,
+        filter_mode="contains",
+        key="add_ticker_choice",
+        help=(
+            "Search by symbol or company name, or type a symbol that is not "
+            "listed. Data comes from Yahoo Finance (yfinance), and not every "
+            "listed chain is available there. US-listed options only — European "
+            "and Asian listings (SAP.DE, ASML.AS) have no options data here, but "
+            "most large non-US companies also trade in the US as ADRs, which do: "
+            "try ASML, SAP, SHEL, NVO, BUD."
+        ),
+    )
+    new_ticker = (_label_to_symbol.get(_choice) or (_choice or "")).strip().upper()
+
+    # Said once, and only while it is true. An empty directory is not a failure
+    # anybody has to act on — the box still accepts anything typed into it — but
+    # somebody who expected to search for "Apple" and got nothing deserves to
+    # know it is the catalogue that has not arrived, not their spelling.
+    if not _catalogue_symbols:
+        st.caption(
+            "The symbol directory has not been downloaded yet, so this box cannot "
+            "search by company name — type the symbol itself. It arrives on the "
+            "collector's next pass."
+        )
 
     depth = _cached_collection_depth()
 
@@ -483,6 +561,7 @@ with st.sidebar:
     _proposal = suggestions.propose(
         new_ticker,
         depth.keys(),
+        in_catalogue=_catalogue_symbols.__contains__,
         unsupported=_unsupported_here,
         provider=_provider.name,
     )
@@ -518,15 +597,30 @@ with st.sidebar:
             )
 
     if st.button("Add", disabled=not new_ticker or bool(_proposal and _proposal.blocking)):
-        # `is False` and not `not ...`: None means the source could not answer, and a ticker must never be refused on that. A
+        # THE LIVE CHECK STILL RUNS, and the catalogue does not replace it: the
+        # directory says a symbol has listed options somewhere, not that Yahoo
+        # will serve its chain. `is False` and not `not ...` — None means the
+        # source could not answer, and a ticker must never be refused on that. A
         # false negative here looks like the product being broken; a false
         # positive shows up in the collection log within the hour and is
         # suspended by itself after six.
         if _cached_has_options(new_ticker) is False:
-            st.error(suggestions.refusal(new_ticker, watchlist))
+            # A symbol the directory lists is not "not a ticker". The limitation
+            # is ours, and saying otherwise costs the message its credibility
+            # with exactly the person who knows the symbol is real.
+            st.error(
+                suggestions.source_refusal(
+                    new_ticker, _unsupported_here.get(new_ticker), _provider.name
+                )
+                if new_ticker in _catalogue_symbols
+                else suggestions.refusal(
+                    new_ticker, watchlist, _catalogue_symbols.__contains__
+                )
+            )
         else:
             db.add_ticker(conn, new_ticker)
             _cached_collection_depth.clear()
+            _cached_catalogue_options.clear()
             st.rerun()
 
     # Symbols that stopped being asked for. Marked in the list itself rather

@@ -45,9 +45,10 @@ touched by the move and is still the backup for those versions.)*
 is deleted, and an older version still opens the same database afterwards.**
 
 `0006_own_implied_volatility.sql` adds one nullable column to
-`snapshot_iv_summary` and one partial index. It touches no chain rows. An
-older version neither writes nor reads the column, so going back works and
-costs nothing.
+`snapshot_iv_summary` and one partial index; `0007_symbol_catalogue.sql` adds
+one new table for the downloaded symbol directory. Neither touches a chain row.
+An older version neither writes nor reads either of them, so going back works
+and costs nothing.
 
 **What you may notice on the first run.**
 
@@ -75,6 +76,15 @@ costs nothing.
   and never could: Yahoo serves no option chain for a cash-settled index. They
   now say so on the page, and name what tracks the same underlying. Removing
   them is up to you; nothing about them is deleted.
+- **The Add-ticker box searches by company name now.** The first collector
+  pass after the upgrade downloads the public Cboe directory of symbols with
+  listed US options — about 5,300 rows, roughly 1.5 MB in your database — and
+  refreshes it weekly after that. **This is a new outbound call**, the only one
+  in the product that is not to the data source and not the TradingView widget
+  in the page; it sends nothing about you, your watchlist or what you collect.
+  If the machine cannot reach `cboe.com`, or you would rather it did not, the
+  only consequence is that the box stays what it was: a field you type a symbol
+  into. Nothing about collecting or drawing depends on it.
 - **A new dependency, `exchange_calendars`.** `docker compose up --build`
   installs it with everything else. Running from source needs
   `pip install -r requirements.txt` again — and if you skip it, the

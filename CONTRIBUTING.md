@@ -62,9 +62,12 @@ All of them run in CI on every pull request; please run them locally first.
   offline goes in that file's `EXEMPT` list, by name and with the reason.
 - Match the existing style: pure functions in `metrics_core.py` (input a
   DataFrame, output a DataFrame/number, no side effects), all DB access
-  funneled through `db.py`, all network calls funneled through
+  funneled through `db.py`, all **market data** network calls funneled through
   `app/providers/` — `collector.py` orchestrates and never talks to a network
-  itself. `dashboard.py` is display and user input only — no business logic.
+  itself. There is exactly one other outbound call in the application, and it
+  is named rather than hidden: `app/catalogue.py` downloads Cboe's public
+  symbol directory to fill the Add-ticker search box. If you are adding a
+  second one, that is a discussion before it is a patch. `dashboard.py` is display and user input only — no business logic.
 - **Adding a data source is a new file in `app/providers/`** and two lines in
   its `__init__.py`; the module docstring there walks through it. Nothing else
   in the app should need to know your source exists. Two of them are never

@@ -77,6 +77,11 @@ def truncate_all(conn) -> None:
             "tracked_contracts",
             "watchlist",
             "app_settings",
+            # The downloaded symbol directory. Not collected data — a copy of a
+            # public file that the next refresh rebuilds — but it is shared
+            # state that a check can order its assertions against, so the
+            # suites start from a known empty one.
+            "option_symbols",
         ):
             cur.execute(f"TRUNCATE {table} RESTART IDENTITY")  # noqa: S608 — fixed list above
 
