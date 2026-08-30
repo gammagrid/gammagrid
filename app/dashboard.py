@@ -465,17 +465,49 @@ with st.sidebar:
     ).strip().upper()
     watchlist = db.get_watchlist(conn)
 
-    # WHAT THIS TELLS SOMEBODY BEFORE THEY COMMIT. Two different things, and
-    # both used to be silence:
+    depth = _cached_collection_depth()
+
+    # ONE ANSWER TO ONE QUESTION. Three mechanisms used to speak here — the
+    # provider's refusal list, the map of instruments with no US options, and
+    # the typo search — in three places, in three voices, and with holes between
+    # them: SAP.DE, BTCUSDT and 9988.HK got nothing at all while the help text
+    # under this very box named ADRs as the answer.
+    #
+    # ASKED ON EVERY KEYSTROKE AND NEVER OVER THE NETWORK. Everything it needs
+    # is already in memory — the provider's declared refusals, the catalogue
+    # just handed to the widget, and the tickers already collected — so somebody
+    # who typed SAP.DE reads the answer instead of waiting seconds for Yahoo to
+    # say the same no.
+    _provider = providers.get_provider()
+    _unsupported_here = getattr(_provider, "unsupported_symbols", {}) or {}
+    _proposal = suggestions.propose(
+        new_ticker,
+        depth.keys(),
+        unsupported=_unsupported_here,
+        provider=_provider.name,
+    )
+    # ONLY THE SOURCE'S OWN REFUSAL TAKES THE BUTTON AWAY. The rest is this
+    # product's reading of what somebody meant, and being wrong about that must
+    # cost them a sentence, not the ability to try.
+    if _proposal:
+        st.warning(_proposal.message)
+
+    # WHAT THIS TELLS SOMEBODY BEFORE THEY COMMIT, and it is said only when
+    # there is something to commit to. Two different things, and both used to be
+    # silence:
     #
     #   * a symbol with no chain to collect (APPL, NASDAQ, BTCUSD) was accepted
     #     without a word and then failed on every cycle forever;
     #   * a symbol that IS valid still starts its history today, so the first
-    #     chart is a single point — on a fresh install, always. Somebody who
-    #     was promised history and sees one dot concludes the tool is broken,
-    #     and they are not wrong to.
-    depth = _cached_collection_depth()
-    if new_ticker:
+    #     chart is a single point — on a fresh install, always. Somebody who was
+    #     promised history and sees one dot concludes the tool is broken, and
+    #     they are not wrong to.
+    #
+    # AFTER THE PROPOSAL, AND NOT FOR A SYMBOL THE SOURCE HAS REFUSED. Promising
+    # that history "starts at the first collection" directly above a sentence
+    # saying there will never be one is the product contradicting itself in two
+    # consecutive lines.
+    if new_ticker and not (_proposal and _proposal.blocking):
         since = depth.get(new_ticker)
         if since:
             st.caption(f"Already collected since {since:%d %b %Y}.")
@@ -485,23 +517,12 @@ with st.sidebar:
                 "chart will have one point, and fills in from there."
             )
 
-    if st.button("Add") and new_ticker:
-        # THE SOURCE'S OWN ANSWER COMES FIRST, and it is a different answer
-        # from the one below. "SPX has no options" is false and the person
-        # typing SPX knows it; what is true is that this source serves no chain
-        # for it. Asked before the network check because the network check
-        # would say False for the same symbol, for the wrong reason — and
-        # because it needs no request at all.
-        _refused = getattr(providers.get_provider(), "unsupported_symbols", {}) or {}
-        if new_ticker in _refused:
-            st.error(suggestions.source_refusal(
-                new_ticker, _refused[new_ticker], providers.get_provider().name
-            ))
-        # `is False` and not `not ...`: None means the source could not answer,
-        # and a ticker must never be refused on that. A false negative here
-        # looks like the product being broken; a false positive shows up in the
-        # collection log within the hour and is suspended by itself after six.
-        elif _cached_has_options(new_ticker) is False:
+    if st.button("Add", disabled=not new_ticker or bool(_proposal and _proposal.blocking)):
+        # `is False` and not `not ...`: None means the source could not answer, and a ticker must never be refused on that. A
+        # false negative here looks like the product being broken; a false
+        # positive shows up in the collection log within the hour and is
+        # suspended by itself after six.
+        if _cached_has_options(new_ticker) is False:
             st.error(suggestions.refusal(new_ticker, watchlist))
         else:
             db.add_ticker(conn, new_ticker)

@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **One answer to "that symbol will not work", given as you type.** Four kinds
+  of wrong used to be answered by three mechanisms in three voices, with holes
+  between them: `SAP.DE`, `BTCUSDT` and `9988.HK` got nothing at all while the
+  help text under the very same box named ADRs as the answer. Now a symbol the
+  source refuses, an instrument with no US-listed options, a non-US listing of
+  something that does trade here, and a near-miss typo are one question with
+  one answer — before you press Add, without a network request, and naming the
+  substitute where there is an honest one (`SAP.DE` → SAP, `9988.HK` → BABA,
+  `BTCUSDT` → IBIT). Only the source's own refusal takes the Add button away;
+  everything else is this product's reading of what you meant, and being wrong
+  about that costs you a sentence rather than the ability to try.
 - **Holidays and half-days are known to the collector.** Until now the
   question "is the market open" was answered by a clock that knew about
   weekends and nothing else, and it said "open" on Thanksgiving: a full

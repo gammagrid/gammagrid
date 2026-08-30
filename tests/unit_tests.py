@@ -954,24 +954,92 @@ def check_being_throttled_stops_the_whole_pass():
 
 
 def check_suggestions_name_a_way_forward():
-    """A refusal that only says no leaves the person where they were."""
-    from app import suggestions
+    """A refusal that only says no leaves the person where they were.
 
+    FOUR KINDS OF WRONG, ONE ANSWER. `propose` is the single entry point, and
+    the order it asks in is the order the reasons rule each other out: what the
+    source refuses (a fact about us), what has no US-listed options at all (a
+    fact about the instrument), a non-US listing of something we do have (a fact
+    about form), and only then a near miss (a guess). Before it, three
+    mechanisms answered in three voices and left holes between them — SAP.DE,
+    BTCUSDT and 9988.HK got nothing at all while the help text under the box
+    named ADRs as the answer.
+    """
+    from app import providers, suggestions
+
+    refused = providers.get_provider().unsupported_symbols
+
+    def propose(typed, known=(), catalogue=()):
+        return suggestions.propose(
+            typed, list(known),
+            in_catalogue=set(catalogue).__contains__ if catalogue else None,
+            unsupported=refused, provider="yahoo",
+        )
+
+    # 1. The source's own refusal, and it is the ONLY one that blocks: the rest
+    # is a reading of what somebody meant, and being wrong about that must cost
+    # them a sentence rather than the ability to try.
+    spx = propose("SPX")
+    assert spx.reason == "source" and spx.substitute == "SPY", spx
+    assert spx.blocking, "only the source's refusal takes the button away"
+    assert not propose("BTCUSD").blocking
+
+    # 2. No US-listed options at all — and the pair as three terminals write it.
+    # One form is stored and the spelling is folded before the lookup, so the
+    # next spelling somebody pastes is not a new gap.
+    for spelling in ("BTCUSD", "BTCUSDT", "BTC-USD", "BTC/USD"):
+        answer = propose(spelling)
+        assert answer.reason == "instrument" and answer.substitute == "IBIT", (spelling, answer)
+        # Quoted back as it was typed: correcting somebody's spelling while
+        # answering their question is two conversations at once.
+        assert spelling in answer.message, answer.message
+    assert propose("EURUSD").substitute is None, "no honest substitute is said, not invented"
+
+    # 3. A non-US listing. The ordinary case needs no map — strip the suffix and
+    # ask the directory — and the exceptions are there because stripping gets
+    # them wrong: SAN.PA stripped is Banco Santander, and SAN.PA is Sanofi.
+    sap = propose("SAP.DE", catalogue=["SAP"])
+    assert sap.reason == "foreign" and sap.substitute == "SAP", sap
+    assert propose("9988.HK", catalogue=["BABA"]).substitute == "BABA"
+    assert propose("SAN.PA", catalogue=["SAN", "SNY"]).substitute == "SNY", \
+        "stripping the suffix here names a different company entirely"
+    # A dot is not enough to call something foreign: US symbols have them too.
+    assert propose("BRK.B", catalogue=["BRK.B"]) is None
+    # Foreign and nothing to offer is still a better answer than silence.
+    unhelpable = propose("SIE.DE", catalogue=["SAP"])
+    assert unhelpable.reason == "foreign" and unhelpable.substitute is None, unhelpable
+
+    # 4. The guess, and it comes last for that reason.
+    typo = propose("APPL", known=["AAPL", "SPY"])
+    assert typo.reason == "typo" and typo.substitute == "AAPL", typo
+    assert propose("NVIDIA", known=["NVDA", "SPY"]).substitute == "NVDA"
+
+    # A SYMBOL IN THE DIRECTORY IS NEVER "A TYPO". Correcting AAPX to AAPL when
+    # AAPX is a real security somebody deliberately typed would be the product
+    # arguing with its own data.
+    assert propose("AAPX", known=["AAPL"], catalogue=["AAPX", "AAPL"]) is None
+    # Nor is anything said about a symbol already being collected.
+    assert propose("AAPL", known=["AAPL"]) is None
+    assert propose("") is None
+
+    # The plain helpers still answer for callers that have no catalogue.
     assert suggestions.suggest("APPL", ["AAPL", "SPY"]) == "AAPL"
-    assert suggestions.suggest("NVIDIA", ["NVDA", "SPY"]) == "NVDA"
-    # Not a spelling problem at all: no amount of similarity reaches IBIT.
     assert suggestions.suggest("BTCUSD", []) == "IBIT"
-    assert suggestions.suggest("NDX", []) == "QQQ"
-    # Nothing honest to offer is None, not a guess.
     assert suggestions.suggest("EURUSD", []) is None
     assert suggestions.suggest("ZZZZ", ["AAPL", "SPY"]) is None
-    assert suggestions.suggest("", ["AAPL"]) is None
-
     assert "AAPL" in suggestions.refusal("APPL", ["AAPL"])
-    assert "options exchanges" in suggestions.refusal("EURUSD", [])
+    assert "US options exchanges" in suggestions.refusal("EURUSD", [])
     assert "as it trades" in suggestions.refusal("ZZZZ", [])
-    print("suggestion checks passed")
 
+    # THE DROPDOWN ALIASES ONLY POINT AT REAL SYMBOLS. Each is a row the browser
+    # matches literally, so every spelling needs its own entry — and a row
+    # offering something the directory does not hold would be the box promising
+    # what the Add button then refuses.
+    aliases = suggestions.dropdown_aliases()
+    assert aliases["BTCUSDT"] == "IBIT" and aliases["BTC/USD"] == "IBIT", aliases
+    assert aliases["9988.HK"] == "BABA"
+    assert "EURUSD" not in aliases, "an alias with nothing to point at is not a row"
+    print("suggestion checks passed (one entry point, four kinds of wrong)")
 
 def check_rollup_fixture_does_not_depend_on_the_weekday():
     """The rollup fixture means the same thing on every day of the year.
