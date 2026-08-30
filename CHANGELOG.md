@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Internal
+- `app/metrics_core.py` is byte-identical to the hosted product's copy again.
+  It had drifted by 563 lines and eleven functions — the implied-volatility
+  solver, the batched GEX path and max pain over time — while both products
+  went on describing it as shared, which is the worst of the three possible
+  states: a false guarantee exactly where the numbers are computed.
+
 ### Fixed
 - **The checks no longer pass or fail depending on the day of the week.** The
   volume-baseline check built its data out of trading days while the code

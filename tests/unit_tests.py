@@ -1012,6 +1012,136 @@ def check_rollup_fixture_does_not_depend_on_the_weekday():
     print("rollup fixture checks passed (371 anchors, every weekday)")
 
 
+def check_the_batched_gex_path_returns_the_old_numbers():
+    """One matrix per render, and the numbers are the ones from three passes.
+
+    THE DEFECT THIS CLOSES. The heatmap drew a matrix, then asked for the gamma
+    flip, then asked for per-expiry net GEX — and the last two each rebuilt the
+    matrix internally. Three evaluations of the same greeks for one screen, on
+    a screen whose two sliders rerun the whole script on every nudge. Measured
+    on the sibling product, whose matrix is this same function: 854.6 ms to
+    66.7 ms on a 13,160-contract chain.
+
+    WHICH MAKES THIS CHECK THE POINT OF THE WHOLE CHANGE. A faster path that
+    answers differently is not an optimisation, it is a silent change to the
+    numbers people read. So the two paths are held against each other here:
+    exactly equal for the flip, and to a floating-point tolerance for the
+    per-expiry sums, where the difference is summation ORDER — down the strikes
+    rather than over the raw rows — and nothing else.
+
+    `expiry_rollup` is checked against the same reference in the same breath.
+    Nothing in this product calls it yet; it is part of the shared core, so it
+    is here, and an untested function in a file two products read from is worse
+    than an unused one.
+    """
+    moment = pd.Timestamp("2026-08-10 20:00")
+    expiries = ["2026-09-18", "2026-10-16"]
+    rows = []
+    for expiry in expiries:
+        for strike in (90.0, 95.0, 100.0, 105.0, 110.0):
+            for option_type in ("call", "put"):
+                rows.append({
+                    "collected_at": moment,
+                    "expiry": pd.Timestamp(expiry),
+                    "strike": strike,
+                    "option_type": option_type,
+                    "underlying_price": 100.0,
+                    "last_price": 2.0,
+                    "bid": 1.9,
+                    "ask": 2.1,
+                    "volume": 100,
+                    "open_interest": int(400 - abs(strike - 100) * 20),
+                    "implied_volatility": 0.25,
+                    "in_the_money": False,
+                    "delta": None, "gamma": None, "theta": None, "vega": None,
+                })
+    chain = pd.DataFrame(rows)
+
+    matrix = metrics.gex_matrix(chain, as_of=moment, expiries=[pd.Timestamp(e) for e in expiries])
+    assert not matrix.empty and len(matrix.columns) == 2, matrix
+
+    # The flip: the batched read and the function that builds its own matrix.
+    from_matrix = metrics.gamma_flip_from_matrix(matrix)
+    rebuilt = metrics.gamma_flip_price(chain, as_of=moment, expiries=[pd.Timestamp(e) for e in expiries])
+    assert (from_matrix is None) == (rebuilt is None), (from_matrix, rebuilt)
+    if from_matrix is not None:
+        assert abs(from_matrix - rebuilt) < 1e-9, (from_matrix, rebuilt)
+
+    # Per-expiry net GEX, read off the matrix against the path that priced the
+    # chain again. Relative, because the two sum in different orders.
+    read_off = metrics.net_gex_from_matrix(matrix, expiries=[pd.Timestamp(e) for e in expiries])
+    priced_again = metrics.net_gex_by_expiry(
+        chain, as_of=moment, expiries=[pd.Timestamp(e) for e in expiries]
+    )
+    assert list(read_off["expiry"]) == list(priced_again["expiry"]), (read_off, priced_again)
+    assert np.allclose(
+        read_off["net_gex"].to_numpy(dtype=float),
+        priced_again["net_gex"].to_numpy(dtype=float),
+        rtol=1e-6,
+    ), (read_off.to_dict(), priced_again.to_dict())
+    # An expiry asked for and absent from the matrix comes back as 0.0, which is
+    # what the sidebar has always shown for it — not as a missing row.
+    padded = metrics.net_gex_from_matrix(matrix, expiries=[*matrix.columns, pd.Timestamp("2027-01-15")])
+    assert float(padded.iloc[-1]["net_gex"]) == 0.0, padded.to_dict()
+    assert metrics.net_gex_from_matrix(pd.DataFrame(), expiries=["x"]).iloc[0]["net_gex"] == 0.0
+
+    # Both numbers of the rollup, on one row per (moment, expiry).
+    rollup = metrics.expiry_rollup(chain)
+    assert list(rollup.columns) == ["collected_at", "expiry", "max_pain", "net_gex"], rollup.columns
+    assert len(rollup) == 2, rollup.to_dict()
+    assert np.allclose(
+        rollup.sort_values("expiry")["net_gex"].to_numpy(dtype=float),
+        priced_again.sort_values("expiry")["net_gex"].to_numpy(dtype=float),
+        rtol=1e-6,
+    ), rollup.to_dict()
+    assert metrics.expiry_rollup(pd.DataFrame()).empty
+    print("batched GEX checks passed (one matrix, the same numbers)")
+
+
+def check_the_solver_stands_aside_where_it_should():
+    """VIX, and a frame with no spot, keep the source's volatility — and say so.
+
+    NOT AN EDGE CASE, A CORRECTNESS ONE. VIX options are written on VIX
+    FUTURES, not on the index this product would price them against, so
+    inverting a Black-Scholes price for them produces a confident number that
+    means nothing. The futures curve is not something this product collects, so
+    the honest answer is to have no volatility of our own for VIX rather than an
+    invented one.
+
+    THE TWO MARKER COLUMNS ARE PRESENT EITHER WAY, and that is the part worth
+    pinning. A caller forced to write `if "iv_is_ours" in frame` before every
+    use is a caller that will one day forget — and one did, in the sibling
+    product, dying on VIX after twenty minutes of work.
+    """
+    chain = pd.DataFrame([{
+        "collected_at": pd.Timestamp("2026-08-10 20:00"),
+        "expiry": pd.Timestamp("2026-09-18"), "strike": 20.0, "option_type": "call",
+        "underlying_price": 18.0, "last_price": 1.5, "bid": 1.4, "ask": 1.6,
+        "volume": 50, "open_interest": 100, "implied_volatility": 0.85,
+    }])
+
+    refused = metrics.with_solved_iv(chain, metrics.DEFAULT_PRICING, ticker="VIX")
+    assert not refused["iv_is_ours"].any(), refused.to_dict()
+    assert float(refused.iloc[0]["implied_volatility"]) == 0.85, "the source's number stands"
+    assert float(refused.iloc[0]["provider_implied_volatility"]) == 0.85
+
+    # No spot to invert against — an imported database, or a provider that
+    # serves chains without the underlying's price.
+    spotless = metrics.with_solved_iv(chain.drop(columns=["underlying_price"]))
+    assert not spotless["iv_is_ours"].any()
+    assert "provider_implied_volatility" in spotless.columns
+
+    # And where it does run, it runs: the same chain under its own ticker.
+    solved = metrics.with_solved_iv(chain, metrics.DEFAULT_PRICING, ticker="VXX")
+    assert bool(solved.iloc[0]["iv_is_ours"]), solved.to_dict()
+    assert abs(float(solved.iloc[0]["implied_volatility"]) - 0.85) > 1e-6, \
+        "the solved volatility is not the source's, or nothing was solved"
+
+    # An empty frame is a ticker in its first minutes, not an error.
+    assert metrics.with_solved_iv(pd.DataFrame()).empty
+    print("IV solver checks passed (VIX and a missing spot keep the source's number)")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -1045,6 +1175,8 @@ def main():
     check_being_throttled_stops_the_whole_pass()
     check_suggestions_name_a_way_forward()
     check_rollup_fixture_does_not_depend_on_the_weekday()
+    check_the_batched_gex_path_returns_the_old_numbers()
+    check_the_solver_stands_aside_where_it_should()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

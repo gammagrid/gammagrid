@@ -99,25 +99,96 @@ def put_call_ratio(df: pd.DataFrame) -> pd.DataFrame:
     return result.reset_index()
 
 
+def max_pain_series(df: pd.DataFrame) -> pd.DataFrame:
+    """Max pain for EVERY (moment, expiry) in the frame — spec FR5, generalised
+    over time (ярус 2 of R-01.1).
+
+    THE DEFINITION LIVES HERE and `max_pain` below is a lookup into it. Two
+    implementations of "the strike at which sellers pay least" is exactly the
+    kind of pair that agrees on the day it is written and disagrees a year
+    later, and the historical rollup has to be the same number the tab shows or
+    it is not preserving anything.
+
+    THE ARITHMETIC IS A MATRIX PRODUCT rather than a loop over settlement
+    prices, and that is what makes the historical pass affordable. Payout to
+    call holders if the underlying settles at strike Kⱼ is Σᵢ max(Kⱼ − Kᵢ, 0)·cᵢ
+    — a matrix M[j,i] = max(Kⱼ − Kᵢ, 0) times the call open-interest vector.
+    Puts are the same matrix transposed. Since the strike grid is shared by
+    every moment of one expiry, M is built once and multiplied by an entire
+    (strikes × moments) table of open interest in one operation. The loop
+    version was O(strikes²) in Python per moment; over ~100k moment-expiry
+    pairs it does not finish in a useful time.
+
+    ZERO OPEN INTEREST YIELDS NaN, NOT A STRIKE, and this is a deliberate
+    change from the previous behaviour rather than an accident of the rewrite.
+    With no open interest anywhere, every settlement price has a payout of
+    exactly zero, and picking the minimum of all-equal values returned the
+    LOWEST STRIKE IN THE CHAIN — a specific, confident, meaningless number.
+    Newly listed expiries are in that state routinely. On the tab it showed
+    under a "too little open interest" warning; in a stored series it would
+    become a permanent artefact nobody could tell from a real reading.
+    """
+    columns = ["collected_at", "expiry", "max_pain"]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns)
+
+    frame = df[["collected_at", "expiry", "strike", "option_type", "open_interest"]].copy()
+    frame["_oi"] = pd.to_numeric(frame["open_interest"], errors="coerce").fillna(0.0)
+    rows = []
+    for expiry, group in frame.groupby("expiry", sort=True):
+        # Both sides on one strike grid and one moment grid, so the matrix
+        # below is built once per expiry and reused across every moment of it.
+        def side(kind: str) -> pd.DataFrame:
+            part = group[group["option_type"] == kind]
+            if part.empty:
+                return pd.DataFrame()
+            return part.pivot_table(
+                index="strike", columns="collected_at", values="_oi",
+                aggfunc="sum", fill_value=0.0,
+            )
+
+        calls, puts = side("call"), side("put")
+        strikes = sorted(set(calls.index) | set(puts.index))
+        moments = sorted(set(calls.columns) | set(puts.columns))
+        if not strikes or not moments:
+            continue
+        call_oi = calls.reindex(index=strikes, columns=moments, fill_value=0.0).to_numpy(dtype=float)
+        put_oi = puts.reindex(index=strikes, columns=moments, fill_value=0.0).to_numpy(dtype=float)
+        call_oi = np.nan_to_num(call_oi)
+        put_oi = np.nan_to_num(put_oi)
+
+        grid = np.asarray(strikes, dtype=float)
+        payout_matrix = np.maximum(grid[:, None] - grid[None, :], 0.0)
+        payouts = payout_matrix @ call_oi + payout_matrix.T @ put_oi
+        chosen = grid[payouts.argmin(axis=0)]
+        # See the docstring: no open interest, no answer.
+        empty = (call_oi.sum(axis=0) + put_oi.sum(axis=0)) <= 0
+        chosen = np.where(empty, np.nan, chosen)
+        rows.append(pd.DataFrame(
+            {"collected_at": moments, "expiry": expiry, "max_pain": chosen}
+        ))
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(rows, ignore_index=True)[columns]
+
+
 def max_pain(df: pd.DataFrame, expiry: pd.Timestamp) -> float | None:
     """The strike with the minimal total payout by option sellers for the given
-    expiry, based on the latest available snapshot (spec FR5)."""
+    expiry, based on the latest available snapshot (spec FR5).
+
+    A lookup into `max_pain_series`, which holds the definition — see there for
+    why, and for the one behaviour that changed: an expiry carrying no open
+    interest at all now answers None instead of naming its lowest strike."""
+    if df is None or df.empty:
+        return None
     latest_date = df["collected_at"].max()
     snapshot = df[(df["collected_at"] == latest_date) & (df["expiry"] == expiry)]
     if snapshot.empty:
         return None
-
-    strikes = sorted(snapshot["strike"].unique())
-    calls = snapshot[snapshot["option_type"] == "call"].set_index("strike")["open_interest"]
-    puts = snapshot[snapshot["option_type"] == "put"].set_index("strike")["open_interest"]
-
-    def payout_at(settle: float) -> float:
-        call_payout = sum(max(settle - k, 0) * calls.get(k, 0) for k in strikes)
-        put_payout = sum(max(k - settle, 0) * puts.get(k, 0) for k in strikes)
-        return call_payout + put_payout
-
-    payouts = {settle: payout_at(settle) for settle in strikes}
-    return min(payouts, key=payouts.get)
+    answer = max_pain_series(snapshot)
+    if answer.empty or pd.isna(answer["max_pain"].iloc[0]):
+        return None
+    return float(answer["max_pain"].iloc[0])
 
 
 _GREEK_KEYS = ("delta", "gamma", "theta", "vega", "rho", "vanna", "charm")
@@ -418,6 +489,18 @@ def _black_scholes_greeks_batch(
     a chain priced in one call spans everything from days to years (epic С-16).
     `dividend_yield` must match the one used everywhere else for this ticker —
     the point of the epic is that all greeks in the app share one model."""
+    # EVERY NUMERIC INPUT IS COERCED FIRST, and this is not belt-and-braces: a
+    # column that is entirely NULL in the database comes back as dtype `object`,
+    # and object arithmetic here produces an object `d1` that scipy's `norm.pdf`
+    # rejects with an unreadable message about `isnan` and casting rules. The
+    # caller cannot always know — the value may have travelled through a
+    # `where` that quietly changed its dtype — so the function that needs floats
+    # is the one that insists on them.
+    spot = pd.to_numeric(spot, errors="coerce")
+    strike = pd.to_numeric(strike, errors="coerce")
+    years_to_expiry = pd.to_numeric(years_to_expiry, errors="coerce")
+    iv = pd.to_numeric(iv, errors="coerce")
+
     valid = (years_to_expiry > 0) & (iv > 0) & (spot > 0)
     # compute invalid rows on placeholder values (1.0) to avoid log(0)/division
     # by zero — the resulting values are zeroed out below via .where(valid)
@@ -472,6 +555,317 @@ def _black_scholes_greeks_batch(
     return result.where(valid, 0.0)
 
 
+# Tickers whose options this solver must NOT touch, and the reason is not
+# fussiness (пункт 48).
+#
+# VIX options are written on the VIX FUTURE of the matching series, not on the
+# index. Inverting Black-Scholes against the index spot substitutes a different
+# underlying: the answer comes out plausible, is wrong, and is wrong by more
+# the further out the expiry — precisely where a wrong number looks most like
+# an insight. The futures curve is not something this product collects, so the
+# honest position is to have no volatility for VIX rather than an invented one.
+#
+# SPX, XSP and NDX are the opposite case and are deliberately absent from this
+# list: European exercise, cash settled on the index itself, which is exactly
+# what generalised Black-Scholes prices. They are the one place in this product
+# where the model is exact rather than an approximation.
+IV_SOLVER_EXCLUDED_TICKERS = frozenset({"VIX", "VIXW"})
+
+# Bounds for the search. 0.01% and 500% are not opinions about markets, they
+# are the range outside which a solved number says more about the price feed
+# than about volatility.
+_IV_FLOOR = 1e-4
+_IV_CEILING = 5.0
+_IV_NEWTON_STEPS = 12
+_IV_BISECTION_STEPS = 60
+# Below this vega a Newton step divides by roughly nothing and throws the guess
+# somewhere useless. Measured on 56,484 contracts: 0.73% land here, all of them
+# deep out of the money, and the bisection below settles every one.
+_IV_MIN_VEGA = 1e-8
+_IV_TOLERANCE = 1e-6
+# How finely a solved volatility has to be pinned down before we are willing to
+# call it a number: one thousandth. Combined with the price tolerance above,
+# this is what rejects contracts whose price simply does not depend on
+# volatility enough to determine it.
+_IV_RESOLUTION = 1e-3
+
+
+def _bs_price(spot, strike, years, sigma, rate, is_call, dividend_yield):
+    """Generalised Black-Scholes price — the function the solver inverts.
+
+    Deliberately a separate small function rather than a branch inside
+    `_black_scholes_greeks_batch`: the solver calls it a dozen times per
+    contract, and it must compute the price and nothing else.
+    """
+    sqrt_t = np.sqrt(years)
+    d1 = (np.log(spot / strike) + (rate - dividend_yield + 0.5 * sigma**2) * years) / (sigma * sqrt_t)
+    d2 = d1 - sigma * sqrt_t
+    carry = np.exp(-dividend_yield * years)
+    discount = np.exp(-rate * years)
+    return np.where(
+        is_call,
+        spot * carry * norm.cdf(d1) - strike * discount * norm.cdf(d2),
+        strike * discount * norm.cdf(-d2) - spot * carry * norm.cdf(-d1),
+    )
+
+
+def solve_implied_volatility(
+    spot, strike, years, price, is_call, rate, dividend_yield=0.0
+) -> np.ndarray:
+    """The volatility that reproduces this price under our own model (пункт 48).
+
+    WHY THIS EXISTS AT ALL. Two problems, one answer.
+
+    The first is visible today: the paid source serves chains for SPX, XSP, NDX
+    and VIX and serves NO implied volatility for them — 0% coverage on 56,484
+    rows, 28% of everything collected. Dealer gamma is computed FROM implied
+    volatility, so those four tickers have no GEX, no heatmap and no screener
+    at all. Eight people watch them and see a blank page; they came for the
+    feature and did not "fail to engage with it".
+
+    The second arrives with the source change. The rule that forbids mixing
+    providers is right for a number the PROVIDER computes — two of them derive
+    volatility with different models, so splicing draws a move that never
+    happened. It stops applying the moment we compute it ourselves: one model
+    over two price tapes is a single method on different inputs, not two
+    opinions.
+
+    WHAT IT IS SOLVED FROM. The contract's own price. That price is a market
+    observation; the volatility is not, and never was — every provider's
+    "implied volatility" is their inversion of their model against the same
+    kind of price. Doing it ourselves does not add an assumption, it replaces
+    somebody else's undisclosed one with ours, which is written down.
+
+    NEWTON, THEN BISECTION, and both halves earn their place. Newton converges
+    in a handful of steps almost everywhere; where vega is nearly zero it
+    divides by nothing and wanders off. Measured on 56,484 contracts: Newton
+    alone leaves 0.73% unsolved (median vega 2e-4 — deep out-of-the-money
+    strikes), 51 ms; bisection over the bounded interval settles every one of
+    them in a further 6 ms. Dropping them instead would be cheaper and wrong:
+    a gap downstream is indistinguishable from an absence of data.
+
+    NaN where there is nothing to solve — no price, no time left, or a price at
+    or below intrinsic value, where no positive volatility reproduces it. That
+    is a value, not a failure: it means this contract carries no information
+    about volatility, and the callers already treat NaN as "no number here".
+    """
+    spot = np.asarray(spot, dtype=float)
+    strike = np.asarray(strike, dtype=float)
+    years = np.asarray(years, dtype=float)
+    price = np.asarray(price, dtype=float)
+    is_call = np.asarray(is_call, dtype=bool)
+    rate = np.broadcast_to(np.asarray(rate, dtype=float), spot.shape)
+    dividend_yield = np.broadcast_to(np.asarray(dividend_yield, dtype=float), spot.shape)
+
+    carry = np.exp(-dividend_yield * np.maximum(years, 0.0))
+    discount = np.exp(-rate * np.maximum(years, 0.0))
+    # The floor no positive volatility can go below: a European option is worth
+    # at least the discounted forward's intrinsic value. A price at or under it
+    # carries no volatility information — usually a stale print on a strike
+    # nobody has traded today.
+    intrinsic = np.where(
+        is_call,
+        np.maximum(spot * carry - strike * discount, 0.0),
+        np.maximum(strike * discount - spot * carry, 0.0),
+    )
+    solvable = (
+        np.isfinite(spot) & np.isfinite(strike) & np.isfinite(price)
+        & (spot > 0) & (strike > 0) & (years > 0)
+        & (price > intrinsic + 1e-9)
+    )
+    result = np.full(spot.shape, np.nan)
+    if not solvable.any():
+        return result
+
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        sigma = np.full(spot.shape, 0.5)
+        for _ in range(_IV_NEWTON_STEPS):
+            modelled = _bs_price(spot, strike, years, sigma, rate, is_call, dividend_yield)
+            sqrt_t = np.sqrt(years)
+            d1 = (np.log(spot / strike) + (rate - dividend_yield + 0.5 * sigma**2) * years) / (sigma * sqrt_t)
+            vega = spot * carry * norm.pdf(d1) * sqrt_t
+            step = np.where(vega > _IV_MIN_VEGA, (modelled - price) / vega, 0.0)
+            # The step is clipped as well as the result: an unclipped Newton
+            # step on a near-flat vega jumps far outside the bracket and the
+            # next iteration starts from nonsense.
+            sigma = np.clip(sigma - np.clip(step, -1.0, 1.0), _IV_FLOOR, _IV_CEILING)
+
+        residual = np.abs(_bs_price(spot, strike, years, sigma, rate, is_call, dividend_yield) - price)
+        tolerance = np.maximum(_IV_TOLERANCE, np.abs(price) * 1e-6)
+        needs_bisection = solvable & ~(residual <= tolerance)
+
+        # Bisection runs on the rows that need it and nowhere else. Bisecting
+        # the whole array and selecting afterwards costs sixty extra price
+        # evaluations for every contract Newton already solved — measured at
+        # five times the total runtime for no different answer.
+        if needs_bisection.any():
+            idx = np.flatnonzero(needs_bisection)
+            low = np.full(idx.shape, _IV_FLOOR)
+            high = np.full(idx.shape, _IV_CEILING)
+            args = (spot[idx], strike[idx], years[idx], rate[idx], is_call[idx], dividend_yield[idx])
+            for _ in range(_IV_BISECTION_STEPS):
+                mid = 0.5 * (low + high)
+                below = _bs_price(args[0], args[1], args[2], mid, args[3], args[4], args[5]) < price[idx]
+                low = np.where(below, mid, low)
+                high = np.where(below, high, mid)
+            sigma[idx] = 0.5 * (low + high)
+
+        final = np.abs(_bs_price(spot, strike, years, sigma, rate, is_call, dividend_yield) - price)
+
+        # A PRICE THAT MATCHES IS NOT ENOUGH — the number also has to be
+        # DETERMINED by that price, and deep in or out of the money it is not.
+        # Where vega is tiny, a whole range of volatilities reproduces the same
+        # price to within any tolerance we can measure, so the solver converges
+        # happily on an arbitrary member of that range.
+        #
+        # Measured before this gate existed, on 56,484 synthetic contracts whose
+        # true volatility was known: the price matched everywhere, and 55 of the
+        # answers were wrong by as much as 0.34 in volatility. A confident wrong
+        # number is the one failure this product cannot afford — it feeds gamma,
+        # max pain and the whole GEX profile, and nothing downstream can tell.
+        #
+        # So: accept only where the tolerance we solved to pins volatility to
+        # about a thousandth. Everything else is NaN, which the callers already
+        # read as "no number here".
+        sqrt_t = np.sqrt(years)
+        d1_final = (
+            np.log(spot / strike) + (rate - dividend_yield + 0.5 * sigma**2) * years
+        ) / (sigma * sqrt_t)
+        vega_final = spot * carry * norm.pdf(d1_final) * sqrt_t
+        determined = vega_final >= tolerance / _IV_RESOLUTION
+        solved = solvable & (final <= tolerance) & determined
+    result[solved] = sigma[solved]
+    return result
+
+
+def contract_price_for_iv(frame: pd.DataFrame) -> pd.Series:
+    """The price the solver inverts: the middle of the quote, else the last print.
+
+    THE MIDDLE IS THE BETTER NUMBER and the reason is timing. `last_price` is
+    whatever traded most recently — on an illiquid strike that can be hours or
+    days old, and a stale print produces a stale volatility that then looks
+    like today's. Bid and ask are live quotes, and their midpoint is the price
+    at which the contract is currently valued.
+
+    The fallback is not cosmetic: a contract quoted one-sided, or not quoted at
+    all outside the session, has no middle. There the last print is the only
+    thing available, and a slightly stale number beats no number — the callers
+    already show it as the contract's price.
+
+    HOW OFTEN THE MIDDLE ACTUALLY EXISTS, measured 28.08.2026 on two hours of
+    live collection:
+
+        massive   0 of 79,224 rows carry a bid at all
+        yahoo   2,521 of 30,115 rows have both sides quoted (8.4%)
+
+    So today this reads as "the last print, almost always". That is not a
+    reason to drop the branch — it is the reason to keep it and to say the
+    number: the paid source sells chains without quotes, and the volatility we
+    solve from it is therefore an inversion of ITS closing price, with all that
+    implies about staleness on a strike nobody traded. When the source changes,
+    the same code starts using real middles wherever Yahoo supplies them.
+    """
+    bid = pd.to_numeric(frame.get("bid"), errors="coerce")
+    ask = pd.to_numeric(frame.get("ask"), errors="coerce")
+    last = pd.to_numeric(frame.get("last_price"), errors="coerce")
+    if bid is None or ask is None:
+        return last
+    quoted = (bid > 0) & (ask > 0) & (ask >= bid)
+    return ((bid + ask) / 2.0).where(quoted, last)
+
+
+def _unsolved(snapshot: pd.DataFrame) -> pd.DataFrame:
+    """The frame with the marker columns added and nothing else touched.
+
+    For the paths where the solver does not run at all: VIX, whose options are
+    written on the futures rather than the index, and a frame that carries no
+    spot to invert against. Their volatility stays the provider's — which is
+    the honest answer — and the columns downstream reads for still exist.
+    """
+    frame = snapshot.copy()
+    frame["provider_implied_volatility"] = frame.get("implied_volatility")
+    frame["iv_is_ours"] = False
+    return frame
+
+
+def with_solved_iv(
+    snapshot: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING, ticker: str | None = None
+) -> pd.DataFrame:
+    """A chain whose implied volatility is OURS rather than the provider's.
+
+    Applied at the read boundary rather than at write: the stored column keeps
+    the provider's own number, because throwing it away would make "how far
+    apart are the two models" unanswerable forever, and that question is the
+    entire basis on which the source change is being taken.
+
+    The provider's value is kept in `provider_implied_volatility` for anything
+    that wants to compare, and `implied_volatility` — the column every
+    downstream function reads — becomes ours. Nothing below this line has to
+    know the difference, which is the point: gamma, max pain, GEX, the
+    screener and the contract history all keep reading one column.
+
+    THE TWO MARKER COLUMNS ARE ALWAYS PRESENT, including on the paths where
+    nothing is solved. `implied_volatility` is still left exactly as it was for
+    those — that is the substantive promise and it is kept — but a caller that
+    has to write `if "iv_is_ours" in frame` before every use is a caller that
+    will one day forget, and one did: the rebuild died on VIX, the single
+    ticker the solver refuses, after twenty minutes of work.
+
+    So the shape of what comes back does not depend on which branch ran. Whether
+    the numbers are ours does, and that is what the flag is for.
+    """
+    if snapshot is None or snapshot.empty:
+        return snapshot
+    if ticker and str(ticker).upper() in IV_SOLVER_EXCLUDED_TICKERS:
+        return _unsolved(snapshot)
+    if "collected_at" not in snapshot or "underlying_price" not in snapshot:
+        return _unsolved(snapshot)
+
+    frame = snapshot.copy()
+    # PER ROW, not per frame. `years_to_expiry_series` takes ONE instant and is
+    # right for a single snapshot; a history frame carries a different
+    # `collected_at` on every row, and passing the column to it raises. Built
+    # the same way it builds — expiry mapped to its 16:00 New York close — so
+    # the two cannot drift apart on the definition of "time to expiry".
+    expiry_moments = pd.to_datetime(pd.Series(frame["expiry"]).map(_expiry_moment))
+    collected = pd.to_datetime(frame["collected_at"])
+    years = (expiry_moments - collected).dt.total_seconds() / _YEAR_SECONDS
+    price = contract_price_for_iv(frame)
+    solved = solve_implied_volatility(
+        spot=pd.to_numeric(frame["underlying_price"], errors="coerce"),
+        strike=pd.to_numeric(frame["strike"], errors="coerce"),
+        years=years,
+        price=price,
+        is_call=frame["option_type"].astype(str).str.lower().eq("call"),
+        rate=pricing.rate_series(years),
+        dividend_yield=pricing.dividend_yield,
+    )
+    frame["provider_implied_volatility"] = frame.get("implied_volatility")
+    ours = pd.Series(solved, index=frame.index)
+    # WHERE WE COULD NOT SOLVE, THE PROVIDER'S NUMBER STANDS. Falling back is
+    # not a compromise on the "one model" rule — it is what keeps a contract
+    # from vanishing off a chart because its quote was one-sided for an hour.
+    # Which rows are ours is recorded, so nothing has to guess later.
+    # COERCED, AND THE COERCION IS THE FIX FOR A REAL CRASH. A provider column
+    # that is entirely NULL — which is exactly what the paid source returns for
+    # a cash-settled index, 0% IV coverage on SPX, XSP and NDX — arrives from
+    # the database as dtype `object`, not float. `Series.where` takes its dtype
+    # from `other`, so falling back to it turned the WHOLE column to object even
+    # when a single row fell back, and the greeks batch downstream then built an
+    # object array that `norm.pdf` cannot take:
+    #
+    #     TypeError: ufunc 'isnan' not supported for the input types
+    #
+    # Seen on the Screener for SPX. Not reproducible on a ticker whose provider
+    # does supply some implied volatility, which is every ticker except the
+    # indices — that is, the exact case пункт 48 was written for.
+    frame["implied_volatility"] = pd.to_numeric(
+        ours.where(ours.notna(), frame.get("implied_volatility")), errors="coerce"
+    )
+    frame["iv_is_ours"] = ours.notna()
+    return frame
+
+
 def screener_table(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -> pd.DataFrame:
     """Flat table of every contract in the ticker's latest snapshot with DTE
     and the full set of greeks (spec FR25) — the basis for the range-filter
@@ -483,7 +877,14 @@ def screener_table(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -
     if snapshot.empty:
         return pd.DataFrame()
 
-    snapshot["dte"] = (snapshot["expiry"] - snapshot_date).dt.days
+    # COERCED, like the line below it already was. `years_to_expiry_series` maps
+    # every expiry through `_expiry_moment` and so has always tolerated a string;
+    # this subtraction did not, and a string is exactly what `expiry` is before a
+    # chain has been through the database. The two lines sat next to each other
+    # disagreeing about the shape of the same column.
+    snapshot["dte"] = (
+        pd.to_datetime(snapshot["expiry"], errors="coerce") - snapshot_date
+    ).dt.days
     years = years_to_expiry_series(snapshot["expiry"], snapshot_date)
 
     greeks = _black_scholes_greeks_batch(
@@ -505,6 +906,50 @@ def screener_table(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -
         "implied_volatility", *_GREEK_KEYS,
     ]
     return table[columns].sort_values(["expiry", "strike", "option_type"]).reset_index(drop=True)
+
+
+def _contract_gex(frame: pd.DataFrame, pricing: PricingInputs) -> pd.Series:
+    """Dealer GEX for every row of `frame`, obtained in ONE batched greeks call.
+
+    THE QUANTITY IS THE ONE `gamma_exposure_profile` DEFINES, and this is the
+    vectorised way of getting it: gamma from the batch kernel instead of a
+    row-by-row `DataFrame.apply`. The two are already held to agree to 1e-9 by
+    tests/smoke_test.py, and tests/unit_tests.py asserts the matrix built from
+    this against a profile built from the scalar path, so "same number" is
+    checked rather than assumed.
+
+    WHY IT EXISTS AT ALL — measured, эпик С-22. The heatmap built its matrix by
+    calling `gamma_exposure_profile` once per expiry, and each of those calls
+    priced its expiry through `apply`: 374 ms for ten expiries of a local SPY
+    chain (13,160 rows), and 1271 ms when the user dragged the slider to all
+    thirty-one. Through this it is 15 ms and 40 ms — the same numbers to the
+    last bit, max |Δ| = 0 over the whole matrix. Nothing about the model
+    changed; only how many Python-level calls it takes to evaluate it.
+
+    Time to expiry is per row, taken from `collected_at`, because a frame can
+    span many moments (`net_gex_series` passes exactly such a frame). For a
+    single-moment frame that reduces to the scalar the profile uses.
+
+    Sign convention, unchanged: puts contribute negatively — the "dealers are
+    net long puts / net short calls versus retail flow" heuristic, which does
+    NOT reflect actual market-maker positioning.
+    """
+    spot = pd.to_numeric(frame["underlying_price"], errors="coerce")
+    collected = pd.to_datetime(frame["collected_at"])
+    # Per row, the same way `years_to_expiry` builds it — expiry mapped to its
+    # 16:00 New York close.
+    expiry_moments = pd.to_datetime(pd.Series(frame["expiry"]).map(_expiry_moment))
+    years = (expiry_moments - collected).dt.total_seconds() / _YEAR_SECONDS
+    greeks = _black_scholes_greeks_batch(
+        spot, pd.to_numeric(frame["strike"], errors="coerce"), years,
+        pd.to_numeric(frame["implied_volatility"], errors="coerce"),
+        pricing.rate_series(years), frame["option_type"],
+        dividend_yield=pricing.dividend_yield,
+    )
+    contract_gex = greeks["gamma"] * pd.to_numeric(
+        frame["open_interest"], errors="coerce"
+    ).fillna(0) * 100 * spot
+    return contract_gex.where(frame["option_type"] != "put", -contract_gex)
 
 
 def gamma_exposure_profile(
@@ -585,32 +1030,118 @@ def gex_matrix(
     expiries: list | None = None,
 ) -> pd.DataFrame:
     """GEX matrix strike × expiry for a single snapshot (spec section 12, GEX
-    Heatmap). Built by reusing `gamma_exposure_profile` in a loop over
-    expiries; needs no new data — one snapshot already contains the full chain.
+    Heatmap). Needs no new data — one snapshot already contains the full chain.
     `expiries=None` — every expiry in the snapshot; the UI usually passes only
     the visible subset (a ticker can have 30+ expiries including far-dated
-    LEAPS — computing a profile for all of them is wasteful when only part is
-    shown). Index — strike descending (top to bottom, as in a conventional
-    heatmap), columns — expiry."""
+    LEAPS). Index — strike descending (top to bottom, as in a conventional
+    heatmap), columns — expiry.
+
+    Priced through `_contract_gex`, one batched call for the whole shown subset.
+    It used to loop over `gamma_exposure_profile`, one `apply()` per expiry, and
+    that loop was the single most expensive thing in the most-visited view —
+    374 ms of a 855 ms render on a local SPY chain, against 32 ms of database
+    time (эпик С-22). The numbers it returns did not change: max |Δ| = 0 across
+    the whole matrix, and a test asserts the two paths against each other."""
     snapshot_date = as_of if as_of is not None else df["collected_at"].max()
+    snapshot = df[df["collected_at"] == snapshot_date]
     if expiries is None:
-        expiries = sorted(df[df["collected_at"] == snapshot_date]["expiry"].unique())
-
-    profiles = []
-    for expiry in expiries:
-        profile = gamma_exposure_profile(df, expiry, pricing, as_of=snapshot_date)
-        if not profile.empty:
-            profiles.append(profile.assign(expiry=expiry))
-
-    if not profiles:
+        expiries = sorted(snapshot["expiry"].unique())
+    # Narrowed BEFORE the greeks are priced, not after: the UI usually shows ten
+    # of thirty-plus expiries, and pricing the rest is work whose result is
+    # thrown away. This is also why the loop over `gamma_exposure_profile` is
+    # gone — one batched call for the shown subset instead of one apply() per
+    # expiry (эпик С-22).
+    snapshot = snapshot[snapshot["expiry"].isin(expiries)]
+    if snapshot.empty:
         return pd.DataFrame()
 
-    combined = pd.concat(profiles, ignore_index=True)
+    combined = pd.DataFrame({
+        "strike": snapshot["strike"],
+        "expiry": snapshot["expiry"],
+        "gex": _contract_gex(snapshot, pricing),
+    })
     # fill_value=0, not NaN: if an expiry has no listing at a given strike,
     # dealer exposure there is genuinely zero (not "unknown") — this removes
     # visual "holes" in the matrix rather than merely masking them.
     matrix = combined.pivot_table(index="strike", columns="expiry", values="gex", aggfunc="sum", fill_value=0)
     return matrix.sort_index(ascending=False)
+
+
+def net_gex_series(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -> pd.DataFrame:
+    """Net GEX for EVERY (moment, expiry) in the frame (ярус 2 of R-01.1).
+
+    Same quantity `net_gamma_exposure(gamma_exposure_profile(…))` produces for
+    one snapshot, computed for a frame that spans many. It has to be the same
+    number: the stored history and the live tab draw one line between them, and
+    a series that changes definition halfway is worse than one that stops.
+
+    THE DIFFERENCE IS ONLY IN HOW GAMMA IS OBTAINED. `gamma_exposure_profile`
+    calls the scalar greeks row by row through `DataFrame.apply`, which is fine
+    for one expiry of one snapshot and hopeless over 14.5M rows. This calls
+    `_black_scholes_greeks_batch` once for the whole frame — and those two are
+    already held to agree to 1e-9 by tests/smoke_test.py, so "same number" is
+    asserted rather than assumed.
+
+    Sign convention, unchanged: puts contribute negatively — the "dealers are
+    net long puts / net short calls versus retail flow" heuristic, which does
+    NOT reflect actual market-maker positioning.
+    """
+    columns = ["collected_at", "expiry", "net_gex"]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns)
+
+    frame = df.copy()
+    collected = pd.to_datetime(frame["collected_at"])
+    contract_gex = _contract_gex(frame, pricing)
+    grouped = contract_gex.groupby([collected, frame["expiry"]]).sum()
+    result = grouped.reset_index()
+    result.columns = columns
+    return result
+
+
+def expiry_rollup(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -> pd.DataFrame:
+    """Ярус 2 in one call: max pain and net GEX per (moment, expiry).
+
+    The two numbers are stored on one row, so they are computed together — and
+    joined with an OUTER join on purpose. An expiry can have max pain and no
+    GEX (no time left: gamma is zero by definition, not missing) and the
+    reverse is possible too (open interest all on one side). Dropping either
+    case would lose a real reading; a row with one column NULL says exactly
+    what happened.
+    """
+    pain = max_pain_series(df)
+    gex = net_gex_series(df, pricing)
+    if pain.empty and gex.empty:
+        return pd.DataFrame(columns=["collected_at", "expiry", "max_pain", "net_gex"])
+    merged = pain.merge(gex, on=["collected_at", "expiry"], how="outer")
+    return merged.sort_values(["collected_at", "expiry"], ignore_index=True)
+
+
+def net_gex_from_matrix(matrix: pd.DataFrame, expiries: list | None = None) -> pd.DataFrame:
+    """The heatmap's per-expiry net GEX, read off a matrix that already exists.
+
+    The matrix holds GEX per (strike, expiry) with zeros where an expiry has no
+    listing at a strike, so its column sums ARE the per-expiry net figures —
+    the same quantity `net_gex_by_expiry` computes, without pricing the chain a
+    second time. The view draws both, and эпик С-22 measured what that repetition
+    cost: three passes over one chain (matrix, flip, sidebar) where one does.
+
+    Summation order differs from `net_gex_series` — down the strikes rather than
+    over the raw rows — so the two agree to floating-point tolerance rather than
+    bit-for-bit; a test pins that at 1e-6 relative.
+
+    An expiry that was asked for and is not in the matrix comes back carrying
+    0.0, which is what the sidebar has always shown for it.
+    """
+    if expiries is None:
+        expiries = list(matrix.columns)
+    if matrix.empty:
+        return pd.DataFrame({"expiry": expiries, "net_gex": [0.0] * len(expiries)})
+    sums = matrix.sum(axis=0)
+    return pd.DataFrame({
+        "expiry": expiries,
+        "net_gex": [float(sums.get(expiry, 0.0)) for expiry in expiries],
+    })
 
 
 def net_gex_by_expiry(
@@ -621,18 +1152,25 @@ def net_gex_by_expiry(
 ) -> pd.DataFrame:
     """Net GEX per expiry of the snapshot (GEX Heatmap sidebar) — same as
     `net_gamma_exposure`, but for all expiries at once (or for the given
-    subset — see `gex_matrix`)."""
+    subset — see `gex_matrix`).
+
+    A projection of `net_gex_series` onto one moment. An expiry that was asked
+    for and has no rows in the snapshot still comes back, carrying 0.0, which
+    is what the heatmap's sidebar has always shown for it."""
     snapshot_date = as_of if as_of is not None else df["collected_at"].max()
+    snapshot = df[df["collected_at"] == snapshot_date]
     if expiries is None:
-        expiries = sorted(df[df["collected_at"] == snapshot_date]["expiry"].unique())
-    rows = [
-        {
-            "expiry": expiry,
-            "net_gex": net_gamma_exposure(gamma_exposure_profile(df, expiry, pricing, as_of=snapshot_date)),
-        }
-        for expiry in expiries
-    ]
-    return pd.DataFrame(rows)
+        expiries = sorted(snapshot["expiry"].unique())
+    else:
+        # Same reason as in `gex_matrix`: the answer for one expiry does not
+        # depend on any other, so pricing the whole chain to report ten of its
+        # expiries is work nobody asked for (эпик С-22).
+        snapshot = snapshot[snapshot["expiry"].isin(expiries)]
+    series = net_gex_series(snapshot, pricing).set_index("expiry")["net_gex"]
+    return pd.DataFrame({
+        "expiry": expiries,
+        "net_gex": [float(series.get(expiry, 0.0)) for expiry in expiries],
+    })
 
 
 def dealer_walls(
@@ -673,7 +1211,17 @@ def gamma_flip_price(
     re-price greeks on a grid of hypothetical underlying prices (more accurate
     but substantially more expensive) — the same class of assumption already
     used for net GEX (spec FR6/FR15)."""
-    matrix = gex_matrix(df, as_of, pricing, expiries=expiries)
+    return gamma_flip_from_matrix(gex_matrix(df, as_of, pricing, expiries=expiries))
+
+
+def gamma_flip_from_matrix(matrix: pd.DataFrame) -> float | None:
+    """The flip level of a matrix that has already been built.
+
+    Same walk over the cumulative profile as `gamma_flip_price`, which is now
+    this function plus one `gex_matrix` call. Split because the heatmap draws
+    the matrix and the flip together: computing the matrix twice was 15 ms of a
+    88 ms render even after the batched rewrite, and the whole of эпик С-22 is
+    about not doing the same arithmetic three times per screen."""
     if matrix.empty:
         return None
 
@@ -807,7 +1355,22 @@ def iv_weighted_average(df: pd.DataFrame) -> pd.DataFrame:
     # Grouping still happens over every row, so a moment where nothing is
     # priceable keeps its place in the series and carries NaN. Dropping it
     # instead would draw a straight line across the gap.
-    priced = df.assign(_priced=df["expiry"] >= df["collected_at"].dt.normalize())
+    # COERCED, BECAUSE THIS FUNCTION IS CALLED FROM BOTH SIDES OF THE PRODUCT.
+    # Read back from the database, `expiry` is a date. Straight from a provider
+    # — which is where the collector calls this from, before anything is stored
+    # — it is a STRING, and in pandas 3 a string column is a real `str` dtype
+    # that refuses to be compared with a datetime at all:
+    #
+    #     TypeError: Invalid comparison between dtype=str and DatetimeArray
+    #
+    # On stage that failed for every ticker in the pass, and it failed QUIETLY:
+    # the collector swallows anything this raises so that a chain in hand is
+    # never lost to a rollup, so the only symptom was the stored average
+    # staying the provider's. Пункт 48 was off entirely and the screens looked
+    # normal.
+    expiry = pd.to_datetime(df["expiry"], errors="coerce")
+    collected = pd.to_datetime(df["collected_at"], errors="coerce")
+    priced = df.assign(_priced=expiry >= collected.dt.normalize())
     result = priced.groupby("collected_at").apply(weighted_avg, include_groups=False)
     return result.reset_index(name="iv_weighted_avg")
 
