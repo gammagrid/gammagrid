@@ -39,6 +39,33 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.5.2 → unreleased
+
+**Risk: safe. One additive migration. Nothing collected is rewritten, nothing
+is deleted, and an older version still opens the same database afterwards.**
+
+`0006_own_implied_volatility.sql` adds one nullable column to
+`snapshot_iv_summary` and one partial index. It touches no chain rows. An
+older version neither writes nor reads the column, so going back works and
+costs nothing.
+
+**What you may notice on the first run.**
+
+- **Volatility numbers move, everywhere.** The application now solves implied
+  volatility from the contract's price instead of reading the data source's
+  own figure — which Yahoo leaves missing on part of a chain and computes
+  differently on the rest. Every greek, the GEX profile, the screener's
+  filters and the surface are built on that column, so they all shift a
+  little. Nothing about your collected rows changed; the source's own value is
+  still stored beside ours.
+- **The Volatility chart says that its earliest points are still catching
+  up.** That chart reads a stored average, and every point of it written
+  before this version holds the source's number. There is nothing to run: the
+  collector recomputes them in the background, newest first, a batch per pass,
+  and the line disappears when there are none left. On a year of
+  fifteen-minute collection this takes a few dozen collection cycles. Turning
+  the schedule off simply pauses it.
+
 ## v0.5.1 → v0.5.2
 
 **Risk: safe. No migration, no schema change, nothing rewritten and nothing

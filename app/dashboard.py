@@ -717,7 +717,35 @@ history_days = None if load_full_history else config.SNAPSHOT_HISTORY_DAYS
 # one screen — see db.active_source for why implied volatility makes that a
 # correctness problem and not a tidiness one.
 page_source = db.active_source(conn, selected_ticker)
-latest_df = db.get_latest_snapshot(conn, selected_ticker, source=page_source)
+
+
+def with_our_iv(frame):
+    """Every chain this page draws goes through here.
+
+    THE VOLATILITY IS SOLVED FROM THE PRICE, not taken from the data source.
+    Yahoo — the source this product ships with, and for most installations the
+    only one — leaves implied volatility missing on part of a chain and reports
+    numbers that do not reproduce the quoted price on another part. Every greek,
+    the GEX profile, the screener's filters and the surface are built on that
+    column, so a chain with holes in it is a screen with holes in it.
+
+    Applied after the read rather than inside it, and applied to a frame that
+    was read for one moment or one contract: solving costs single-digit
+    milliseconds on a chain of a few thousand contracts, which is cheap enough
+    to redo on every rerun and far cheaper than a cache keyed on something that
+    can go stale.
+
+    WHERE THE PRICE DOES NOT DETERMINE A VOLATILITY, THE SOURCE'S NUMBER
+    STANDS. Refusing there would empty part of a liquid chain off the screener
+    and the profile, and a hole reads as a broken product rather than as an
+    honest silence. Which rows are ours is recorded in `iv_is_ours`, and the
+    source's own number is kept in `provider_implied_volatility` — throwing it
+    away would make "how far apart are the two models" unanswerable.
+    """
+    return metrics.with_solved_iv(frame, metrics.DEFAULT_PRICING, ticker=selected_ticker)
+
+
+latest_df = with_our_iv(db.get_latest_snapshot(conn, selected_ticker, source=page_source))
 
 # What the collector last believed about the market, phrased by the calendar.
 # The app never asks the provider itself: a page render has no business making a
@@ -1009,7 +1037,9 @@ if active_view == "GEX Heatmap":
     # The chosen moment's chain, fetched by equality on collected_at. Everything
     # this view draws — the matrix, the walls, the flip, per-expiry net GEX — is
     # a function of one moment, and every metric below already takes `as_of`.
-    snapshot_df = db.get_snapshots_at(conn, selected_ticker, [as_of], source=page_source)
+    snapshot_df = with_our_iv(
+        db.get_snapshots_at(conn, selected_ticker, [as_of], source=page_source)
+    )
     if snapshot_df.empty:
         # The run log is a superset of the data: a pass can be recorded as a
         # success and still have left nothing for this ticker. Before the list
@@ -1197,6 +1227,21 @@ if active_view == "Volatility (IV)":
     # expire and move to the archive.
     iv_avg = db.get_iv_weighted_average(conn, selected_ticker, days=history_days, source=page_source)
     st.line_chart(with_viewer_index(iv_avg)["iv_weighted_avg"], color=BRAND_PURPLE)
+    # THE ONE PLACE A READER COULD SEE TWO MODELS IN ONE PICTURE. Everything
+    # else on this page is solved as it is drawn, so it is ours all the way
+    # back; this chart is read from a rollup, and every point written before
+    # the release that changed the model holds the data source's number. The
+    # collector rewrites them in the background, newest first, so the line says
+    # what is left rather than warning about something the reader cannot act on
+    # — and it disappears by itself when there is nothing left to say.
+    pending_moments = db.iv_summary_pending(conn, selected_ticker, source=page_source)
+    if pending_moments:
+        st.caption(
+            f"The earliest {pending_moments:,} point(s) of this chart still carry the data "
+            "source's own volatility, from before this product started solving it from the "
+            "contract's price. They are being recomputed in the background, a batch per "
+            "collection — nothing to run, and the rest of this page is unaffected."
+        )
     with st.expander("ℹ️ How to read this"):
         st.write(
             "Rising average IV usually precedes an anticipated move (earnings, news) or "
@@ -1328,10 +1373,10 @@ if active_view == "Contract":
     # than the limit it trims it to nothing. The page would then say "no history"
     # about a contract whose history is sitting in the table.
     is_expired = pd.Timestamp(opt_expiry) < pd.Timestamp(dt.date.today())
-    contract_df = db.get_contract_history(
+    contract_df = with_our_iv(db.get_contract_history(
         conn, selected_ticker, opt_expiry, opt_strike, opt_type,
         days=None if is_expired else history_days, source=page_source,
-    )
+    ))
     if is_expired and not contract_df.empty:
         first, last = contract_df["collected_at"].min(), contract_df["collected_at"].max()
         st.caption(
@@ -1502,10 +1547,10 @@ if active_view == "Screener":
                 )
                 render_option_detail(
                     conn,
-                    db.get_contract_history(
+                    with_our_iv(db.get_contract_history(
                         conn, selected_ticker, picked["expiry"], picked["strike"],
                         picked["option_type"], days=history_days, source=page_source,
-                    ),
+                    )),
                     selected_ticker, get_tracked(),
                     picked["expiry"], picked["strike"], picked["option_type"],
                     key_prefix="screener",

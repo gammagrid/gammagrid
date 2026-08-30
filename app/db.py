@@ -332,13 +332,26 @@ def insert_snapshot(
         # the number then has one definition instead of two that must be kept
         # in step. Reading option_snapshots alone is correct at collection time
         # and would not be in a rebuild — nothing has been archived yet.
+        #
+        # THE SOURCE'S OWN NUMBER, AND `iv_model` STAYS NULL TO SAY SO. Ours is
+        # solved from the contract's price and cannot be written in SQL; it
+        # arrives moments later, from app/iv_backfill.py, which treats a NULL
+        # here exactly as it treats the rows collected before that existed.
+        # Writing the source's number first rather than leaving the row absent
+        # is what keeps the chart whole if the solver never gets to it.
+        #
+        # The conflict branch clears `iv_model` for the same reason it rewrites
+        # the average: a moment collected twice has been recomputed from the
+        # provider column, and a stamp saying the number is ours would then
+        # describe the previous one.
         cur.execute(
             f"""INSERT INTO snapshot_iv_summary (ticker, source, collected_at, iv_weighted_avg)
                 SELECT %(ticker)s, %(source)s, %(at)s, {_IV_WEIGHTED_AVG_SQL}
                 FROM option_snapshots
                 WHERE ticker = %(ticker)s AND source = %(source)s AND collected_at = %(at)s
                 ON CONFLICT (ticker, source, collected_at)
-                DO UPDATE SET iv_weighted_avg = EXCLUDED.iv_weighted_avg""",  # noqa: S608
+                DO UPDATE SET iv_weighted_avg = EXCLUDED.iv_weighted_avg,
+                              iv_model = NULL""",  # noqa: S608
             {"ticker": ticker, "source": source, "at": collected_at},
         )
 
@@ -1073,6 +1086,83 @@ def get_iv_weighted_average(
         params=params,
         parse_dates=["collected_at"],
     )
+
+
+def iv_summary_pending(
+    conn: psycopg.Connection, ticker: str, source: str | None = None
+) -> int:
+    """How many stored averages still carry the data source's volatility.
+
+    Asked on the volatility screen so the caption there can be a fact rather
+    than a warning that never goes away, and asked by the worker so a machine
+    with nothing left to do stops looking. One index-only read of the partial
+    index, which is empty once the backfill has finished — see migration 0006.
+    """
+    scoped = _scope(conn, ticker, source)
+    where = "ticker = %(ticker)s AND iv_model IS NULL"
+    if scoped is not None:
+        where += " AND source = %(source)s"
+    row = conn.execute(
+        f"SELECT count(*) FROM snapshot_iv_summary WHERE {where}",  # noqa: S608
+        {"ticker": ticker.upper(), "source": scoped},
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def iv_summary_pending_moments(
+    conn: psycopg.Connection, ticker: str, limit: int, source: str | None = None
+) -> list:
+    """The moments whose stored average is still the source's, NEWEST FIRST.
+
+    The order is the whole user-visible design of the backfill. Both ends of
+    the chart converge on the same numbers eventually, but only one of them
+    does it where people are looking: recomputing forwards from the oldest
+    collection leaves the recent weeks — the part anybody actually reads —
+    showing the source's model for as long as the catch-up takes.
+    """
+    scoped = _scope(conn, ticker, source)
+    where = "ticker = %(ticker)s AND iv_model IS NULL"
+    if scoped is not None:
+        where += " AND source = %(source)s"
+    rows = conn.execute(
+        f"""SELECT collected_at FROM snapshot_iv_summary WHERE {where}
+            ORDER BY collected_at DESC LIMIT %(limit)s""",  # noqa: S608
+        {"ticker": ticker.upper(), "source": scoped, "limit": limit},
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def store_own_iv_weighted_average(
+    conn: psycopg.Connection, ticker: str, source: str | None, values: dict
+) -> int:
+    """Write averages solved by our own model, stamped as ours.
+
+    `values` is {moment: average or None}. A moment whose average could not be
+    computed — a chain with no volume left to weight by — is stamped all the
+    same, with the average it already had: the alternative is asking the same
+    unanswerable question on every pass for the life of the installation.
+
+    Scoped by source like every other write here. The rollup's key includes it,
+    and a moment collected by two providers is two different numbers.
+    """
+    scoped = _scope(conn, ticker, source)
+    if not values:
+        return 0
+    where = "ticker = %(ticker)s AND collected_at = %(at)s"
+    if scoped is not None:
+        where += " AND source = %(source)s"
+    written = 0
+    with conn.transaction(), conn.cursor() as cur:
+        for moment, average in values.items():
+            cur.execute(
+                f"""UPDATE snapshot_iv_summary
+                    SET iv_weighted_avg = COALESCE(%(avg)s, iv_weighted_avg),
+                        iv_model = 'own'
+                    WHERE {where}""",  # noqa: S608
+                {"ticker": ticker.upper(), "source": scoped, "at": moment, "avg": average},
+            )
+            written += cur.rowcount
+    return written
 
 
 def rebuild_volume_stats(

@@ -161,7 +161,9 @@ gets longer.
 - **Max Pain** for any expiry
 - **Open interest**, including day-over-day OI Delta sorted by the size of the move
 - **IV surface** (3D volatility surface) plus per-expiry skew and
-  volume-weighted average IV over time
+  volume-weighted average IV over time — with implied volatility **solved from
+  the contract's price** rather than taken from the source, which leaves it
+  missing on part of a chain and computes it differently on the rest
 - **Options screener** with the full set of greeks (delta, gamma, theta, vega,
   rho, vanna, charm) and range filters — not just delta/IV like most free tools
 - **Unusual activity** detection — flags contracts whose volume is a
@@ -320,6 +322,13 @@ when. Retrying through a block is what keeps a block in place.
 **Coverage is US options only.** A non-US listing is not a failure you can fix
 by retrying or by waiting: the source returns no expiries for it at all (see
 the [FAQ](#faq) for the measurement and for the ADR route).
+
+**Implied volatility here is ours, not Yahoo's.** The source omits it on part
+of a chain and reports figures that do not reproduce the quoted price on
+another part, and every greek on every screen is built on that number — so the
+application inverts the price itself. Where a price does not determine a
+volatility the source's own value still stands, because a hole in a liquid
+chain reads as a broken product rather than as an honest silence.
 
 ## Want it hosted, with zero setup?
 

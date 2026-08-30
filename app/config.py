@@ -144,6 +144,19 @@ BYTES_PER_SNAPSHOT_ROW = 214
 # underlying traded last autumn than about today.
 UNUSUAL_HISTORY_DAYS = 60
 
+# How many stored volatility averages one pass rewrites with our own model, per
+# ticker. The stored rollup is the only number in this product that was written
+# by the data source's model rather than ours, and the worker walks it in the
+# background rather than asking anybody to run anything — see app/iv_backfill.py.
+#
+# Sized so that a pass is never the reason a cycle is late. One moment costs a
+# read of that chain plus the solve — single-digit milliseconds for a chain of a
+# few thousand contracts — so fifty is well under a second even on a small
+# machine, and a year of collection at fifteen-minute intervals is worked
+# through in a few dozen cycles. Nothing waits on it: the screens already show
+# our number, and only the historical average is catching up.
+IV_BACKFILL_MOMENTS_PER_PASS = int(os.environ.get("IV_BACKFILL_MOMENTS_PER_PASS", "50"))
+
 # Contracts expired longer ago than this move to option_snapshots_archive.
 # Nothing is deleted; the point is only to keep the table every live query
 # reads from carrying years of contracts that can never trade again.

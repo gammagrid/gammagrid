@@ -24,7 +24,7 @@ import logging
 import sys
 import time
 
-from app import collector, config, db, market_calendar, providers
+from app import collector, config, db, iv_backfill, market_calendar, providers
 
 log = logging.getLogger("worker")
 
@@ -134,6 +134,32 @@ def rebuild_stale_volume_stats(conn) -> None:
         log.info("Rebuilt volume statistics for %s: %s contract(s).", ticker, written)
 
 
+def catch_up_own_iv(conn) -> int:
+    """Move a batch of stored volatility averages onto our own model.
+
+    THE UPGRADE PATH FOR ONE NUMBER, and the reason it is a background task
+    rather than a documented command. Every screen already solves volatility
+    from the contract's price as it draws; the volume-weighted average per
+    collection is stored, and every row written before this release holds the
+    data source's number instead. A step in the middle of that chart is a
+    question every reader has to be told the answer to, and a command in
+    UPGRADING.md is a command almost nobody runs.
+
+    So it happens here, bounded, until there is nothing left — after which this
+    costs one index-only read per pass against an index that is empty. A
+    machine switched off for a month catches up on its next start, which is the
+    same property archiving and the volume baseline already rely on.
+
+    Returns how many averages were rewritten, for the log.
+    """
+    rewritten = iv_backfill.backfill_watchlist(conn)
+    if rewritten:
+        log.info(
+            "Recomputed %s stored volatility average(s) with our own model.", rewritten
+        )
+    return rewritten
+
+
 def run_forever() -> None:
     log.info("Collector worker started. Interval is read from the app on every cycle.")
     while True:
@@ -175,6 +201,7 @@ def run_forever() -> None:
                 archive_if_due(conn)
                 collected = collect_once(conn)
                 rebuild_stale_volume_stats(conn)
+                catch_up_own_iv(conn)
                 # The day's slot is spent only once something was stored: a
                 # provider that was briefly unreachable would otherwise cost the
                 # whole day's snapshot, and a closed day has no second chance.
@@ -204,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             archive_if_due(conn)
             print(f"Collected {collect_once(conn)} ticker(s).")
+            print(f"Recomputed {catch_up_own_iv(conn)} stored volatility average(s).")
         finally:
             conn.close()
         return 0

@@ -17,7 +17,7 @@ import testdb  # noqa: E402
 
 testdb.configure()
 
-from app import collector, config, db, market_calendar, metrics  # noqa: E402
+from app import collector, config, db, iv_backfill, market_calendar, metrics  # noqa: E402
 
 EXPIRY = "2026-09-18"
 STRIKES = [90, 95, 100, 105, 110]
@@ -449,6 +449,128 @@ def check_narrow_reads_and_rollups(conn):
                       "contract_volume_stats", "collection_runs"):
             cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
     print("Narrow-read and rollup checks passed (stored numbers match the shared functions)\n")
+
+
+def check_stored_volatility_catches_up_to_our_model(conn):
+    """The stored average stops being the data source's, without anybody asking.
+
+    THREE PROPERTIES, and the middle one is the whole reason this is a
+    background task rather than a command in UPGRADING.md.
+
+    1. A moment written by the collector carries the source's number and is
+       marked as not ours — because that half of the rollup is computed in SQL,
+       over a column the source filled in.
+    2. One pass of the backfill replaces it with the number our own model
+       produces from the same rows, and `metrics.iv_weighted_average` over the
+       solved chain is the definition it has to match. Nothing was run by hand.
+    3. Running it again changes nothing and asks for nothing: the pending set
+       is empty, so an installation that has caught up pays one index-only read
+       per cycle forever rather than re-solving its whole history.
+
+    THE FIXTURE IS BUILT SO THE TWO MODELS DISAGREE, deliberately. The source's
+    volatility here (0.20 and 0.60) is not what these prices imply under
+    Black-Scholes, which is exactly the situation Yahoo puts a real chain in —
+    so a backfill that silently did nothing would show up as the two averages
+    being equal rather than as a passing check.
+    """
+    ticker = "IVCATCHUP"
+    with conn.cursor() as cur:
+        for table in ("option_snapshots", "option_snapshots_archive", "snapshot_iv_summary",
+                      "contract_registry", "collection_runs"):
+            cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
+
+    expiry = (dt_date.today() + timedelta(days=60)).isoformat()
+    moments = [datetime.utcnow().replace(microsecond=0) - timedelta(days=n) for n in (2, 1, 0)]
+    chain = pd.DataFrame([
+        {"expiry": expiry, "strike": 95.0, "option_type": "call", "last_price": 8.10,
+         "bid": 8.00, "ask": 8.20, "volume": 300, "open_interest": 500,
+         "implied_volatility": 0.20, "in_the_money": True},
+        {"expiry": expiry, "strike": 105.0, "option_type": "put", "last_price": 7.40,
+         "bid": 7.30, "ask": 7.50, "volume": 100, "open_interest": 400,
+         "implied_volatility": 0.60, "in_the_money": True},
+    ])
+    for moment in moments:
+        db.insert_snapshot(conn, ticker, moment, 100.0, chain)
+
+    assert db.iv_summary_pending(conn, ticker) == len(moments), "the collector writes the source's number"
+    provider_avg = db.get_iv_weighted_average(conn, ticker, days=None)
+    assert len(provider_avg) == len(moments), provider_avg.to_dict()
+    # The SQL definition, pinned so that "ours differs from theirs" below cannot
+    # be satisfied by the stored number being wrong in some other way:
+    # 0.20*300 + 0.60*100 over 400.
+    expected_provider = (0.20 * 300 + 0.60 * 100) / 400
+    assert abs(float(provider_avg.iloc[-1]["iv_weighted_avg"]) - expected_provider) < 1e-12
+
+    # NEWEST FIRST, because that is the half of the chart people read. One
+    # moment at a time, so the order is observable rather than asserted about.
+    written = iv_backfill.backfill_ticker(conn, ticker, limit=1)
+    assert written == 1, written
+    assert db.iv_summary_pending(conn, ticker) == len(moments) - 1
+    after_one = db.get_iv_weighted_average(conn, ticker, days=None)
+    assert abs(float(after_one.iloc[-1]["iv_weighted_avg"]) - expected_provider) > 1e-6, \
+        "the newest point must be ours now, and our model does not agree with the source's"
+    assert abs(float(after_one.iloc[0]["iv_weighted_avg"]) - expected_provider) < 1e-12, \
+        "the oldest point has not been reached yet and must be untouched"
+
+    # The rest of the history, and the number it lands on is the shared
+    # function's over the solved chain — not a second definition living here.
+    iv_backfill.backfill_ticker(conn, ticker)
+    assert db.iv_summary_pending(conn, ticker) == 0
+    stored = db.get_iv_weighted_average(conn, ticker, days=None)
+    chains = db.get_snapshots_at(conn, ticker, moments)
+    expected = metrics.iv_weighted_average(
+        metrics.with_solved_iv(chains, metrics.DEFAULT_PRICING, ticker=ticker)
+    )
+    merged = expected.merge(stored, on="collected_at", suffixes=("_metrics", "_stored"))
+    assert len(merged) == len(moments), merged.to_dict()
+    assert np.allclose(
+        merged["iv_weighted_avg_metrics"].to_numpy(dtype=float),
+        merged["iv_weighted_avg_stored"].to_numpy(dtype=float),
+        rtol=1e-12, equal_nan=True,
+    ), merged.to_dict()
+
+    # IDEMPOTENT AND, MORE IMPORTANTLY, FINISHED. A second run must not read a
+    # single chain: an installation that has caught up would otherwise re-solve
+    # its whole history on every collection, forever, to write the same numbers.
+    assert iv_backfill.backfill_ticker(conn, ticker) == 0
+    # The watchlist sweep, which is what the worker actually calls, is asked
+    # here for its effect on THIS ticker only. Its return value counts every
+    # ticker in the installation — including whatever the other checks left
+    # behind and whatever the owner is really collecting — and a check that
+    # asserted on that number would be asserting about somebody else's data.
+    iv_backfill.backfill_watchlist(conn)
+    assert db.iv_summary_pending(conn, ticker) == 0
+    unchanged = db.get_iv_weighted_average(conn, ticker, days=None)
+    assert np.allclose(
+        stored["iv_weighted_avg"].to_numpy(dtype=float),
+        unchanged["iv_weighted_avg"].to_numpy(dtype=float),
+        rtol=1e-12, equal_nan=True,
+    )
+
+    # A MOMENT WRITTEN AGAIN IS THE SOURCE'S AGAIN, until it is solved again.
+    # The rollup's average is recomputed from the provider column on conflict,
+    # so a stamp left saying "ours" would describe the number it replaced — a
+    # stale claim on a chart is worse than an honest gap, and this is the only
+    # path that can produce one. The chain rows are cleared first because the
+    # contract registry is keyed on the contract, not on the pass: writing the
+    # same instant twice on top of itself is not something a collection does.
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM option_snapshots WHERE ticker = %s AND collected_at = %s",
+            (ticker, moments[-1]),
+        )
+    db.insert_snapshot(conn, ticker, moments[-1], 100.0, chain)
+    assert db.iv_summary_pending(conn, ticker) == 1
+    assert abs(
+        float(db.get_iv_weighted_average(conn, ticker, days=None).iloc[-1]["iv_weighted_avg"])
+        - expected_provider
+    ) < 1e-12, "the rewritten average is the source's, and says so"
+
+    with conn.cursor() as cur:
+        for table in ("option_snapshots", "option_snapshots_archive", "snapshot_iv_summary",
+                      "contract_registry", "collection_runs"):
+            cur.execute(f"DELETE FROM {table} WHERE ticker = %s", (ticker,))  # noqa: S608
+    print("Own-volatility catch-up checks passed (stored averages reach our model by themselves)\n")
 
 
 def check_greek_attribution():
@@ -917,6 +1039,7 @@ def main():
     check_archiving_moves_and_keeps(conn)
     check_two_sources_never_mix(conn)
     check_expired_contracts_stay_reachable(conn)
+    check_stored_volatility_catches_up_to_our_model(conn)
     check_greek_attribution()
 
     print("ALL SMOKE CHECKS PASSED")

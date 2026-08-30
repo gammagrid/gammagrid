@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **Implied volatility is solved from the contract's price rather than taken
+  from the data source.** Yahoo leaves it missing on part of a chain and
+  reports numbers that do not reproduce the quoted price on another part, and
+  every greek, the GEX profile, the screener's filters and the surface are
+  built on that column. Every screen now inverts the price itself as it draws;
+  where a price does not determine a volatility the source's number still
+  stands, so nothing disappears off a chart. The source's own value is kept
+  alongside ours rather than replaced.
+- **The stored volatility average catches up to the new model on its own.**
+  One number in this product is stored rather than computed as it is drawn:
+  the volume-weighted average per collection, which is what the Volatility
+  chart reads. Every row of it written before this release holds the data
+  source's number. There is nothing to run — the collector rewrites them in
+  the background, newest first, a bounded batch per pass, and the chart says
+  how many are left until there are none. Nothing collected is touched: the
+  averages are recomputed from chain rows that are only read.
 - **The GEX Heatmap prices the chain once per render instead of three
   times.** The matrix, the gamma flip and the per-expiry net GEX each used to
   build their own copy of the same greeks, on a screen whose two sliders rerun
@@ -19,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   this runs on somebody's own machine, and rarely a dedicated one.
 
 ### Internal
+- New migration `0006_own_implied_volatility.sql`: one nullable column on
+  `snapshot_iv_summary` and a partial index over the rows still to be
+  recomputed. Additive, so a rollback to an older version survives it.
 - `app/metrics_core.py` is byte-identical to the hosted product's copy again.
   It had drifted by 563 lines and eleven functions — the implied-volatility
   solver, the batched GEX path and max pain over time — while both products

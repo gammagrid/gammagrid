@@ -54,8 +54,8 @@ All of them run in CI on every pull request; please run them locally first.
   it. Anything that needs data this application cannot fetch does not belong in
   the core at all.
 - **A new function in `db.py`, `metrics.py`, `metrics_core.py`,
-  `collector.py`, `suggestions.py`, `config.py` or `providers/` arrives with a
-  check.**
+  `collector.py`, `suggestions.py`, `iv_backfill.py`, `config.py` or
+  `providers/` arrives with a check.**
   `tests/coverage_report.py` fails if any non-exempt function has none calling
   it — write it in `unit_tests.py` if it needs no database, in
   `smoke_test.py` if it does. Something that genuinely cannot be checked

@@ -46,6 +46,11 @@ MEASURED_MODULES = (
     # What to say to somebody whose ticker will never work. Pure functions with
     # no dependencies, and the entire experience of getting a symbol wrong.
     "app/suggestions.py",
+    # The one number this product stores rather than solves as it draws, and the
+    # background task that brings it onto our own model. Measured because a
+    # backfill that quietly does nothing looks exactly like a backfill that has
+    # finished.
+    "app/iv_backfill.py",
     # Almost all constants, and one function: the version the app reports about
     # itself. Measured because a version that lies is worse than no version,
     # and nothing else would notice it going wrong.

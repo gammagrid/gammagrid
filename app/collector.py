@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from app import config, db, providers
+from app import config, db, iv_backfill, providers
 
 
 def fetch_ticker_snapshot(
@@ -147,6 +147,15 @@ def collect_watchlist(
                 rows_fetched=rows_fetched, oi_zero_fraction=oi_zero_fraction,
                 source=active.name,
             )
+            # The moment just stored carries the source's volatility average,
+            # because that half of the rollup is written in SQL. Ours is solved
+            # from the price, so it lands here, one moment later — and it is
+            # done from the collector rather than only from the worker so that
+            # somebody collecting by hand with no worker running is not left
+            # with the one number this product does not compute itself. The
+            # newest pending moment IS the one just written; older ones are the
+            # worker's job. This cannot raise — see app/iv_backfill.py.
+            iv_backfill.backfill_ticker(conn, ticker, limit=1, source=active.name)
             results[ticker] = "success"
         except Exception as exc:
             message = _scrub(str(exc), active)
