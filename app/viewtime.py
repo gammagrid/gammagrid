@@ -7,7 +7,7 @@ rows across calendar-day boundaries — a snapshot at 20:00 in New York is 03:00
 the next day in Moscow — so if grouping followed the reader's zone, OI Delta
 would compare a different pair of days for every reader and the same data would
 produce different numbers per person. Daily aggregates stay on the New York
-trading day (эпик С-21.1); only the labels move.
+trading day; only the labels move.
 
 Kept out of dashboard.py so it can be checked: that file is a Streamlit script
 which executes on import and expects a logged-in session, so nothing in it can
@@ -19,12 +19,13 @@ from __future__ import annotations
 import datetime as dt
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 
 def viewer_timezone():
-    """The reader's own timezone, as the browser reports it (эпик пункт 12).
+    """The reader's own timezone, as the browser reports it.
 
     Read fresh on every call rather than memoised: it is an attribute lookup,
     not I/O, and ANY caching of it is a hazard. `@st.cache_data` is shared
@@ -64,8 +65,8 @@ def to_viewer(value):
     New York is 03:00 the next day in Moscow — so if grouping followed the
     reader's zone, OI Delta would compare a different pair of days for every
     reader and the same data would produce different numbers per person. Every
-    daily aggregate stays anchored to the New York trading day (эпик С-21.1);
-    only the labels move.
+    daily aggregate stays anchored to the New York trading day; only the labels
+    move.
 
     Returned tz-naive: it has already been shifted, and a visible offset on
     every axis tick buys nothing.
@@ -144,3 +145,36 @@ def waterfall_labels(start: float, steps: list[float], end: float) -> list[str]:
         *(f"{value:+.1f}¢" for value in steps),
         f"{end:.1f}¢",
     ]
+
+
+def strikes_around_money(matrix: pd.DataFrame, spot: float, each_side: int) -> pd.DataFrame:
+    """The strike closest to the money, plus `each_side` rows above and below.
+
+    A FUNCTION AND NOT THREE LINES IN THE PAGE, because those three lines were a
+    defect that shipped and was reported from production. The control
+    then asked for a percentage band and the page trimmed the result to 45 rows
+    around the money afterwards, so on any symbol with more than 45 strikes
+    inside the narrowest band it did nothing whatsoever: SPY has 77 strikes
+    within ±5% of 769.35, SPX has 154 within ±5% of 7711.76. Here the count is
+    testable, and the test asserts what the page could not — that asking for
+    more rows returns more rows.
+
+    COUNTED IN ROWS RATHER THAN IN PERCENT, decided 30.08 after the percentage
+    version was tried. Percent means something different on every chain: ±5% is
+    8 strikes on MO, 77 on SPY and 154 on SPX, so one number could not be a
+    sensible default for all three, and the money drifted out of view on the
+    dense ones. A count is the same request everywhere, and it keeps the money
+    in the middle of the table by construction.
+
+    CLAMPED AT THE ENDS, NOT BACKFILLED. When the money sits near the top of the
+    chain there are fewer rows above it, and the table is then shorter — showing
+    extra rows from the other side to reach 2n+1 would answer a question nobody
+    asked, and quietly at that.
+    """
+    if matrix.empty:
+        return matrix
+    strikes = pd.to_numeric(pd.Series(matrix.index), errors="coerce").to_numpy()
+    atm_position = int(np.abs(strikes - spot).argmin())
+    start = max(0, atm_position - each_side)
+    end = min(len(matrix), atm_position + each_side + 1)
+    return matrix.iloc[start:end]

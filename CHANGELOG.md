@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Gamma Flip could point far outside the traded range.** The level is meant
+  to be the zero crossing of the cumulative GEX profile nearest the underlying
+  price; taking the first crossing instead reported the deepest one, because
+  the walk runs over the whole strike range on purpose (so the flip does not
+  move when the display band moves) and that range reaches well below the
+  money, where the running sum is still near zero and flips sign on rounding.
+  Measured on the sibling product: AAPL showed a flip of 137.24 against an
+  underlying of 319.70, and 161 of 200 snapshots had more than one crossing.
+  The flip is now the crossing nearest the current price, and a strike
+  carrying no exposure at all no longer counts as a crossing on its own — the
+  same bug separately put SPX thousands of points below the money.
+- **Charm's description said "per day" for a number that is per year.** "How
+  much delta 'ages' over one day" used the annual formula underneath it; the
+  text now says per year and quotes the daily figure alongside it.
+- **The GEX Heatmap's strike-range slider stopped doing anything past a
+  point.** It asked for a percentage band and then quietly trimmed the result
+  to a 45-row window around the money — so on any chain with more strikes
+  inside the narrowest band than that (SPY has 77 within ±5% of the money,
+  SPX has 154), the slider produced the identical table everywhere from 5% to
+  50%. Replaced with a count of strikes each side of the money, which asks for
+  the same thing on every chain; asking for more now visibly draws more, up to
+  a 45-row viewport before the table scrolls.
+
+### Changed
+- **Contract greeks history is computed in one batch instead of one snapshot
+  at a time.** Measured on the sibling product, which runs the same function:
+  roughly 400 ms saved on a contract collected every 15 minutes over half a
+  year, with the numbers on screen unchanged (checked against the row-by-row
+  path to 1e-12). Self-hosted installs feel this more than a server does —
+  this runs on somebody's own machine, and rarely a dedicated one.
+
 ## [0.6.0] - 2026-08-30
 
 ### Added

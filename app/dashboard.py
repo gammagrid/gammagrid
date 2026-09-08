@@ -27,6 +27,7 @@ from app import (  # noqa: I001 — grouped by what they are, not alphabetised
 from app.viewtime import (
     format_date,
     format_datetime,
+    strikes_around_money,
     timezone_label,
     to_viewer,
     with_viewer_index,
@@ -1207,7 +1208,7 @@ if active_view == "GEX Heatmap":
         )
         matrix_full = pd.DataFrame()
         shown_expiries = []
-        strike_band_pct = 15
+        strikes_each_side = 10
     else:
         col_n, col_band = st.columns(2)
         # A slider needs min < max: with exactly one expiry to show, st.slider
@@ -1228,8 +1229,19 @@ if active_view == "GEX Heatmap":
         else:
             n_expiries = 1
             col_n.caption("Nearest expiries: 1 (the only one still trading)")
-        strike_band_pct = col_band.slider(
-            "Strike range around underlying price, %", 5, 50, 15, key="heatmap_strike_band"
+        # COUNTED IN STRIKES, NOT IN PERCENT. The
+        # control asked for ±% until this day, and a percentage is a different
+        # request on every chain: ±5% is 8 strikes on MO, 77 on SPY, 154 on SPX
+        # — dense enough that the 45-row window below it silently overrode
+        # whatever the slider said, on the two most-watched symbols there are.
+        # A count means the same thing on every chain and keeps the money in
+        # the middle of the table by construction.
+        strikes_each_side = col_band.slider(
+            "Strikes each side of the money", 5, 100, 10, key="heatmap_strikes_each_side",
+            help=(
+                "How many strikes above and below the strike closest to the underlying "
+                "price to draw. 10 shows 21 rows."
+            ),
         )
         shown_expiries = all_expiries_at_snapshot[:n_expiries]
         matrix_full = metrics.gex_matrix(snapshot_df, as_of=as_of, expiries=shown_expiries)
@@ -1237,9 +1249,7 @@ if active_view == "GEX Heatmap":
     if matrix_full.empty:
         st.info("No data to build the heatmap for the selected snapshot.")
     else:
-        band = strike_band_pct / 100
-        lower, upper = spot_at_snapshot * (1 - band), spot_at_snapshot * (1 + band)
-        matrix_band = matrix_full[(matrix_full.index >= lower) & (matrix_full.index <= upper)]
+        matrix_band = strikes_around_money(matrix_full, spot_at_snapshot, strikes_each_side)
 
         walls = metrics.dealer_walls(snapshot_df, as_of=as_of, expiries=shown_expiries)
         # BOTH READ OFF THE MATRIX ABOVE instead of pricing the chain again.
@@ -1252,7 +1262,7 @@ if active_view == "GEX Heatmap":
         # in before (max |Δ| = 0 over 357 × 10 cells of a live chain). The flip
         # still walks the full strike range rather than the displayed band —
         # `matrix_full` is the unbanded matrix.
-        flip = metrics.gamma_flip_from_matrix(matrix_full)
+        flip = metrics.gamma_flip_from_matrix(matrix_full, spot_at_snapshot)
         net_by_expiry = metrics.net_gex_from_matrix(matrix_full, expiries=shown_expiries)
         total_net_gex = net_by_expiry["net_gex"].sum()
 
@@ -1264,25 +1274,21 @@ if active_view == "GEX Heatmap":
         col_zone.metric("Regime", "Neg" if total_net_gex < 0 else "Pos")
 
         if matrix_band.empty:
-            st.info("No strikes in the selected range — widen the % range above.")
+            st.info("No strikes to show for this snapshot.")
         else:
-            # Maximize on-screen rows without scrolling — center the window
-            # around the ATM strike (closest to the underlying price) instead
-            # of taking the first N from the top, otherwise with a narrow range
-            # above/below the underlying price the center would still drift out
-            # of the visible area.
-            max_rows = 45
+            # THE CONTROL DECIDES WHAT IS DRAWN. What used to be
+            # here was a 45-row window around the money, applied AFTER the
+            # control had chosen a percentage band — and it quietly overrode it:
+            # SPY has 77 strikes within ±5% and SPX has 154, so on both, the two
+            # most watched symbols in the product, the slider produced the
+            # identical table at every position from 5% to 50%. A control that
+            # silently ignores its input is worse than no control.
+            #
+            # The count above now IS the window, so there is nothing left to
+            # override it, and the money stays in the middle by construction.
             strikes = matrix_band.index.to_numpy(dtype=float)
             atm_strike = matrix_band.index[np.abs(strikes - spot_at_snapshot).argmin()]
-            if len(matrix_band) > max_rows:
-                atm_pos = matrix_band.index.get_loc(atm_strike)
-                half = max_rows // 2
-                start = max(0, atm_pos - half)
-                end = min(len(matrix_band), start + max_rows)
-                start = max(0, end - max_rows)
-                matrix = matrix_band.iloc[start:end]
-            else:
-                matrix = matrix_band
+            matrix = matrix_band
 
             # Expiries that are all zeros within the shown strike range get
             # dropped: a column without a single nonzero value carries no
@@ -1304,14 +1310,20 @@ if active_view == "GEX Heatmap":
             )
             st.dataframe(net_display.set_index("expiry").T, use_container_width=True)
 
+            # A viewport, not a filter — the difference this fix is
+            # about. 45 rows is a comfortable screenful; asking for more than
+            # that many strikes costs scrolling inside the table rather than a
+            # page several thousand pixels long.
+            viewport_rows = 45
             st.caption(
-                f"Strikes shown: {len(matrix)} of {len(matrix_band)} within ±{strike_band_pct}% "
-                f"of the underlying price — centered on the strike closest to it ({atm_strike:g}, marked “➤”)"
+                f"{len(matrix)} strikes around the money ({atm_strike:g}, marked “➤”): "
+                f"up to {strikes_each_side} each side"
+                + (" — the table scrolls" if len(matrix) > viewport_rows else "")
             )
             # Compact row height — without it only ~10 rows fit on screen, and
             # comparing all strikes required constant scrolling.
             row_height = 24
-            table_height = (len(matrix) + 1) * row_height + 3
+            table_height = (min(len(matrix), viewport_rows) + 1) * row_height + 3
             st.dataframe(
                 style_gex_matrix(matrix, atm_strike=atm_strike),
                 use_container_width=True,
@@ -1350,10 +1362,11 @@ if active_view == "GEX Heatmap":
                 "expiries.\n\n"
                 "A ticker can have 20-30+ expiries (including far-dated LEAPS 1-2 years out) "
                 "with very different strike ranges — the full matrix would be mostly empty and "
-                "unreadable. The sliders above limit the view to the nearest N expiries and "
-                "strikes within ±X% of the underlying price; this affects only the display and "
-                "which subset Call/Put Wall, Gamma Flip, and per-expiry Net GEX are computed "
-                "over — the approximation formulas themselves don't change.\n\n"
+                "unreadable. The sliders above limit the view to the nearest N expiries and a "
+                "number of strikes each side of the money; the expiry count also decides which "
+                "subset Call/Put Wall, Gamma Flip, and per-expiry Net GEX are computed over, "
+                "while the strike count is display only — the flip is found over the whole "
+                "strike range. The approximation formulas themselves don't change.\n\n"
                 "The snapshot selector lets you pick an earlier collection from history (Replay) "
                 "and see how the picture looked at that moment — no new data is needed, and "
                 "there is no real-time auto-refresh (collection happens only via the “Collect "

@@ -1,6 +1,6 @@
 """Is the US options market open right now, and which trading day is it.
 
-WHY THIS EXISTS (epic С-21). Measured on collected data: between two adjacent
+WHY THIS EXISTS. Measured on collected data: between two adjacent
 weekend snapshots of SPY, not one of 14,230 contracts changed its price, bid,
 volume or open interest — while implied volatility changed on 13,727 of them.
 That IV movement is the provider recomputing from a frozen price and a

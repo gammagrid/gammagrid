@@ -808,7 +808,7 @@ def check_greek_attribution():
     ])
     guarded = metrics.greek_attribution(unreliable)
     assert guarded.dropped_unreliable == 1, guarded.dropped_unreliable
-    # STITCHED, not dropped — the second of the two choices пункт 9 left open.
+    # STITCHED, not dropped — the second of two choices this behavior left open.
     # The rejected day stops being a boundary, so the interval spans it using
     # the greeks from its start: two intervals survive, not one, and the extra
     # day is reported through missing_trading_days. The cost is second-order

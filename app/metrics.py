@@ -64,6 +64,7 @@ from app.metrics_core import (
     volume_stats,
     with_solved_iv,
     years_to_expiry,
+    years_to_expiry_by_moment,
     years_to_expiry_series,
 )
 
@@ -120,5 +121,6 @@ __all__ = [
     "volume_stats",
     "with_solved_iv",
     "years_to_expiry",
+    "years_to_expiry_by_moment",
     "years_to_expiry_series",
 ]

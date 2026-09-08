@@ -516,6 +516,70 @@ def check_unpriceable_contracts_are_skipped():
         assert all(np.isnan(value) for value in no_spot.values()), (missing, no_spot)
     print("unpriceable-contract checks passed")
 
+
+def check_contract_greeks_history_is_the_scalar_path_in_one_batch():
+    """`contract_greeks_history` computes a contract's history in one batch
+    instead of one row at a time; row for row it must say what the scalar functions it
+    replaced said, on every kind of row a real history has: a live one, one
+    with no volatility (NaN greeks, not zeros), one observed after the close
+    of expiry (zeros), one with no spot, one whose provider greeks override
+    ours, and one the IV guard blanks. Built here from the scalar kernels, so
+    a drift in either direction fails with the greek and the row named."""
+    from app import metrics
+    from app import metrics_core as core
+
+    expiry = pd.Timestamp("2026-10-16")
+    curve = {0.08: 4.2, 0.5: 4.0, 1.0: 3.9, 2.0: 3.8}
+    pricing = metrics.PricingInputs(curve=curve, dividend_yield=0.012)
+    stamp = pd.Timestamp("2026-09-01 19:30")
+    rows = []
+    for i in range(12):
+        rows.append({
+            "collected_at": stamp + pd.Timedelta(days=i), "expiry": expiry, "strike": 100.0,
+            "option_type": "put", "last_price": 3.0 + 0.05 * i, "underlying_price": 101.0 - 0.2 * i,
+            "implied_volatility": 0.22 + 0.002 * i, "delta": None, "gamma": None, "theta": None, "vega": None,
+        })
+    rows[3]["implied_volatility"] = None                       # no volatility: NaN greeks
+    rows[5]["underlying_price"] = None                         # no spot: NaN greeks
+    rows[7].update({"delta": -0.44, "gamma": 0.03})            # the provider's delta and gamma win
+    rows[9]["implied_volatility"] = 2.5                        # the guard's outlier: blanked
+    rows.append({**rows[0], "collected_at": pd.Timestamp("2026-10-17 12:00")})  # after expiry: zeros
+    frame = pd.DataFrame(rows)
+    # A second contract in the frame, to prove the filter still selects one.
+    frame = pd.concat([frame, frame.assign(strike=105.0)], ignore_index=True)
+
+    history = metrics.contract_greeks_history(frame, 100.0, expiry, "put", pricing=pricing)
+    assert len(history) == 13 and list(history["collected_at"]) == sorted(history["collected_at"])
+    contract = frame[frame["strike"] == 100.0].sort_values("collected_at")
+    guarded = core._mark_unreliable_iv(contract)
+    assert pd.isna(guarded.loc[contract.index[9]]), "the fixture's outlier must trip the guard"
+    for position, row in enumerate(contract.itertuples()):
+        years = core.years_to_expiry(expiry, row.collected_at)
+        expected = core._black_scholes_greeks(
+            row.underlying_price, 100.0, years, guarded[row.Index], pricing.rate_for(years), "put",
+            dividend_yield=pricing.dividend_yield,
+        )
+        for greek in core.PROVIDER_GREEKS:
+            supplied = getattr(row, greek)
+            if supplied is not None and not pd.isna(supplied):
+                expected[greek] = float(supplied)
+        got = history.iloc[position]
+        for greek in core._GREEK_KEYS:
+            same_gap = pd.isna(expected[greek]) and pd.isna(got[greek])
+            assert same_gap or abs(expected[greek] - got[greek]) < 1e-12, (
+                f"row {position} {greek}: scalar {expected[greek]} batch {got[greek]}"
+            )
+        assert (pd.isna(guarded[row.Index]) and pd.isna(got["implied_volatility"])) or (
+            got["implied_volatility"] == guarded[row.Index]
+        )
+    assert all(pd.isna(history.iloc[3][list(core._GREEK_KEYS)])), "no volatility is NaN, not zero"
+    assert history.iloc[7]["delta"] == -0.44 and history.iloc[7]["gamma"] == 0.03
+    assert history.iloc[7]["vega"] != 0 and not pd.isna(history.iloc[7]["vega"]), "ours where the provider has none"
+    assert (history.iloc[12][list(core._GREEK_KEYS)] == 0).all(), "past the close of expiry every greek is zero"
+    assert history["delta"].dtype == float, history.dtypes
+    print("Contract greeks history batch/scalar parity checks passed")
+
+
 def check_contracts_backing_expiry():
     """How many contracts with open interest stand behind an expiry's numbers.
 
@@ -1251,7 +1315,7 @@ def check_the_batched_gex_path_returns_the_old_numbers():
     assert not matrix.empty and len(matrix.columns) == 2, matrix
 
     # The flip: the batched read and the function that builds its own matrix.
-    from_matrix = metrics.gamma_flip_from_matrix(matrix)
+    from_matrix = metrics.gamma_flip_from_matrix(matrix, 100.0)
     rebuilt = metrics.gamma_flip_price(chain, as_of=moment, expiries=[pd.Timestamp(e) for e in expiries])
     assert (from_matrix is None) == (rebuilt is None), (from_matrix, rebuilt)
     if from_matrix is not None:
@@ -1286,6 +1350,177 @@ def check_the_batched_gex_path_returns_the_old_numbers():
     ), rollup.to_dict()
     assert metrics.expiry_rollup(pd.DataFrame()).empty
     print("batched GEX checks passed (one matrix, the same numbers)")
+
+
+def check_the_flip_is_the_crossing_by_the_money():
+    """The flip must be the zero crossing nearest the underlying price.
+
+    The profile is walked over the WHOLE strike range so
+    the flip does not move when the display band moves, and that range reaches
+    far below the traded part of the chain, where the cumulative sum is still
+    hovering around nothing. Taking the first crossing therefore reported the
+    deepest one: AAPL on prod showed 137.24 against an underlying of 319.70
+    while the visible matrix changed sign between 305 and 307.5. Measured on the
+    local base afterwards, 161 of 200 snapshots had more than one crossing.
+
+    The profile below is built to tell the three candidate rules apart rather
+    than merely to have a flip: it crosses zero three times, once far below the
+    money on values of ±1 (the deep-tail wobble), once just under it, and once
+    far above. "First" answers 135.0, "last" answers 608.57, and only "nearest
+    to the spot" answers 304.0. Own data throughout — a matrix this test builds
+    itself, no chain, no database, no reliance on any other check having run.
+    """
+    expiry = pd.Timestamp("2026-09-18")
+    spot = 320.0
+
+    def matrix_with(cumulative: dict[float, float]) -> pd.DataFrame:
+        """A one-column matrix whose cumulative profile is exactly `cumulative`.
+
+        Written the other way round on purpose: the argument is the shape the
+        function under test walks over, so the assertions below can be read
+        against it without anyone summing five numbers in their head.
+        """
+        strikes = sorted(cumulative)
+        running = 0.0
+        per_strike = []
+        for strike in strikes:
+            per_strike.append(cumulative[strike] - running)
+            running = cumulative[strike]
+        return pd.DataFrame({expiry: per_strike}, index=pd.Index(strikes, name="strike"))
+
+    three = matrix_with({130.0: 1.0, 140.0: -1.0, 300.0: -8000.0,
+                         310.0: 12000.0, 600.0: 3000.0, 610.0: -500.0})
+    got = metrics.gamma_flip_from_matrix(three, spot)
+    assert got is not None and abs(got - 304.0) < 1e-9, (
+        f"the flip against a spot of {spot} came back {got}, not the crossing at "
+        f"304.0 next to the money. 135.0 means the lowest crossing is still being "
+        f"taken (the AAPL 137.24 defect); 608.57 means the highest one is"
+    )
+
+    # A STRIKE CARRYING NOTHING IS NOT A CROSSING. `np.sign` maps an untouched
+    # strike to 0, so a 0 → -1 step reads as a change of sign and the profile
+    # was reported as crossing zero at the point where it merely left it. This
+    # is SPX, which reported 2,800 against a spot of 7,711.76 — and nearest-to-
+    # the-money does not fix it on its own, because that artefact was the only
+    # candidate in the whole profile.
+    below_the_chain = matrix_with({50.0: 0.0, 60.0: 0.0, 300.0: -8000.0, 310.0: 12000.0})
+    got = metrics.gamma_flip_from_matrix(below_the_chain, spot)
+    assert got is not None and abs(got - 304.0) < 1e-9, (
+        f"a run of strikes with no exposure at all produced {got} instead of 304.0 — "
+        f"60.0 means leaving zero is still counted as crossing it"
+    )
+
+    # Same artefact with nothing real after it: the profile never changes sign,
+    # and saying so is the honest answer. Reporting 60.0 here is how SPX got a
+    # flip 4,900 points below the money.
+    never_crosses = matrix_with({50.0: 0.0, 60.0: 0.0, 300.0: -8000.0, 310.0: -12000.0})
+    assert metrics.gamma_flip_from_matrix(never_crosses, spot) is None, (
+        "a profile that only ever leaves zero and stays negative has no flip level, "
+        f"but one was reported: {metrics.gamma_flip_from_matrix(never_crosses, spot)}"
+    )
+
+    # A profile that passes exactly THROUGH zero on its way over still crosses:
+    # the two strictly signed values on either side of the flat part bracket it.
+    through_zero = matrix_with({300.0: -8000.0, 305.0: 0.0, 310.0: 12000.0})
+    got = metrics.gamma_flip_from_matrix(through_zero, spot)
+    assert got is not None and abs(got - 304.0) < 1e-9, (
+        f"a profile touching 0.0 between two opposite signs lost its crossing: {got}"
+    )
+
+    # Without a reference price there is no "nearest", and every distance would
+    # be NaN — which compares false and quietly leaves the lowest crossing.
+    assert metrics.gamma_flip_from_matrix(three, float("nan")) is None, (
+        "a NaN underlying price must not select a crossing"
+    )
+
+    # And the two entries stay one function: the chain-side one reads the spot
+    # off the snapshot rather than being told it.
+    moment = dt.datetime(2026, 8, 20, 15, 0)
+    chain = pd.DataFrame([
+        {"collected_at": moment, "expiry": expiry, "strike": strike,
+         "option_type": option_type, "underlying_price": 100.0,
+         "implied_volatility": 0.25,
+         "open_interest": 300 if option_type == "call" else 900,
+         "volume": 5}
+        for strike in (80.0, 90.0, 100.0, 110.0, 120.0)
+        for option_type in ("call", "put")
+    ])
+    pricing = metrics.PricingInputs()
+    by_hand = metrics.gamma_flip_from_matrix(
+        metrics.gex_matrix(chain, pricing=pricing), 100.0
+    )
+    by_chain = metrics.gamma_flip_price(chain, pricing=pricing)
+    assert (by_hand is None) == (by_chain is None) and (
+        by_hand is None or abs(by_hand - by_chain) < 1e-9
+    ), f"the chain-side entry stopped reading the spot off the snapshot: {by_chain} vs {by_hand}"
+
+    print("Gamma flip picks the crossing by the money (3 crossings, deep wobble ignored)")
+
+
+def check_the_strike_count_actually_decides_what_is_drawn():
+    """Asking for more strikes has to return more strikes.
+
+    THE DEFECT THIS IS WRITTEN FOR SHIPPED TO PRODUCTION AND WAS REPORTED FROM
+    IT. The control asked for a percentage band, the band was computed
+    correctly, and then the page trimmed it to a 45-row window around the money
+    — so on any symbol with more than 45 strikes inside the narrowest band the
+    slider did nothing at all across its whole range. Measured on live data: SPY
+    has 77 strikes within ±5% of 769.35, SPX has 154 within ±5% of 7711.76.
+    Both are among the most-watched symbols there are, which is why it was
+    reported as "the slider is broken" rather than as an edge case.
+
+    So the assertion is not "the filter filters" — that always worked — but that
+    the row count RESPONDS. Reintroducing the trim makes the first assertion
+    fail with the production symptom: the same number at every position.
+
+    THE MONEY IS ALWAYS IN THE MIDDLE, and that is the property the percentage
+    version could not hold: n rows either side is the same request on every
+    chain, while ±5% is 8 strikes on MO and 154 on SPX.
+    """
+    from app.viewtime import strikes_around_money
+
+    # 600 strikes at $1 around 500, so even 100 each side stays inside the grid
+    # and the counts can be required to keep rising. The index runs high to low,
+    # as the heatmap draws it.
+    spot = 500.0
+    matrix = pd.DataFrame(
+        {"2026-09-18": range(600)},
+        index=[float(strike) for strike in range(799, 199, -1)],
+    )
+
+    counts = {n: len(strikes_around_money(matrix, spot, n)) for n in (5, 10, 25, 100)}
+    assert counts[5] < counts[10] < counts[25] < counts[100], (
+        f"the control does not change what is drawn: {counts} — this is the defect "
+        "where a 45-row window silently overrode it"
+    )
+    # n each side means 2n+1 rows: n above, n below, and the money itself.
+    assert counts == {5: 11, 10: 21, 25: 51, 100: 201}, counts
+    assert counts[10] > 0 and counts[25] > 45, (
+        "the fixture is too small to catch the defect it exists for"
+    )
+
+    ten = strikes_around_money(matrix, spot, 10)
+    assert 500.0 in ten.index, "the money must always be drawn"
+    assert list(ten.index).index(500.0) == 10, (
+        f"the money is not in the middle: position {list(ten.index).index(500.0)} of {len(ten)}"
+    )
+    assert ten.index.max() == 510.0 and ten.index.min() == 490.0, (ten.index.max(), ten.index.min())
+
+    # Clamped at the ends rather than backfilled from the other side: a chain
+    # with three strikes above the money shows three, not ten borrowed from
+    # below.
+    near_top = strikes_around_money(matrix, 797.0, 10)
+    assert len(near_top) == 13, len(near_top)
+    assert near_top.index.max() == 799.0
+
+    # A chain shorter than the request keeps working — the case that looked
+    # perfectly fine for the whole time the defect was live, because fewer than
+    # 45 strikes never met the window.
+    sparse = pd.DataFrame({"2026-09-18": range(5)}, index=[110.0, 105.0, 100.0, 95.0, 90.0])
+    assert len(strikes_around_money(sparse, 100.0, 10)) == 5
+    assert list(strikes_around_money(sparse, 100.0, 1).index) == [105.0, 100.0, 95.0]
+    assert strikes_around_money(pd.DataFrame(), 100.0, 10).empty
+    print(f"Strike-count checks passed (5/10/25/100 each side -> {list(counts.values())} rows)")
 
 
 def check_the_solver_stands_aside_where_it_should():
@@ -1397,6 +1632,7 @@ def main():
     check_iv_average_survives_a_contract_without_iv()
     check_pricing_inputs()
     check_unpriceable_contracts_are_skipped()
+    check_contract_greeks_history_is_the_scalar_path_in_one_batch()
     check_contracts_backing_expiry()
     check_adjusted_contracts_do_not_break_collection()
     check_archiving_goes_through_the_registry()
@@ -1411,6 +1647,8 @@ def main():
     check_the_collector_knows_about_holidays()
     check_symbols_the_source_will_not_serve_are_explained()
     check_the_batched_gex_path_returns_the_old_numbers()
+    check_the_flip_is_the_crossing_by_the_money()
+    check_the_strike_count_actually_decides_what_is_drawn()
     check_the_solver_stands_aside_where_it_should()
     print("\nALL UNIT CHECKS PASSED")
 
