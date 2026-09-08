@@ -39,6 +39,32 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.6.0 → v0.6.1
+
+**Risk: safe. No migration, no schema change, nothing rewritten and nothing
+deleted.**
+
+Everything in this release is a fix to code already in place — the shared
+calculation core and one dashboard control — so nothing here reads or writes
+the database differently than before.
+
+**What you may notice on the first run.**
+
+- **Gamma Flip may show a different number.** The level is meant to be the
+  zero crossing of the cumulative GEX profile nearest the underlying price;
+  it was instead reporting the first crossing found while walking the whole
+  strike range, which on a real chain is reliably the deepest one, far below
+  where the chart actually crosses. The new number is the one nearer the
+  money — closer to what the chart already shows changing sign.
+- **Charm's own description now says "per year" instead of "per day."** The
+  number itself never changed, only the sentence under it; the daily figure
+  is still quoted alongside it for anyone who thinks in days.
+- **The GEX Heatmap's second slider now asks for a count of strikes instead
+  of a percentage.** The old percentage control silently stopped doing
+  anything past a point on dense chains (SPY, SPX) — it produced the same
+  table from 5% to 50%. The replacement responds visibly across its whole
+  range, on every chain.
+
 ## v0.5.2 → v0.6.0
 
 **Risk: safe. One additive migration. Nothing collected is rewritten, nothing

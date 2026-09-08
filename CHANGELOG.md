@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-08
+
 ### Fixed
 - **Gamma Flip could point far outside the traded range.** The level is meant
   to be the zero crossing of the cumulative GEX profile nearest the underlying
@@ -615,7 +617,8 @@ Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.6.0...main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.6.1...main
+[0.6.1]: https://github.com/gammagrid/gammagrid/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/gammagrid/gammagrid/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/gammagrid/gammagrid/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/gammagrid/gammagrid/compare/v0.5.0...v0.5.1
