@@ -9,11 +9,17 @@ page is about direction.
 
 ## Shipped so far
 
-Through v0.6.1. The list below is what the tool does today, not a history —
+Through v0.7.0. The list below is what the tool does today, not a history —
 the changelog has the history.
 
 - Multi-ticker watchlist, collected on demand or on a schedule you choose —
   and not while the market is shut, where the chain does not change
+- **What changed since yesterday**: two trading days of your own collection
+  side by side — the regime, the levels, the flow, and both days' gamma
+  profiles on one chart
+- A one-line reading of the whole chain above every view, and a screen that
+  says when its data stopped being current instead of drawing stale numbers as
+  though they were today's
 - Put/Call Ratio, Max Pain, approximate dealer GEX (profile + strike × expiry
   heatmap with Call/Put Walls, Gamma Flip, Replay)
 - IV surface, skew slice, volume-weighted average IV — with implied volatility

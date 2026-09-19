@@ -39,6 +39,48 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.6.1 → v0.7.0
+
+**Risk: safe. Two additive migrations, nothing rewritten and nothing deleted.**
+
+`0008_realized_volatility` and `0009_ticker_day_summary` create two new tables
+and touch nothing that exists. An older build opens the same database
+afterwards and ignores both; every snapshot you have collected is read exactly
+as it was.
+
+**What you may notice on the first run.**
+
+- **A new view, "Changes", is empty at first and fills itself in.** It compares
+  two trading days, and the rows it compares are written after each collection.
+  Days already in your database are filled in from the snapshots — the worker
+  does it once at startup and once a day, up to 45 days back, and one day that
+  cannot be rebuilt is skipped rather than stopping the rest. On a database
+  with a long history this is the one noticeably busy thing in the release; it
+  runs in the collector, not on a screen, and costs roughly 80 ms per
+  ticker-day. To do it yourself, or to go further back:
+
+  ```bash
+  docker compose run --rm --no-deps worker \
+      python -m app.day_summary --backfill --days 120 --dry-run
+  ```
+
+  Drop `--dry-run` to write. With two days on record the view works; with one
+  it says so plainly instead of drawing a screenful of "new".
+
+- **Realized volatility on the Contract tab now names its date.** The figures
+  used to be fetched from the data source while the page was drawing; they are
+  now stored once a day by the collection pass. Right after the upgrade a
+  ticker has no stored row yet, and the caption says so — the next collection
+  fills it. The numbers themselves are computed exactly as before.
+
+- **Screens now say when they stopped being current.** Nothing changes while
+  collection is healthy. If your collector has been failing on a symbol, or the
+  worker has not been running, you will see that said out loud where before the
+  charts simply showed the last thing they had.
+
+- **A one-line summary sits above the views.** It reads the near-term expiries
+  of the chain you already loaded; no extra collection and no new network call.
+
 ## v0.6.0 → v0.6.1
 
 **Risk: safe. No migration, no schema change, nothing rewritten and nothing

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-19
+
 ### Added
 - **A new view, "Changes": two trading days of your own collection, side by
   side.** The one thing this tool has that a web page of today's numbers does
