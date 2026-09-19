@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   printed underneath the sentence explaining that collecting is what is
   failing.
 
+### Changed
+- **Realized volatility is no longer downloaded while a page is being drawn.**
+  The RV(10d)/RV(20d)/RV(30d) figures beside a contract's implied volatility
+  came from six months of daily closes fetched from the data source in the
+  middle of rendering the Contract tab, with a thirty-minute cache as the only
+  thing making that bearable — in a file that says, about the market status
+  twenty lines higher, that a page render has no business making a network
+  call. They are now written once a day per ticker by the collection pass and
+  read from the database, which also means the caption can say which source
+  they came from and which day they are for. Collecting by hand with the
+  worker switched off gets them on exactly the same terms as collecting on a
+  timer, and a price source that is unreachable costs the caption rather than
+  the collection.
+
 ## [0.6.1] - 2026-09-08
 
 ### Fixed

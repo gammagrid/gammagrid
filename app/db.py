@@ -567,6 +567,91 @@ def unresolvable_tickers(
     return {row[0].upper(): row[1] for row in rows}
 
 
+def store_realized_volatility(
+    conn: psycopg.Connection,
+    ticker: str,
+    as_of: dt.date,
+    values: dict[int, float],
+    source: str,
+) -> int:
+    """Write one day's realized volatility for one ticker. Returns rows written.
+
+    UPSERT rather than insert: a pass that runs twice in a day (two manual
+    collections, a restart) must cost nothing the second time instead of
+    raising on the primary key. Nothing is ever deleted here — the series is
+    the point, and a few dozen bytes a day is not a reason to throw away the
+    only record of what volatility used to be.
+    """
+    if not values:
+        return 0
+    with conn.transaction():
+        for window, value in sorted(values.items()):
+            conn.execute(
+                """INSERT INTO realized_volatility
+                       (ticker, as_of_date, window_days, value, source)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (ticker, as_of_date, window_days)
+                   DO UPDATE SET value = EXCLUDED.value,
+                                 source = EXCLUDED.source,
+                                 fetched_at = now()""",
+                (ticker.upper(), as_of, int(window), float(value), source),
+            )
+    return len(values)
+
+
+def get_realized_volatility(
+    conn: psycopg.Connection, ticker: str
+) -> tuple[dt.date, dict[int, float], str] | None:
+    """The most recent stored day for one ticker, or None if there is none.
+
+    THE WHOLE POINT OF THE TABLE IS THAT THIS IS A READ. The screen that shows
+    these numbers used to fetch six months of daily closes over the network
+    while it was being drawn; this is one index lookup against a handful of
+    rows, and it cannot fail in a way that the reader experiences as the
+    product being broken.
+
+    The date comes back with the values because it is part of the answer: a
+    figure from three days ago is still worth showing on a Monday morning, and
+    worth labelling rather than passing off as today's.
+    """
+    rows = conn.execute(
+        """SELECT as_of_date, window_days, value, source
+           FROM realized_volatility
+           WHERE ticker = %(ticker)s
+             AND as_of_date = (SELECT max(as_of_date) FROM realized_volatility
+                                WHERE ticker = %(ticker)s)
+           ORDER BY window_days""",
+        {"ticker": ticker.upper()},
+    ).fetchall()
+    if not rows:
+        return None
+    return rows[0][0], {int(r[1]): float(r[2]) for r in rows}, rows[0][3]
+
+
+def tickers_missing_realized_volatility(
+    conn: psycopg.Connection, tickers: list[str], day: dt.date
+) -> list[str]:
+    """Which of these have no realized volatility stored for `day`.
+
+    The guard that keeps this to one price-history request per ticker per day.
+    Without it a fifteen-minute collection interval would ask the source for
+    six months of daily closes ninety-six times a day per symbol, to recompute
+    a number that only moves when a session closes — which is the sort of
+    traffic that gets an installation rate-limited for everybody's sake but its
+    own.
+    """
+    wanted = [t.upper() for t in tickers]
+    if not wanted:
+        return []
+    rows = conn.execute(
+        """SELECT DISTINCT ticker FROM realized_volatility
+           WHERE as_of_date = %s AND ticker = ANY(%s)""",
+        (day, wanted),
+    ).fetchall()
+    stored = {r[0].upper() for r in rows}
+    return [t for t in wanted if t not in stored]
+
+
 def collection_state(
     conn: psycopg.Connection, ticker: str, source: str | None = None
 ) -> tuple[datetime | None, int]:

@@ -101,18 +101,6 @@ def _cached_collection_depth() -> dict[str, dt.date]:
     return db.collection_depth(db.get_connection())
 
 
-@st.cache_data(ttl=1800)
-def _cached_realized_volatility(ticker: str) -> dict[int, float]:
-    """30-minute cache: RV is computed on daily price history, which physically
-    cannot change within that window, and without the cache every rerun of the
-    Contract tab (picking another strike/expiry etc.) would hit yfinance again."""
-    try:
-        price_history = collector.fetch_price_history(ticker)
-    except Exception:
-        return {}
-    if price_history.empty:
-        return {}
-    return metrics.realized_volatility(price_history)
 
 
 def render_option_detail(
@@ -160,13 +148,19 @@ def render_option_detail(
     st.line_chart(with_viewer_index(greeks_history)["implied_volatility"], color=BRAND_GREEN)
 
     latest_iv = greeks_history.iloc[-1]["implied_volatility"]
-    rv = _cached_realized_volatility(selected_ticker)
-    if rv:
+    # READ, NOT FETCHED. These figures come from daily closes, which cannot
+    # change during a session, so they are stored once a day by the collection
+    # pass and read here. This used to be a six-month price-history download
+    # made while the page was being drawn.
+    stored_rv = db.get_realized_volatility(conn, selected_ticker)
+    if stored_rv:
+        as_of, rv, rv_source = stored_rv
         st.caption(
             f"Current contract IV: **{latest_iv:.1%}**. Realized volatility of the underlying "
-            "(historical, from yfinance daily closes — its depth doesn't depend on how many "
-            "days we've been collecting option chains, which is why it isn't drawn as a line "
-            "on the same chart: the time scales are too different): "
+            f"(close-to-close, from {rv_source} daily closes as of {format_date(as_of)} — its "
+            "depth doesn't depend on how many days we've been collecting option chains, which "
+            "is why it isn't drawn as a line on the same chart: the time scales are too "
+            "different): "
             + " · ".join(f"RV({window}d) **{value:.1%}**" for window, value in sorted(rv.items()))
         )
         st.caption(
@@ -175,7 +169,10 @@ def render_option_detail(
             "may be underpriced relative to the underlying's actual recent volatility."
         )
     else:
-        st.caption("Realized volatility of the underlying: not enough daily price history.")
+        st.caption(
+            "Realized volatility of the underlying: not stored yet — it is written once a day "
+            "by the collection pass, so it appears after the next collection."
+        )
 
     st.subheader("Greeks over time")
     greek_cols = ["delta", "gamma", "theta", "vega", "rho", "vanna", "charm"]

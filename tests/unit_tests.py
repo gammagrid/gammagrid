@@ -1747,6 +1747,87 @@ def check_the_run_log_answers_how_collection_is_going():
     print("collection-state checks passed (one query, failures since the last success, per source)")
 
 
+def check_realized_volatility_is_stored_once_a_day_and_read_back():
+    """The underlying's own volatility is a row, not a download on a page load.
+
+    WHAT THIS IS GUARDING. The figures beside a contract's implied volatility
+    come from six months of daily closes, and they used to be fetched from the
+    source while the Contract tab was being drawn — behind a thirty-minute
+    cache, which is not a fix but a way of choosing who waits. Now the
+    collection pass stores them and the screen reads them, so the assertions
+    that matter are: one request per ticker per day and not one more, the read
+    gives back exactly what was written, and a source that fails costs a
+    caption rather than the collection somebody asked for.
+
+    The fetch is injected, so none of this touches the network.
+    """
+    from app import collector
+
+    conn = db.get_connection()
+    ticker = "RVCHECK"
+    day = dt.date(2026, 9, 18)
+    calls = []
+
+    def fake_fetch(symbol, *args, **kwargs):
+        calls.append(symbol)
+        # 120 closes that actually move, so all three windows have enough data.
+        rng = np.random.default_rng(7)
+        steps = rng.normal(0, 0.01, 120)
+        return pd.DataFrame({"close": 100 * np.exp(np.cumsum(steps))})
+
+    written = collector.refresh_realized_volatility(conn, [ticker], today=day, fetch=fake_fetch)
+    assert written == 3, written               # one row per window
+    assert calls == [ticker], calls
+
+    # The second pass of the same day asks the source for nothing at all. This
+    # is the whole guard: at a fifteen-minute interval it is the difference
+    # between one request and ninety-six identical ones.
+    again = collector.refresh_realized_volatility(conn, [ticker], today=day, fetch=fake_fetch)
+    assert again == 0, again
+    assert calls == [ticker], calls
+
+    as_of, values, source = db.get_realized_volatility(conn, ticker)
+    assert as_of == day, as_of
+    assert sorted(values) == [10, 20, 30], values
+    assert all(0 < v < 2 for v in values.values()), values   # annualised fractions
+    assert source
+
+    # A later day supersedes it, and the older row stays on the record.
+    collector.refresh_realized_volatility(
+        conn, [ticker], today=day + dt.timedelta(days=1), fetch=fake_fetch
+    )
+    as_of, _, _ = db.get_realized_volatility(conn, ticker)
+    assert as_of == day + dt.timedelta(days=1), as_of
+    kept = conn.execute(
+        "SELECT count(DISTINCT as_of_date) FROM realized_volatility WHERE ticker = %s",
+        (ticker,),
+    ).fetchone()[0]
+    assert kept == 2, kept
+
+    # A source that raises costs a caption, not the pass: nothing is written
+    # for the new ticker and nothing propagates out.
+    def angry_fetch(symbol, *args, **kwargs):
+        raise OSError("the price source is unreachable")
+
+    assert collector.refresh_realized_volatility(
+        conn, ["RVANGRY"], today=day, fetch=angry_fetch
+    ) == 0
+    assert db.get_realized_volatility(conn, "RVANGRY") is None
+
+    # And a symbol whose history is too short to fill any window stores nothing
+    # rather than a confident zero.
+    assert collector.refresh_realized_volatility(
+        conn, ["RVSHORT"], today=day,
+        fetch=lambda symbol, *a, **k: pd.DataFrame({"close": [100.0, 101.0, 100.5]}),
+    ) == 0
+    assert db.get_realized_volatility(conn, "RVSHORT") is None
+
+    conn.execute("DELETE FROM realized_volatility WHERE ticker IN ('RVCHECK','RVANGRY','RVSHORT')")
+    conn.commit()
+    conn.close()
+    print("realized-volatility checks passed (one fetch a day, read back, failures are captions)")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -1790,6 +1871,7 @@ def main():
     check_the_solver_stands_aside_where_it_should()
     check_a_stopped_collection_does_not_look_healthy()
     check_the_run_log_answers_how_collection_is_going()
+    check_realized_volatility_is_stored_once_a_day_and_read_back()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

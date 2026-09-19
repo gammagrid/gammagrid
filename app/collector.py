@@ -12,11 +12,15 @@ take down the rest of the batch.
 
 from __future__ import annotations
 
+import datetime as dt
+import logging
 from datetime import datetime, timezone
 
 import pandas as pd
 
-from app import config, db, iv_backfill, providers, suggestions
+from app import config, db, iv_backfill, market_calendar, metrics, providers, suggestions
+
+log = logging.getLogger(__name__)
 
 
 def fetch_ticker_snapshot(
@@ -227,7 +231,60 @@ def collect_watchlist(
                     "without ever collecting anything, so it will not be requested again. "
                     "Nothing has been deleted."
                 )
+
+    # The underlying's own volatility, refreshed here rather than where it is
+    # displayed. See refresh_realized_volatility: it is at most one request per
+    # ticker per day, and it runs on a pass somebody already asked for.
+    refresh_realized_volatility(conn, [t for t, r in results.items() if r == "success"])
     return results
+
+
+def refresh_realized_volatility(
+    conn, tickers: list[str], *, today: dt.date | None = None, fetch=None
+) -> int:
+    """Store today's realized volatility for tickers that have none. Returns rows written.
+
+    WHY THIS IS NOT DONE WHERE IT IS SHOWN. The Contract view prints RV(10d),
+    RV(20d) and RV(30d) next to the contract's implied volatility, and it used
+    to get them by fetching six months of daily closes over the network in the
+    middle of drawing the page — with a thirty-minute cache as the only thing
+    making that tolerable. A cache is not a fix: it moves the cost to whoever
+    happens to arrive after it expires, and it hides a network call inside a
+    render, where a slow source is indistinguishable from a broken product.
+
+    ONE REQUEST PER TICKER PER DAY, AND ONLY AFTER A SUCCESSFUL COLLECTION.
+    Daily closes cannot change during a session, so a second fetch in the same
+    day would buy nothing; asking only for tickers with no row for today is
+    what keeps a fifteen-minute interval from turning into ninety-six identical
+    requests. Running it from the collection pass rather than from the worker's
+    own schedule is deliberate too: collection by hand with the worker switched
+    off is a supported way to run this, and a figure that only appeared for
+    people using the timer would be a quietly different product.
+
+    NOTHING HERE MAY BREAK A COLLECTION PASS. The chains are already stored by
+    the time this runs, and a price-history request that fails costs a caption
+    on one tab — so every failure is logged and swallowed, per ticker.
+    """
+    if not tickers:
+        return 0
+    day = today or market_calendar.last_completed_trading_day()
+    wanted = db.tickers_missing_realized_volatility(conn, tickers, day)
+    if not wanted:
+        return 0
+    fetch = fetch or fetch_price_history
+    source = providers.get_provider().name
+    written = 0
+    for ticker in wanted:
+        try:
+            history = fetch(ticker)
+            values = metrics.realized_volatility(history) if not history.empty else {}
+            written += db.store_realized_volatility(conn, ticker, day, values, source)
+        except Exception as exc:  # noqa: BLE001 — a caption is not worth a failed pass
+            log.warning(
+                "Could not refresh realized volatility for %s (%s). "
+                "The Contract tab will show the last stored figures.", ticker, exc
+            )
+    return written
 
 
 def _scrub(message: str, provider: providers.DataProvider) -> str:
