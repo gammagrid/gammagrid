@@ -25,6 +25,7 @@ from app import (  # noqa: I001 — grouped by what they are, not alphabetised
     metrics,
     providers,
     suggestions,
+    theme,
     weather,
 )
 from app.viewtime import (
@@ -49,6 +50,8 @@ FAVICON = (
 )
 
 st.set_page_config(page_title="GammaGrid", page_icon=FAVICON, layout="wide")
+
+st.markdown(theme.stylesheet(), unsafe_allow_html=True)
 
 
 def _drop_stale_choice(key: str, options) -> None:
@@ -459,19 +462,20 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Header wordmark: the same 2x2 diagonal chip mark as the favicon, at the
-# "large instance" size documented for the brand (34px cells, 4px gap) next
-# to the title text, matching the teaser site's wordmark treatment.
+# Header wordmark: the same 2x2 diagonal chip mark as the favicon, next to the
+# title, matching the teaser site and the hosted product's header — small,
+# because the header is a place to know where you are rather than a page
+# banner, and the screen belongs to the chain below it.
 st.markdown(
-    """
-    <div style="display:flex;align-items:center;gap:14px;margin-bottom:0.25rem;">
-      <div style="display:grid;grid-template-columns:34px 34px;grid-template-rows:34px 34px;gap:4px;flex-shrink:0;">
-        <div style="background:#B833E0;"></div>
-        <div style="background:#2A332E;"></div>
-        <div style="background:#2A332E;"></div>
-        <div style="background:#22C55E;"></div>
+    f"""
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:0.25rem;">
+      <div style="display:grid;grid-template-columns:13px 13px;grid-template-rows:13px 13px;gap:3px;flex-shrink:0;">
+        <div style="background:{theme.PRIMARY};"></div>
+        <div style="background:{theme.BORDER};"></div>
+        <div style="background:{theme.BORDER};"></div>
+        <div style="background:{theme.ACCENT};"></div>
       </div>
-      <h1 style="margin:0;font-family:inherit;font-weight:700;">GammaGrid</h1>
+      <span style="font-size:{theme.TEXT_STRONG};font-weight:700;letter-spacing:0.01em;">GammaGrid</span>
     </div>
     """,
     unsafe_allow_html=True,
@@ -896,6 +900,9 @@ if _freshness:
     if _state == freshness.RESTING:
         st.caption(_note)
     else:
+        # STALE and FAILING are the two the eye must not slide past, so they
+        # keep the banner. RESTING is the market being shut, and a warning
+        # there is the product crying wolf every weekend.
         st.warning(_note, icon="⚠️")
 else:
     # What the collector last believed about the market, phrased by the
@@ -948,8 +955,6 @@ if len(_ticker_sources) > 1:
 latest_date = latest_df["collected_at"].max()
 expiries = sorted(latest_df["expiry"].unique())
 
-components.html(render_tradingview_widget(selected_ticker, height=450), height=450)
-
 # Deliberately not st.tabs. Streamlit has no lazy tabs: the body of every
 # `with tab_x:` runs on every rerun and the browser merely hides the seven you
 # are not looking at, so each interaction pays for eight views to show one.
@@ -989,24 +994,7 @@ def get_tracked() -> pd.DataFrame:
 # heatmap directly below it on any symbol whose open interest sits far out.
 _weather = metrics.gamma_weather(latest_df)
 if _weather:
-    _words = weather.describe(_weather, latest_moment=latest_date)
-    _tone = BRAND_GREEN if _weather["net_gex"] >= 0 else BRAND_PURPLE
-    _flip = _weather["gamma_flip"]
-    _bits = [f"Net GEX **{weather.format_gex(_weather['net_gex'])}**"]
-    if _flip is not None:
-        _bits.append(f"flip **{_flip:,.2f}** ({_weather['flip_distance_pct']:.1f}% away)")
-    if _weather["call_wall"] is not None:
-        _bits.append(f"call wall **{_weather['call_wall']:,.2f}**")
-    if _weather["put_wall"] is not None:
-        _bits.append(f"put wall **{_weather['put_wall']:,.2f}**")
-    st.markdown(
-        f"<span style='color:{_tone};font-weight:600'>{_words['label']}</span> · "
-        + " · ".join(_bits),
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        _words["sentence"] + (f"  ·  {_words['scope']}" if _words["scope"] else "")
-    )
+    st.markdown(weather.panel(_weather, latest_moment=latest_date), unsafe_allow_html=True)
 
 VIEWS = [
     "Overview", "Changes", "Max Pain / GEX", "GEX Heatmap", "Volatility (IV)",
@@ -1020,7 +1008,8 @@ active_view = st.segmented_control(
 active_view = active_view or VIEWS[0]
 
 if active_view == "Overview":
-    st.caption(f"Latest collection: {latest_date}")
+    st.subheader("Overview")
+    st.caption(f"Data for {selected_ticker} collected {format_datetime(latest_date)}")
     st.subheader("Put/Call Ratio")
     # Aggregated in SQL rather than by grouping every raw row here: same
     # numbers, a fraction of the work. metrics.put_call_ratio remains the
@@ -1128,6 +1117,15 @@ if active_view == "Overview":
                 "bumps."
             )
 
+    # THE PRICE CHART LAST, AND ONLY HERE. It used to sit above the view
+    # switcher, which meant every one of the nine views paid for an embedded
+    # third-party widget — 450 pixels and an outside request — to show the
+    # same line, on screens that are about the option chain rather than the
+    # underlying. The hosted product keeps it at the foot of Overview for the
+    # same reason, and this is where somebody actually looks for it.
+    st.subheader("Underlying price")
+    components.html(render_tradingview_widget(selected_ticker, height=450), height=450)
+
 
 if active_view == "Changes":
     # WHAT THIS VIEW IS FOR. Every other view answers a question about now, and
@@ -1219,37 +1217,33 @@ if active_view == "Changes":
             # not be.
             rows_html = []
             for line in ladder:
-                colour = ""
+                tone = ""
                 if line["kind"] == day_summary.DAMPING:
-                    colour = f"color:{BRAND_GREEN};font-weight:600"
+                    tone = " gg-green"
                 elif line["kind"] == day_summary.AMPLIFYING:
-                    colour = f"color:{BRAND_PURPLE};font-weight:600"
+                    tone = " gg-purple"
                 note = line.get("note")
-                extra = ""
                 if line["key"] == "expiries":
                     parts = []
                     if line.get("rolled_off"):
                         parts.append("expired: " + ", ".join(line["rolled_off"]))
                     if line.get("listed"):
                         parts.append("newly listed: " + ", ".join(line["listed"]))
-                    extra = "; ".join(parts)
-                footnote = note or extra
+                    note = note or "; ".join(parts)
                 label = line["label"] + (
-                    f"<br><span style='opacity:.6;font-size:.85em'>{footnote}</span>"
-                    if footnote else ""
+                    f'<span class="gg-note">{note}</span>' if note else ""
                 )
                 rows_html.append(
-                    f"<tr><td style='padding:.35rem .75rem .35rem 0'>{label}</td>"
-                    f"<td style='padding:.35rem .75rem;opacity:.7'>{day_summary.format_value(line, 'before')}</td>"
-                    f"<td style='padding:.35rem .75rem'>{day_summary.format_value(line, 'after')}</td>"
-                    f"<td style='padding:.35rem 0;{colour}'>{day_summary.format_delta(line)}</td></tr>"
+                    f"<tr><td>{label}</td>"
+                    f'<td class="gg-num gg-before">{day_summary.format_value(line, "before")}</td>'
+                    f'<td class="gg-num">{day_summary.format_value(line, "after")}</td>'
+                    f'<td class="gg-num{tone}">{day_summary.format_delta(line)}</td></tr>'
                 )
             st.markdown(
-                "<table style='width:100%;border-collapse:collapse'>"
-                "<tr style='opacity:.6;font-size:.85em'><th style='text-align:left'></th>"
-                f"<th style='text-align:left'>{format_date(day_before)}</th>"
-                f"<th style='text-align:left'>{format_date(day_after)}</th>"
-                "<th style='text-align:left'>change</th></tr>"
+                '<table class="gg-ladder"><tr><th></th>'
+                f"<th>{format_date(day_before)}</th>"
+                f"<th>{format_date(day_after)}</th>"
+                "<th>change</th></tr>"
                 + "".join(rows_html) + "</table>",
                 unsafe_allow_html=True,
             )

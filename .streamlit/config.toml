@@ -1,13 +1,51 @@
-# GammaGrid brand theme — matches the tokens used on the gammagrid.io teaser
-# (near-black background, purple/green diverging accent pair, mono display
-# font). Keep in sync with the teaser's design tokens if either changes.
+# The design tokens, in the one place Streamlit reads them.
+#
+# THE TWO PRODUCTS SHARE A VISUAL LANGUAGE ON PURPOSE. The hosted version
+# (app.gammagrid.io) carries these same values in its own stylesheet, and
+# somebody who has seen one should not read the other as a different tool.
+# Colours, radii and the type scale below are that file's values; where
+# Streamlit has no equivalent token, app/theme.py carries the rest.
+#
+# TWO FACES, NOT ONE. Chrome — labels, buttons, headings, the sentences the
+# app writes — reads in a humanist grotesk, because prose in a monospace face
+# is slower to read and this product writes a lot of prose. Only what is
+# actually tabular stays monospace: numbers, tickers, dates, code. A system
+# stack rather than a shipped webfont: nothing to download, nothing new to
+# allow in a CSP, and swapping in a self-hosted face later is a value change
+# and nothing else.
 [theme]
 base = "dark"
 primaryColor = "#B833E0"
 backgroundColor = "#0A0C0B"
 secondaryBackgroundColor = "#111614"
 textColor = "#EDEFEC"
-font = "monospace"
+borderColor = "#2A332E"
+linkColor = "#6EDE9A"
+
+font = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+headingFont = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+codeFont = "ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace"
+
+# The type scale: four sizes and no others, plus a hero size for a number that
+# IS the content of its tile. 13px is the working size — captions, buttons,
+# inputs, table cells.
+baseFontSize = 13
+headingFontSizes = ["18px", "16px", "16px", "13px", "13px", "11px"]
+headingFontWeights = [700, 700, 600, 600, 600, 600]
+metricValueFontSize = "28px"
+metricValueFontWeight = 700
+
+# Three radii and no others: panels hold content, boxes are notes and inputs,
+# controls are buttons.
+baseRadius = "6px"
+buttonRadius = "6px"
+dataframeBorderColor = "#2A332E"
+dataframeHeaderBackgroundColor = "#182220"
+showWidgetBorder = true
+
+[theme.sidebar]
+backgroundColor = "#0A0C0B"
+borderColor = "#2A332E"
 
 [server]
 headless = true

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **The interface now reads the same as the hosted version.** Same palette,
+  same three corner radii, same type scale — and, the change you notice first,
+  two typefaces instead of one: labels, headings and the sentences the app
+  writes are set in a humanist grotesk, while everything genuinely tabular —
+  prices, tickers, dates, greeks — stays monospace with figures that line up
+  in a column. The product writes a lot of prose, and prose in a monospace
+  face is slower to read for no benefit.
+- **The summary above the views became a panel.** The regime's glyph, its
+  name, one sentence of reasoning, and the levels as tiles where the number is
+  the content and its label sits above it as an eyebrow — the shape the hosted
+  product uses, for the same reason: this line is read in the half second
+  before the eye moves on.
+- **The price chart moved into Overview.** It used to sit above the view
+  switcher, which meant all nine views paid for an embedded third-party widget
+  — 450 pixels and an outside request — to show the underlying's price on
+  screens that are about the option chain. It now sits at the foot of
+  Overview, under "Underlying price", where the hosted version keeps it.
+
 ## [0.7.0] - 2026-09-19
 
 ### Added
