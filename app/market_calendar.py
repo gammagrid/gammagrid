@@ -157,6 +157,26 @@ def _session_bounds(day: dt.date):
     return opens.time(), closes.time()
 
 
+def session_times(day: dt.date):
+    """(open, close) New York wall times for one day, or (None, None).
+
+    The public answer to "was this day tradeable, and between which hours",
+    with the same degradation every other function here uses: the exchange
+    calendar when it is installed, plain weekday session hours when it is not.
+    Callers that measure how much of a gap the market was open for need this
+    per day, and they should not have to repeat the fallback to get it.
+    """
+    bounds = _session_bounds(day)
+    if bounds is not None:
+        return bounds
+    if _exchange_calendar() is not None:
+        # The calendar answered and said this is not a trading day.
+        return None, None
+    if day.isoweekday() > 5:
+        return None, None
+    return OPEN_TIME, CLOSE_TIME
+
+
 def state_from_clock(moment: dt.datetime | None = None) -> str:
     """Regular session only: weekdays, 09:30–16:00 New York, holidays excluded.
 

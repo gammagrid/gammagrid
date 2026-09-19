@@ -1609,6 +1609,144 @@ def check_the_directory_parse_survives_the_real_header():
     print("directory parse checks passed (the real header, and every way it fails)")
 
 
+def check_a_stopped_collection_does_not_look_healthy():
+    """Four states, and the two that are easy to confuse kept apart.
+
+    THE CASE THAT MADE THIS WORTH WRITING is the quiet one: collection stops
+    and nothing on screen changes. Every chart still draws, every number still
+    reads as today's, and the only clue is a timestamp in a caption on one of
+    eight tabs. Suspension does not help here — it only ever fires for symbols
+    that have NEVER collected, so the ticker that worked for a month and then
+    stopped is precisely the one nothing was watching.
+
+    THE REGRESSION IN THE MIDDLE BLOCK is worth naming because the sibling
+    product shipped it and lost a night to it. "The market was shut for the
+    whole gap" cannot be written as `traded == 0`: the last cycle before the
+    bell lands wherever the interval falls, commonly minutes before it, and
+    those minutes stay in the total forever. Written that way, a screen sat
+    green and silent all night. It has to ask whether the market is shut NOW.
+
+    Dates are fixed and in the past, and every instant is explicit — the states
+    this is about are weekends, holidays and outages, none of which can be
+    waited for, and none of which may depend on the day the suite happens to
+    run.
+    """
+    from app import freshness
+
+    # Friday 11 September 2026. 19:54 UTC is 15:54 New York — six minutes
+    # before the close, which is where an ordinary 15-minute cycle lands.
+    last = dt.datetime(2026, 9, 11, 19, 54, tzinfo=dt.timezone.utc)
+
+    # Ten minutes later, mid-session: nothing to say at all.
+    assert freshness.assess(last, 0, 15, now=last + dt.timedelta(minutes=10)) is None
+
+    # THE REGRESSION. Two, six and fourteen hours after that collection the
+    # market is shut, the gap is real, and the product must say so calmly —
+    # every time, not only when the snapshot landed exactly at the bell.
+    for hours in (2, 6, 14):
+        answer = freshness.assess(last, 0, 15, now=last + dt.timedelta(hours=hours))
+        assert answer is not None, f"{hours}h after the close said nothing"
+        state, note = answer
+        assert state == freshness.RESTING, f"{hours}h after the close reported {state}"
+        assert "Market closed" in note
+
+    # Sunday evening is still resting: two days later the market has not been
+    # open for a single second in between.
+    state, _ = freshness.assess(last, 0, 15, now=dt.datetime(2026, 9, 13, 22, 0, tzinfo=dt.timezone.utc))
+    assert state == freshness.RESTING
+
+    # Monday lunchtime with nothing collected since Friday is NOT resting: the
+    # market has been open for hours and nothing arrived.
+    monday = dt.datetime(2026, 9, 14, 16, 0, tzinfo=dt.timezone.utc)  # 12:00 New York
+    state, note = freshness.assess(last, 0, 15, now=monday)
+    assert state == freshness.STALE, state
+    assert "not the market being closed" in note
+    # And it counts open hours, not elapsed ones: from 15:54 Friday that is the
+    # six minutes left of Friday plus 2.5 hours of Monday.
+    traded = freshness.open_seconds_between(last, monday)
+    assert 2.5 * 3600 < traded < 2.75 * 3600, traded
+
+    # A holiday does not make data stale. Thanksgiving 2026 is 26 November;
+    # collected the evening before, read on the holiday itself.
+    before_holiday = dt.datetime(2026, 11, 25, 20, 55, tzinfo=dt.timezone.utc)
+    holiday_noon = dt.datetime(2026, 11, 26, 17, 0, tzinfo=dt.timezone.utc)
+    # 15:55 New York: the five minutes left of that session, and nothing at all
+    # from the holiday itself.
+    assert freshness.open_seconds_between(before_holiday, holiday_noon) == 5 * 60
+    state, _ = freshness.assess(before_holiday, 0, 15, now=holiday_noon)
+    assert state == freshness.RESTING, state
+
+    # Refusals outrank age and are named while the data is still fresh.
+    state, note = freshness.assess(last, 3, 15, now=last + dt.timedelta(minutes=10))
+    assert state == freshness.FAILING, state
+    assert "3" in note and "failing" in note.lower()
+
+    # One or two failures are not a story; a symbol that has never collected
+    # and is not being refused either has nothing to report yet.
+    assert freshness.assess(last, 2, 15, now=last + dt.timedelta(minutes=10)) is None
+    assert freshness.assess(None, 1, 15, now=monday) is None
+    state, note = freshness.assess(None, 4, 15, now=monday)
+    assert state == freshness.FAILING and "Nothing has been collected" in note
+
+    # Durations are read at a glance, never more than two units.
+    assert freshness.age_phrase(dt.timedelta(minutes=7)) == "7m"
+    assert freshness.age_phrase(dt.timedelta(hours=3, minutes=4, seconds=59)) == "3h 4m"
+    assert freshness.age_phrase(dt.timedelta(days=2, hours=4, minutes=30)) == "2d 4h"
+    assert freshness.age_phrase(dt.timedelta(days=2)) == "2d"
+
+    print("freshness checks passed (resting, stale, failing, and the bell-minute trap)")
+
+
+def check_the_run_log_answers_how_collection_is_going():
+    """Last success and failures SINCE it, read in one query and per source.
+
+    TWO QUERIES WOULD LIE. Counting failures separately counts the ones that
+    happened before the success, so a symbol that recovered an hour ago would
+    be reported as failing until the log was trimmed — which it never is.
+
+    PER SOURCE, because the screen is per source. A ticker one provider serves
+    and another refuses is healthy on the screen drawing the provider that
+    serves it, and the reader cannot act on a warning about the other one.
+    """
+    conn = db.get_connection()
+    ticker = "FRESHCHK"
+    # Naive UTC, which is what the collector writes and what the column holds —
+    # asserting on aware values here would be testing a convention this product
+    # does not use.
+    base = dt.datetime(2026, 9, 11, 14, 0)
+
+    # Nothing logged at all: no success, no failures.
+    assert db.collection_state(conn, ticker) == (None, 0)
+
+    def run(status, minutes, source="yahoo"):
+        at = base + dt.timedelta(minutes=minutes)
+        db.log_run(conn, at, at + dt.timedelta(seconds=30), ticker, status, source=source)
+
+    run("failed", 0)
+    run("failed", 15)
+    run("success", 30)
+    run("failed", 45)
+    run("failed", 60)
+
+    last, failures = db.collection_state(conn, ticker)
+    assert last == base + dt.timedelta(minutes=30), last
+    assert failures == 2, failures  # the two before the success do not count
+
+    # A second source with its own story does not leak into the first.
+    run("success", 75, source="other")
+    last_yahoo, failures_yahoo = db.collection_state(conn, ticker, source="yahoo")
+    assert last_yahoo == base + dt.timedelta(minutes=30)
+    assert failures_yahoo == 2
+    last_other, failures_other = db.collection_state(conn, ticker, source="other")
+    assert last_other == base + dt.timedelta(minutes=75)
+    assert failures_other == 0
+
+    conn.execute("DELETE FROM collection_runs WHERE ticker = %s", (ticker,))
+    conn.commit()
+    conn.close()
+    print("collection-state checks passed (one query, failures since the last success, per source)")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -1650,6 +1788,8 @@ def main():
     check_the_flip_is_the_crossing_by_the_money()
     check_the_strike_count_actually_decides_what_is_drawn()
     check_the_solver_stands_aside_where_it_should()
+    check_a_stopped_collection_does_not_look_healthy()
+    check_the_run_log_answers_how_collection_is_going()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

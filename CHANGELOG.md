@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Every screen now says when its data stopped being current.** A chart that
+  has quietly frozen is worse than an empty one: the empty screen is read
+  correctly and the frozen one is not, and until now the only clue that
+  collection had stopped was a timestamp in a caption on one tab out of eight.
+  A ticker whose collector was refused, or whose worker never came back after a
+  reboot, or whose interval never lands inside a session, is now said so above
+  the charts. Four states, kept deliberately apart so that the ordinary one
+  does not teach you to ignore the others: nothing at all while collection is
+  healthy, a calm note when the market has simply been shut since the last
+  collection, a warning when the market was open and nothing arrived, and a
+  warning naming the refusals when the source keeps saying no. The line between
+  "resting" and "stale" is drawn on how much of the gap the market was actually
+  open for, so weekends, holidays and half-days all come out right without any
+  of them being a special case.
+- A symbol the source keeps refusing no longer gets "click Collect data"
+  printed underneath the sentence explaining that collecting is what is
+  failing.
+
 ## [0.6.1] - 2026-09-08
 
 ### Fixed

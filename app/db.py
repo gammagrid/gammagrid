@@ -567,6 +567,48 @@ def unresolvable_tickers(
     return {row[0].upper(): row[1] for row in rows}
 
 
+def collection_state(
+    conn: psycopg.Connection, ticker: str, source: str | None = None
+) -> tuple[datetime | None, int]:
+    """(last successful collection, failures since it) for one ticker.
+
+    The two facts the freshness note is built from, read together so that they
+    cannot disagree: counting failures in a second query would count the ones
+    that happened before the success the first query found, and report a symbol
+    as failing minutes after it recovered.
+
+    SCOPED BY SOURCE, like everything else a screen shows. A ticker collected
+    by one provider and refused by another is not "failing" on the screen
+    drawing the provider that serves it — and saying so would be both wrong and
+    unfixable by the person reading it.
+
+    The run log is the state, exactly as it is for suspension: no counter is
+    stored anywhere, so nothing has to be kept in step with it. Both the
+    subquery and the count hit the (ticker, source, started_at) index.
+
+    The timestamp comes back naive and is UTC by the collector's convention,
+    the same as every other moment in this schema.
+    """
+    row = conn.execute(
+        """WITH last_ok AS (
+               SELECT max(started_at) AS at
+               FROM collection_runs
+               WHERE ticker = %(ticker)s AND status = 'success'
+                 AND (%(source)s::text IS NULL OR source = %(source)s::text)
+           )
+           SELECT (SELECT at FROM last_ok),
+                  (SELECT count(*) FROM collection_runs
+                    WHERE ticker = %(ticker)s AND status = 'failed'
+                      AND (%(source)s::text IS NULL OR source = %(source)s::text)
+                      AND (started_at > (SELECT at FROM last_ok)
+                           OR (SELECT at FROM last_ok) IS NULL))""",
+        {"ticker": ticker.upper(), "source": source},
+    ).fetchone()
+    if row is None:
+        return None, 0
+    return row[0], int(row[1] or 0)
+
+
 def collection_depth(conn: psycopg.Connection) -> dict[str, dt.date]:
     """First collection date per ticker — how much history each one has.
 

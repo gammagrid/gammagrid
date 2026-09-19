@@ -19,6 +19,7 @@ from app import (  # noqa: I001 — grouped by what they are, not alphabetised
     collector,
     config,
     db,
+    freshness,
     market_calendar,
     metrics,
     providers,
@@ -874,18 +875,39 @@ def with_our_iv(frame):
 
 latest_df = with_our_iv(db.get_latest_snapshot(conn, selected_ticker, source=page_source))
 
-# What the collector last believed about the market, phrased by the calendar.
+# HOW OLD THIS SCREEN IS, SAID BEFORE ANY OF IT IS DRAWN. Two questions, asked
+# in this order because the answers rule each other out: is this ticker's
+# collection healthy, and — only if there is nothing to report about it — what
+# is the market doing.
+#
+# The freshness note speaks about THIS symbol and wins, because "collection for
+# GLD is failing" is a fact about the screen being read, while "market closed"
+# is a fact about the day. Saying both would print two lines that agree in tone
+# and disagree in meaning, and a reader picks the calmer one.
+#
 # The app never asks the provider itself: a page render has no business making a
 # network call, and two processes asking separately would eventually disagree in
-# front of the reader.
-_market_note = market_calendar.status_note(
-    db.get_setting(conn, "market_state"),
-    db.get_setting(conn, "market_state_at"),
-    max(db.get_collector_interval(conn), 15),
-)
+# front of the reader. Both of these read what the collector already wrote.
+_collector_interval = max(db.get_collector_interval(conn), 15)
+_last_success, _failures = db.collection_state(conn, selected_ticker, source=page_source)
+_freshness = freshness.assess(_last_success, _failures, _collector_interval)
 
-if _market_note:
-    st.caption(_market_note)
+if _freshness:
+    _state, _note = _freshness
+    if _state == freshness.RESTING:
+        st.caption(_note)
+    else:
+        st.warning(_note, icon="⚠️")
+else:
+    # What the collector last believed about the market, phrased by the
+    # calendar. Only reached when this ticker has nothing wrong with it.
+    _market_note = market_calendar.status_note(
+        db.get_setting(conn, "market_state"),
+        db.get_setting(conn, "market_state_at"),
+        _collector_interval,
+    )
+    if _market_note:
+        st.caption(_market_note)
 
 # A SYMBOL THIS SOURCE WILL NOT SERVE, said before anything else on the page.
 # Without it the screen is indistinguishable from a ticker that has simply not
@@ -903,7 +925,13 @@ if selected_ticker in _refused_here:
     )
 
 if latest_df.empty:
-    st.info(f"No data for {selected_ticker}. Click “Collect data” on the left.")
+    # NOT "click Collect data" WHEN COLLECTING IS THE THING THAT IS FAILING.
+    # The note above already said the source has refused this symbol several
+    # times; inviting somebody to press the button again directly underneath it
+    # is the product contradicting itself in two consecutive lines, and the
+    # press costs another refused request.
+    if not (_freshness and _freshness[0] == freshness.FAILING):
+        st.info(f"No data for {selected_ticker}. Click “Collect data” on the left.")
     st.stop()
 
 # Said out loud only when there is something to say. A person who switched
