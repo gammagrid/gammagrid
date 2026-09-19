@@ -473,6 +473,20 @@ def format_delta(line: dict) -> str:
     delta = line.get("delta")
     if delta is None:
         return ""
+    printed = _printed_delta(line, delta, unit)
+    # A CHANGE TOO SMALL TO PRINT IS NOT A CHANGE. Without this a ratio that
+    # moved in the fourth decimal reads "+0.00" next to two identical numbers,
+    # which asks the reader to find a difference that is not there.
+    if _is_zero(printed):
+        return "unchanged"
+    return printed
+
+
+def _is_zero(printed: str) -> bool:
+    return all(character in "+-0.,%" for character in printed.split(" ")[0])
+
+
+def _printed_delta(line: dict, delta: float, unit: str) -> str:
     if unit == "gex":
         return weather.format_gex(delta)
     if unit == "pts":

@@ -1270,7 +1270,13 @@ if active_view == "Changes":
                 frame = frame.sort_index()
                 frame.index.name = "strike"
                 frame = strikes_around_money(frame, row_after["underlying_price"], 20)
-                st.bar_chart(frame, color=[BRAND_GREEN, BRAND_PURPLE][: len(frame.columns)])
+                # NOT STACKED. Stacked bars would draw one day ON TOP of the
+                # other, so a strike where both days carry exposure would read
+                # as their sum — a wall twice the size of either day's.
+                st.bar_chart(
+                    frame, stack=False,
+                    color=[BRAND_GREEN, BRAND_PURPLE][: len(frame.columns)],
+                )
 
             with st.expander("ℹ️ How to read this"):
                 st.write(

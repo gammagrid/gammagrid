@@ -1923,6 +1923,12 @@ def check_the_day_row_and_the_ladder():
     assert by_key["iv"]["kind"] == day_summary.MOVED
     assert day_summary.format_delta(by_key["iv"]) == "+5.0 pts"
     assert day_summary.format_delta(by_key["call_oi"]) == "+20.0%"
+    # A CHANGE TOO SMALL TO PRINT IS NOT A CHANGE. A ratio that moved in the
+    # fourth decimal used to read "+0.00" next to two identical numbers, which
+    # asks the reader to find a difference that is not there.
+    invisible = day_summary._number_change("pcr_oi", "Put/Call", 0.4612, 0.4613, unit="ratio")
+    assert invisible["kind"] == day_summary.MOVED
+    assert day_summary.format_delta(invisible) == "unchanged"
     assert by_key["pcr_volume"]["kind"] == day_summary.MOVED
 
     # Every line has a kind from the closed set — the view colours by it, and

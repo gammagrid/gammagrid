@@ -31,10 +31,11 @@ products, and CI fails if that ever stops being true.
 > into a terminal, you can run GammaGrid. No Python, no config files, no
 > programming experience needed — see [Quick start](#quick-start-no-coding-required) below.
 
-![GEX Heatmap: strike × expiry gamma exposure matrix, with Call Wall, Put Wall, Gamma Flip, and Replay](docs/img/gex-heatmap.png)
+![The Changes view: two trading days side by side, with what moved between them](docs/img/changes.png)
 
-*Dealer gamma by strike and expiry, with the Call Wall, Put Wall and Gamma Flip
-marked. Replay steps the same grid back through every moment collected.*
+*What changed since yesterday, from history collected on your own machine: the
+regime, the levels, the flow — before, after, and the difference. Coloured only
+where the kind of day changed.*
 
 ## Quick start (no coding required)
 
@@ -204,8 +205,24 @@ gets longer.
   collect is answered before you commit to it instead of failing quietly for a
   week
 
+- **One line above every view** saying what the whole chain adds up to right
+  now: net GEX, the walls, the gamma flip and how far the price is from it, with
+  a word for the regime — whether dealer hedging is damping moves or amplifying
+  them — and a sentence saying what that word means
+- **A screen that admits when it stopped being current.** A collector that was
+  refused, a machine that came back from a reboot without its worker, an
+  interval that never lands inside a session — all of them used to look exactly
+  like a quiet market. Now they are said out loud, and "the market is shut" is
+  kept deliberately apart from "nothing arrived"
+
 And, because every snapshot is kept:
 
+- **Changes: two trading days side by side.** Pick two days and read what moved
+  between them — the regime, the price, net GEX, the walls, the flip, max pain
+  and the expected move of the same expiry, put/call, volatility, open interest
+  by side, the expiries that rolled off, and both days' GEX profiles on one
+  chart. Levels are reported in strikes, because a strike is the grid a wall
+  actually moves on
 - **Where the price went** — a per-contract waterfall splitting the day's price
   change into delta, gamma, vega, theta and the residual. No entry price is
   needed and none is asked for: this is a property of the contract, not of your
@@ -280,6 +297,31 @@ stays readable and still appears in every historical view.
 
 ## Screenshots
 
+**GEX Heatmap.** Dealer gamma by strike and expiry, with the Call Wall, Put Wall
+and Gamma Flip marked, and the band around the money set in strikes rather than
+percent. Replay steps the same grid back through every moment you collected.
+
+![GEX Heatmap: strike × expiry gamma exposure matrix, with Call Wall, Put Wall, Gamma Flip, and Replay](docs/img/gex-heatmap.png)
+
+**Contract: where the price went.** One contract's price over time, and the same
+move split by greek — how much of it was delta, gamma, vega and theta, in cents
+per share, with what the model could not explain left as a residual rather than
+hidden.
+
+![A contract's price history and the waterfall splitting its move by greek](docs/img/contract.png)
+
+**Open interest, day over day.** What was opened and closed at each strike since
+the previous trading day, largest moves first — the flow that forms tomorrow's
+hedging levels.
+
+![Day-over-day open interest change by strike and expiry](docs/img/oi-delta.png)
+
+**Unusual activity.** Today's volume against each contract's own baseline, so a
+thousand lots on a contract that normally trades ten is flagged and a thousand
+lots on a liquid one is not.
+
+![Contracts whose volume is far above their own history](docs/img/unusual.png)
+
 **IV surface.** The whole chain at once: implied volatility across strikes and
 expiries, so a skew that steepened on one expiry is visible without opening it.
 
@@ -291,8 +333,8 @@ own history.
 
 ![Options screener with the full set of greeks and range filters](docs/img/screener.png)
 
-All screenshots here are real GammaGrid output — SPY/QQQ/MSFT via a live
-collection, no mockups.
+All screenshots here are real GammaGrid output, from a live collection on a
+laptop — no mockups.
 
 ## FAQ
 
