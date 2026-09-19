@@ -9,6 +9,7 @@ from datetime import datetime
 
 import pandas as pd
 import psycopg
+from psycopg.types.json import Jsonb
 
 from app import config, market_calendar, migrate
 
@@ -1398,3 +1399,176 @@ def get_volume_stats(
         params={"ticker": ticker.upper(), "source": scoped},
         parse_dates=["expiry"],
     )
+
+
+# --- the per-day summary (the Changes view) -------------------------------
+
+_DAY_SUMMARY_COLUMNS = (
+    "day", "collected_at", "underlying_price", "net_gex", "call_wall", "put_wall", "gamma_flip",
+    "state", "expiry_count", "horizon_dte", "nearest_expiry", "nearest_max_pain", "move_lower",
+    "move_upper", "contracts", "call_volume", "put_volume", "call_oi", "put_oi",
+    "expiries", "gex_by_strike", "computed_at", "core_sha",
+)
+
+
+def _day_summary_row(record) -> dict:
+    return dict(zip(_DAY_SUMMARY_COLUMNS, record))
+
+
+def _float_or_none(value) -> float | None:
+    if value is None:
+        return None
+    number = pd.to_numeric(value, errors="coerce")
+    return None if pd.isna(number) else float(number)
+
+
+def upsert_day_summary(
+    conn: psycopg.Connection, ticker: str, source: str, row: dict, core_sha: str
+) -> None:
+    """Store one ticker-day (day_summary.summarize).
+
+    An UPSERT on the day: every collection of the day rewrites the row, so by
+    the close it describes the day's last snapshot. A row per collection would
+    be a different product — an intraday series nobody asked for, in a table
+    whose whole purpose is "what did this day end up looking like".
+    """
+    conn.execute(
+        """INSERT INTO ticker_day_summary (ticker, source, day, collected_at, underlying_price,
+                                           net_gex, call_wall, put_wall, gamma_flip, state,
+                                           expiry_count, horizon_dte, nearest_expiry, nearest_max_pain,
+                                           move_lower, move_upper, contracts,
+                                           call_volume, put_volume, call_oi, put_oi,
+                                           expiries, gex_by_strike, computed_at, core_sha)
+           VALUES (%(ticker)s, %(source)s, %(day)s, %(collected_at)s, %(underlying_price)s,
+                   %(net_gex)s, %(call_wall)s, %(put_wall)s, %(gamma_flip)s, %(state)s,
+                   %(expiry_count)s, %(horizon_dte)s, %(nearest_expiry)s, %(nearest_max_pain)s,
+                   %(move_lower)s, %(move_upper)s, %(contracts)s,
+                   %(call_volume)s, %(put_volume)s, %(call_oi)s, %(put_oi)s,
+                   %(expiries)s, %(gex_by_strike)s, (now() AT TIME ZONE 'utc'), %(core_sha)s)
+           ON CONFLICT (ticker, source, day) DO UPDATE
+           SET collected_at = EXCLUDED.collected_at, underlying_price = EXCLUDED.underlying_price,
+               net_gex = EXCLUDED.net_gex, call_wall = EXCLUDED.call_wall, put_wall = EXCLUDED.put_wall,
+               gamma_flip = EXCLUDED.gamma_flip, state = EXCLUDED.state,
+               expiry_count = EXCLUDED.expiry_count, horizon_dte = EXCLUDED.horizon_dte,
+               nearest_expiry = EXCLUDED.nearest_expiry, nearest_max_pain = EXCLUDED.nearest_max_pain,
+               move_lower = EXCLUDED.move_lower, move_upper = EXCLUDED.move_upper,
+               contracts = EXCLUDED.contracts,
+               call_volume = EXCLUDED.call_volume, put_volume = EXCLUDED.put_volume,
+               call_oi = EXCLUDED.call_oi, put_oi = EXCLUDED.put_oi,
+               expiries = EXCLUDED.expiries,
+               gex_by_strike = EXCLUDED.gex_by_strike, computed_at = EXCLUDED.computed_at,
+               core_sha = EXCLUDED.core_sha""",
+        {
+            "ticker": ticker.upper(), "source": source, "day": row["day"],
+            "collected_at": row["collected_at"],
+            "underlying_price": float(row["underlying_price"]), "net_gex": float(row["net_gex"]),
+            "call_wall": _float_or_none(row["call_wall"]), "put_wall": _float_or_none(row["put_wall"]),
+            "gamma_flip": _float_or_none(row["gamma_flip"]), "state": row["state"],
+            "expiry_count": int(row["expiry_count"]), "horizon_dte": int(row["horizon_dte"]),
+            "nearest_expiry": row["nearest_expiry"],
+            "nearest_max_pain": _float_or_none(row["nearest_max_pain"]),
+            "move_lower": _float_or_none(row["move_lower"]),
+            "move_upper": _float_or_none(row["move_upper"]),
+            "contracts": int(row["contracts"]),
+            "call_volume": row.get("call_volume"), "put_volume": row.get("put_volume"),
+            "call_oi": row.get("call_oi"), "put_oi": row.get("put_oi"),
+            "expiries": Jsonb(list(row["expiries"])),
+            "gex_by_strike": Jsonb(list(row["gex_by_strike"])), "core_sha": core_sha,
+        },
+    )
+    conn.commit()
+
+
+def get_day_summary(
+    conn: psycopg.Connection, ticker: str, source: str, day: dt.date | None = None
+) -> dict | None:
+    """The row for one day — the newest day when None — or None."""
+    filter_day = "AND day = %(day)s" if day is not None else ""
+    record = conn.execute(
+        f"""SELECT {", ".join(_DAY_SUMMARY_COLUMNS)} FROM ticker_day_summary
+             WHERE ticker = %(ticker)s AND source = %(source)s {filter_day}
+             ORDER BY day DESC LIMIT 1""",  # noqa: S608 — the filter is a fixed string
+        {"ticker": ticker.upper(), "source": source, "day": day},
+    ).fetchone()
+    return None if record is None else _day_summary_row(record)
+
+
+def previous_day_summary(
+    conn: psycopg.Connection, ticker: str, source: str, before: dt.date
+) -> dict | None:
+    """The newest row strictly before a day.
+
+    "The previous trading day" as the table knows it, which skips weekends,
+    holidays and days nothing was collected without consulting a calendar —
+    the row exists or it does not.
+    """
+    record = conn.execute(
+        f"""SELECT {", ".join(_DAY_SUMMARY_COLUMNS)} FROM ticker_day_summary
+             WHERE ticker = %(ticker)s AND source = %(source)s AND day < %(before)s
+             ORDER BY day DESC LIMIT 1""",  # noqa: S608 — the column list is a constant
+        {"ticker": ticker.upper(), "source": source, "before": before},
+    ).fetchone()
+    return None if record is None else _day_summary_row(record)
+
+
+def list_day_summaries(
+    conn: psycopg.Connection, ticker: str, source: str, limit: int = 400
+) -> list[dt.date]:
+    """The days on record, newest first — what the two date pickers offer."""
+    rows = conn.execute(
+        """SELECT day FROM ticker_day_summary
+            WHERE ticker = %(ticker)s AND source = %(source)s
+            ORDER BY day DESC LIMIT %(limit)s""",
+        {"ticker": ticker.upper(), "source": source, "limit": limit},
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def get_moment_rollup(
+    conn: psycopg.Connection, ticker: str, source: str, collected_at
+) -> dict | None:
+    """The volume-weighted implied volatility of one collection, by key.
+
+    Only that one number: the volume and open-interest totals the comparison
+    also needs are written into the day row itself, because this table does not
+    carry them and re-deriving them would mean reading a whole past chain to
+    sum two columns.
+    """
+    record = conn.execute(
+        """SELECT iv_weighted_avg FROM snapshot_iv_summary
+            WHERE ticker = %(ticker)s AND source = %(source)s AND collected_at = %(at)s""",
+        {"ticker": ticker.upper(), "source": source, "at": collected_at},
+    ).fetchone()
+    if record is None:
+        return None
+    return {"iv_weighted_avg": record[0]}
+
+
+def missing_day_summaries(
+    conn: psycopg.Connection, ticker: str, source: str, days: int, core_sha: str
+) -> list:
+    """The collection moments of the last `days` days with no day row, a row
+    built by other formulas, or a row older than the day's last collection.
+
+    One per trading day, the day's last collection — the same per-day rule the
+    rest of the product applies, expressed against the run log so that the
+    answer cannot disagree with the moment list the views read.
+    """
+    rows = conn.execute(
+        f"""WITH per_day AS (
+                SELECT DISTINCT ON ({_MARKET_DATE}) started_at, {_MARKET_DATE} AS day
+                  FROM collection_runs
+                 WHERE ticker = %(ticker)s AND source = %(source)s
+                   AND status = 'success' AND COALESCE(rows_fetched, 0) > 0
+                   AND extract(isodow from {_MARKET_TIME}) <= 5
+                   AND started_at >= now() - make_interval(days => %(days)s)
+                 ORDER BY {_MARKET_DATE} DESC, started_at DESC
+            )
+            SELECT p.started_at FROM per_day p
+              LEFT JOIN ticker_day_summary s
+                ON s.ticker = %(ticker)s AND s.source = %(source)s AND s.day = p.day
+             WHERE s.day IS NULL OR s.core_sha <> %(sha)s OR s.collected_at < p.started_at
+             ORDER BY p.started_at DESC""",  # noqa: S608 — the date expressions are constants
+        {"ticker": ticker.upper(), "source": source, "days": days, "sha": core_sha},
+    ).fetchall()
+    return [r[0] for r in rows]

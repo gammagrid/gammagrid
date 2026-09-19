@@ -18,12 +18,14 @@ from app import (  # noqa: I001 — grouped by what they are, not alphabetised
     catalogue,
     collector,
     config,
+    day_summary,
     db,
     freshness,
     market_calendar,
     metrics,
     providers,
     suggestions,
+    weather,
 )
 from app.viewtime import (
     format_date,
@@ -974,8 +976,40 @@ def get_tracked() -> pd.DataFrame:
     return _tracked_cache["df"]
 
 
+# WHAT THE WHOLE CHAIN ADDS UP TO, IN ONE LINE, ABOVE EVERY VIEW. Eight views
+# answer eight questions and none of them answers the first one somebody has:
+# is dealer hedging damping this or amplifying it today. The number that says
+# so is net GEX, which is eight digits and a sign — and the sign is the part
+# that matters, which no amount of staring at the digits teaches.
+#
+# BUILT ONCE, FROM THE SNAPSHOT ALREADY IN HAND. It folds one GEX matrix over
+# the near-term expiries and reads three numbers off it, so drawing it on every
+# view costs one matrix rather than one per view. The near term rather than the
+# whole chain, on purpose: read over every expiry it would disagree with the
+# heatmap directly below it on any symbol whose open interest sits far out.
+_weather = metrics.gamma_weather(latest_df)
+if _weather:
+    _words = weather.describe(_weather, latest_moment=latest_date)
+    _tone = BRAND_GREEN if _weather["net_gex"] >= 0 else BRAND_PURPLE
+    _flip = _weather["gamma_flip"]
+    _bits = [f"Net GEX **{weather.format_gex(_weather['net_gex'])}**"]
+    if _flip is not None:
+        _bits.append(f"flip **{_flip:,.2f}** ({_weather['flip_distance_pct']:.1f}% away)")
+    if _weather["call_wall"] is not None:
+        _bits.append(f"call wall **{_weather['call_wall']:,.2f}**")
+    if _weather["put_wall"] is not None:
+        _bits.append(f"put wall **{_weather['put_wall']:,.2f}**")
+    st.markdown(
+        f"<span style='color:{_tone};font-weight:600'>{_words['label']}</span> · "
+        + " · ".join(_bits),
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        _words["sentence"] + (f"  ·  {_words['scope']}" if _words["scope"] else "")
+    )
+
 VIEWS = [
-    "Overview", "Max Pain / GEX", "GEX Heatmap", "Volatility (IV)",
+    "Overview", "Changes", "Max Pain / GEX", "GEX Heatmap", "Volatility (IV)",
     "Contract", "Screener", "Unusual Activity", "OI Delta",
 ]
 active_view = st.segmented_control(
@@ -1093,6 +1127,169 @@ if active_view == "Overview":
                 "than a real market effect — trust the overall shape more than individual "
                 "bumps."
             )
+
+
+if active_view == "Changes":
+    # WHAT THIS VIEW IS FOR. Every other view answers a question about now, and
+    # the one thing this tool has that a web page of today's numbers does not
+    # is that it kept yesterday. This is the view that says so: two trading
+    # days side by side, and what moved between them.
+    _days = db.list_day_summaries(conn, selected_ticker, page_source) if page_source else []
+    if len(_days) < 1:
+        st.info(
+            "No day summaries yet for this ticker. One is written after every collection, "
+            "and the worker fills in the days it missed — so this view fills itself in as "
+            "collection runs."
+        )
+    else:
+        # The pickers offer days that EXIST rather than a calendar: a date with
+        # no collection behind it is not a comparison, and offering it invites
+        # somebody to pick it and read an error as a defect.
+        _default_after = _days[0]
+        _default_before = _days[1] if len(_days) > 1 else _days[0]
+        left, right = st.columns(2)
+        day_before = left.selectbox(
+            "Compare from", _days, index=_days.index(_default_before), key="changes_from",
+            format_func=format_date,
+        )
+        day_after = right.selectbox(
+            "to", _days, index=_days.index(_default_after), key="changes_to",
+            format_func=format_date,
+        )
+        row_after = db.get_day_summary(conn, selected_ticker, page_source, day_after)
+        row_before = (
+            db.get_day_summary(conn, selected_ticker, page_source, day_before)
+            if day_before != day_after else None
+        )
+        if row_after is None:
+            st.info("That day has no summary row.")
+        else:
+            # The flow numbers live in the day row; the volatility average
+            # lives with the collection moment it was computed for. Joined here
+            # rather than stored twice.
+            def _rollup(row):
+                if row is None:
+                    return None
+                stored = db.get_moment_rollup(
+                    conn, selected_ticker, page_source, row["collected_at"]
+                ) or {}
+                return {
+                    "iv_weighted_avg": stored.get("iv_weighted_avg"),
+                    "call_volume": row.get("call_volume"), "put_volume": row.get("put_volume"),
+                    "call_oi": row.get("call_oi"), "put_oi": row.get("put_oi"),
+                }
+
+            rollup_after = _rollup(row_after)
+            rollup_before = _rollup(row_before)
+            # Yesterday's max pain for TODAY's nearest expiry, on the day the
+            # nearest expiry rolls over. Without it the line claims a brand new
+            # level, which is the chain being read through a different expiry
+            # rather than anything having happened.
+            same_expiry_pain = None
+            if (
+                row_before
+                and row_after.get("nearest_expiry")
+                and str(row_before.get("nearest_expiry")) != str(row_after.get("nearest_expiry"))
+            ):
+                earlier = db.get_snapshots_at(
+                    conn, selected_ticker, [row_before["collected_at"]], source=page_source
+                )
+                if not earlier.empty:
+                    wanted = pd.Timestamp(row_after["nearest_expiry"])
+                    same_day = earlier[
+                        pd.to_datetime(earlier["expiry"], errors="coerce") == wanted
+                    ]
+                    if not same_day.empty:
+                        pain = metrics.max_pain(same_day, wanted)
+                        same_expiry_pain = None if pain is None or pd.isna(pain) else float(pain)
+
+            ladder = day_summary.changes(
+                row_before, row_after, rollup_before, rollup_after, same_expiry_pain
+            )
+            st.subheader(day_summary.headline(ladder))
+            st.caption(
+                f"{format_date(day_before)} → {format_date(day_after)}"
+                + ("" if row_before else "  ·  first day on record — nothing to compare yet")
+            )
+
+            # One HTML table rather than a dataframe: the chips carry meaning
+            # in colour (green towards damping, purple towards amplification —
+            # what those two colours mean on every other chart here), and a
+            # plain table of numbers is exactly the thing this view exists to
+            # not be.
+            rows_html = []
+            for line in ladder:
+                colour = ""
+                if line["kind"] == day_summary.DAMPING:
+                    colour = f"color:{BRAND_GREEN};font-weight:600"
+                elif line["kind"] == day_summary.AMPLIFYING:
+                    colour = f"color:{BRAND_PURPLE};font-weight:600"
+                note = line.get("note")
+                extra = ""
+                if line["key"] == "expiries":
+                    parts = []
+                    if line.get("rolled_off"):
+                        parts.append("expired: " + ", ".join(line["rolled_off"]))
+                    if line.get("listed"):
+                        parts.append("newly listed: " + ", ".join(line["listed"]))
+                    extra = "; ".join(parts)
+                footnote = note or extra
+                label = line["label"] + (
+                    f"<br><span style='opacity:.6;font-size:.85em'>{footnote}</span>"
+                    if footnote else ""
+                )
+                rows_html.append(
+                    f"<tr><td style='padding:.35rem .75rem .35rem 0'>{label}</td>"
+                    f"<td style='padding:.35rem .75rem;opacity:.7'>{day_summary.format_value(line, 'before')}</td>"
+                    f"<td style='padding:.35rem .75rem'>{day_summary.format_value(line, 'after')}</td>"
+                    f"<td style='padding:.35rem 0;{colour}'>{day_summary.format_delta(line)}</td></tr>"
+                )
+            st.markdown(
+                "<table style='width:100%;border-collapse:collapse'>"
+                "<tr style='opacity:.6;font-size:.85em'><th style='text-align:left'></th>"
+                f"<th style='text-align:left'>{format_date(day_before)}</th>"
+                f"<th style='text-align:left'>{format_date(day_after)}</th>"
+                "<th style='text-align:left'>change</th></tr>"
+                + "".join(rows_html) + "</table>",
+                unsafe_allow_html=True,
+            )
+
+            # The two GEX profiles on one chart: the day before as an outline,
+            # the day after filled. The window is the strikes around the money,
+            # the same band the heatmap draws, because the far tails are where
+            # a profile carries nothing and a chart drawn over them shows two
+            # flat lines meeting in the middle.
+            profile_after = row_after.get("gex_by_strike") or []
+            if profile_after:
+                st.subheader("GEX profile, both days")
+                frame = pd.DataFrame({format_date(day_after): dict(profile_after)})
+                if row_before and row_before.get("gex_by_strike"):
+                    frame[format_date(day_before)] = pd.Series(
+                        dict(row_before["gex_by_strike"])
+                    )
+                frame = frame.sort_index()
+                frame.index.name = "strike"
+                frame = strikes_around_money(frame, row_after["underlying_price"], 20)
+                st.bar_chart(frame, color=[BRAND_GREEN, BRAND_PURPLE][: len(frame.columns)])
+
+            with st.expander("ℹ️ How to read this"):
+                st.write(
+                    "Two trading days of your own collection, side by side. A day is New "
+                    "York's date, and the row describes that day's last collection — the "
+                    "same rule OI Delta uses, so the two views never disagree about what "
+                    "\"yesterday\" means.\n\n"
+                    "Colour is reserved for the regime: green when the day moved towards "
+                    "dealer hedging damping moves, purple when it moved towards amplifying "
+                    "them. Everything else changed without changing what kind of day it "
+                    "is, so it is printed in plain ink.\n\n"
+                    "Levels are reported in strikes because that is the grid they live on: "
+                    "a wall that moved \"+1 strike\" moved to the next listed strike, which "
+                    "is a fact about this chain, while the same move as a percentage is a "
+                    "fact about nothing. Max pain is compared for the same expiry only — "
+                    "when the nearest expiry rolls over, the line says which one was "
+                    "nearest before."
+                )
+
 
 if active_view == "Max Pain / GEX":
     # Most tickers list an expiry for today, and it sorts first — so the

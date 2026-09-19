@@ -41,7 +41,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DASHBOARD = os.path.join(REPO, "app", "dashboard.py")
 
 VIEWS = [
-    "Overview", "Max Pain / GEX", "GEX Heatmap", "Volatility (IV)",
+    "Overview", "Changes", "Max Pain / GEX", "GEX Heatmap", "Volatility (IV)",
     "Contract", "Screener", "Unusual Activity", "OI Delta",
 ]
 

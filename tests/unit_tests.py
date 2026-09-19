@@ -1828,6 +1828,261 @@ def check_realized_volatility_is_stored_once_a_day_and_read_back():
     print("realized-volatility checks passed (one fetch a day, read back, failures are captions)")
 
 
+def _future_friday(days_ahead: int = 21) -> dt.date:
+    """A Friday at least `days_ahead` away, computed rather than written down.
+
+    A literal expiry in a fixture is a date that arrives: it passes, the
+    contract it describes becomes worthless, and checks that were green for
+    months turn red on a Tuesday evening with no code having changed. The
+    fixture asks for "a normal monthly expiry from here", which is what it
+    actually means.
+    """
+    day = dt.date.today() + dt.timedelta(days=days_ahead)
+    return day + dt.timedelta(days=(4 - day.weekday()) % 7)
+
+
+def _day_chain(moment: dt.datetime, spot: float, expiry: dt.date, oi_scale: float = 1.0):
+    """A small but honest chain: five strikes, calls and puts, priced so the
+    solver has something to solve and the GEX profile has a shape."""
+    rows = []
+    for strike in (spot - 10, spot - 5, spot, spot + 5, spot + 10):
+        for option_type in ("call", "put"):
+            intrinsic = max(0.0, (spot - strike) if option_type == "call" else (strike - spot))
+            rows.append({
+                "collected_at": moment,
+                "expiry": pd.Timestamp(expiry),
+                "strike": float(strike),
+                "option_type": option_type,
+                "underlying_price": spot,
+                "last_price": intrinsic + 2.0,
+                "bid": intrinsic + 1.9,
+                "ask": intrinsic + 2.1,
+                "volume": int(100 * oi_scale),
+                "open_interest": int(1000 * oi_scale) + int(strike) % 7,
+                "implied_volatility": 0.25,
+                "delta": None, "gamma": None, "theta": None, "vega": None, "rho": None,
+                "in_the_money": strike < spot if option_type == "call" else strike > spot,
+            })
+    return pd.DataFrame(rows)
+
+
+def check_the_day_row_and_the_ladder():
+    """A day row from a chain, and what two of them say happened.
+
+    WHAT THIS IS REALLY CHECKING. The view built on this exists to answer
+    "what changed since yesterday", and the ways that answer can be wrong are
+    all in this function rather than in the drawing: a level compared against a
+    different expiry, a first day dressed up as a screenful of events, a regime
+    that moved reported in the same ink as one that did not.
+    """
+    from app import day_summary, weather
+
+    expiry = _future_friday()
+    monday = dt.datetime(2026, 9, 14, 19, 45)
+    tuesday = dt.datetime(2026, 9, 15, 19, 45)
+
+    before_chain = _day_chain(monday, 100.0, expiry)
+    after_chain = _day_chain(tuesday, 102.0, expiry, oi_scale=1.2)
+    before = day_summary.summarize(
+        before_chain, metrics.DEFAULT_PRICING, metrics.gamma_weather(before_chain)
+    )
+    after = day_summary.summarize(
+        after_chain, metrics.DEFAULT_PRICING, metrics.gamma_weather(after_chain)
+    )
+    assert before is not None and after is not None
+
+    # The day is New York's date of the collection, not UTC's: 19:45 UTC is
+    # 15:45 in New York, the same day — and the rule has to be the one the rest
+    # of the product uses, or two views disagree about "yesterday".
+    assert after["day"] == dt.date(2026, 9, 15), after["day"]
+    assert after["state"] in dict(weather.WEATHER_WORDS)
+    assert after["contracts"] == len(after_chain)
+    assert after["expiries"] == [expiry.strftime("%Y-%m-%d")]
+    assert after["gex_by_strike"], "the profile the overlay chart draws must be in the row"
+    # The flow by side is stored with the day, because nothing else stores it.
+    assert after["call_volume"] == after["put_volume"] == 5 * int(100 * 1.2)
+    assert after["call_oi"] > before["call_oi"], "open interest grew between the two days"
+
+    # A chain with no expiry worth reporting on has no max pain and no expected
+    # move, and says so with None rather than with a confident number.
+    thin = _day_chain(tuesday, 102.0, expiry).head(4)
+    thin_row = day_summary.summarize(thin, metrics.DEFAULT_PRICING, metrics.gamma_weather(thin))
+    if thin_row is not None:
+        assert thin_row["nearest_max_pain"] is None
+
+    rollup_before = {"iv_weighted_avg": 0.24, "call_volume": 500, "put_volume": 500,
+                     "call_oi": 5000, "put_oi": 5100}
+    rollup_after = {"iv_weighted_avg": 0.29, "call_volume": 600, "put_volume": 900,
+                    "call_oi": 6000, "put_oi": 5100}
+    ladder = day_summary.changes(before, after, rollup_before, rollup_after)
+    by_key = {line["key"]: line for line in ladder}
+
+    assert by_key["price"]["kind"] == day_summary.MOVED
+    assert abs(by_key["price"]["delta"] - 2.0) < 1e-9
+    assert by_key["put_oi"]["kind"] == day_summary.SAME, "unchanged open interest is not a move"
+    assert by_key["iv"]["kind"] == day_summary.MOVED
+    assert day_summary.format_delta(by_key["iv"]) == "+5.0 pts"
+    assert day_summary.format_delta(by_key["call_oi"]) == "+20.0%"
+    assert by_key["pcr_volume"]["kind"] == day_summary.MOVED
+
+    # Every line has a kind from the closed set — the view colours by it, and
+    # an unexpected value would simply not be drawn.
+    assert all(line["kind"] in day_summary.KINDS for line in ladder)
+
+    # THE FIRST DAY ON RECORD IS NOT A SCREENFUL OF EVENTS. Nothing to compare
+    # means nothing is claimed, and the headline says which case this is.
+    first = day_summary.changes(None, after, None, rollup_after)
+    assert {line["kind"] for line in first} == {day_summary.UNKNOWN}
+    assert "First day" in day_summary.headline(first)
+    assert all(day_summary.format_delta(line) == "—" for line in first)
+
+    # MAX PAIN IS COMPARED FOR ONE EXPIRY. When the nearest expiry rolls over,
+    # the line names the old one instead of reporting a level that never moved.
+    rolled = dict(after)
+    rolled["nearest_expiry"] = expiry + dt.timedelta(days=7)
+    ladder_rolled = day_summary.changes(before, rolled, rollup_before, rollup_after)
+    pain = {line["key"]: line for line in ladder_rolled}["max_pain"]
+    assert pain.get("note", "").startswith("nearest expiry was")
+    # Given yesterday's number FOR TODAY'S expiry, it is a comparison again.
+    ladder_same = day_summary.changes(
+        before, rolled, rollup_before, rollup_after, previous_same_expiry_pain=99.0
+    )
+    pain_same = {line["key"]: line for line in ladder_same}["max_pain"]
+    assert pain_same["before"] == 99.0 and pain_same["kind"] in (day_summary.MOVED, day_summary.SAME)
+
+    # A REGIME THAT MOVED IS THE HEADLINE; A LEVEL THAT MOVED IS NOT.
+    stormy = dict(after)
+    stormy["state"] = metrics.WEATHER_STORM
+    calm = dict(before)
+    calm["state"] = metrics.WEATHER_CLEAR
+    turned = day_summary.changes(calm, stormy, rollup_before, rollup_after)
+    state_line = {line["key"]: line for line in turned}["state"]
+    assert state_line["kind"] == day_summary.AMPLIFYING
+    assert day_summary.headline(turned).startswith("Gamma weather turned")
+    assert day_summary.format_delta(state_line) == "amplifying"
+    # And the other way round, which is the green one.
+    back = day_summary.changes(stormy, calm, rollup_before, rollup_after)
+    assert {line["key"]: line for line in back}["state"]["kind"] == day_summary.DAMPING
+
+    # Expiries are named rather than counted: "31 -> 30" says less than which
+    # one expired.
+    rolled_off = dict(after)
+    rolled_off["expiries"] = []
+    shape = {line["key"]: line for line in day_summary.changes(
+        before, rolled_off, rollup_before, rollup_after)}["expiries"]
+    assert shape["rolled_off"] == before["expiries"]
+
+    # Levels move in strikes, because that is the grid they live on.
+    step_row = {"gex_by_strike": [[95.0, 1.0], [100.0, 2.0], [105.0, 1.0]]}
+    assert day_summary.strike_step(step_row) == 5.0
+    moved_wall = day_summary._number_change(
+        "call_wall", "Call wall", 100.0, 105.0, unit="strikes", step=5.0
+    )
+    assert day_summary.format_delta(moved_wall) == "+1 strike · +5.00"
+    assert day_summary.format_value(moved_wall, "before") == "100.00"
+    # Net GEX takes the unit its own size asks for.
+    assert weather.format_gex(-671_670_000) == "-671.67M"
+    assert weather.format_gex(2_100_000_000) == "+2.10B"
+
+    print("day-row and ladder checks passed (the day rule, one expiry, the first day, the regime)")
+
+
+def check_day_summaries_are_written_and_filled_in():
+    """The rows reach the database, and the gaps fill themselves in.
+
+    THE GAP IS THE POINT. These machines are switched off overnight, and an
+    upgrade brings the table in empty — a view about what changed, with days
+    missing, is indistinguishable from nothing having changed. So the backfill
+    is checked for what it does the second time as much as the first: nothing.
+    """
+    from app import day_summary
+
+    conn = db.get_connection()
+    ticker = "DAYCHK"
+    source = "yahoo"
+    expiry = _future_friday()
+    moments = [dt.datetime(2026, 9, 14, 19, 45), dt.datetime(2026, 9, 15, 19, 45)]
+
+    for index, moment in enumerate(moments):
+        chain = _day_chain(moment, 100.0 + index, expiry, oi_scale=1 + index * 0.1)
+        row = day_summary.summarize(chain, metrics.DEFAULT_PRICING, metrics.gamma_weather(chain))
+        db.upsert_day_summary(conn, ticker, source, row, day_summary.CODE_SHA)
+
+    stored = db.get_day_summary(conn, ticker, source)
+    assert stored["day"] == dt.date(2026, 9, 15), stored["day"]
+    assert stored["core_sha"] == day_summary.CODE_SHA
+    assert isinstance(stored["expiries"], list) and stored["gex_by_strike"]
+
+    earlier = db.previous_day_summary(conn, ticker, source, dt.date(2026, 9, 15))
+    assert earlier["day"] == dt.date(2026, 9, 14)
+    assert db.previous_day_summary(conn, ticker, source, dt.date(2026, 9, 14)) is None
+    assert db.list_day_summaries(conn, ticker, source) == [dt.date(2026, 9, 15), dt.date(2026, 9, 14)]
+
+    # The same day written twice keeps one row, describing the later snapshot.
+    late = dt.datetime(2026, 9, 15, 20, 55)
+    chain = _day_chain(late, 111.0, expiry)
+    db.upsert_day_summary(
+        conn, ticker, source,
+        day_summary.summarize(chain, metrics.DEFAULT_PRICING, metrics.gamma_weather(chain)),
+        day_summary.CODE_SHA,
+    )
+    assert db.list_day_summaries(conn, ticker, source) == [dt.date(2026, 9, 15), dt.date(2026, 9, 14)]
+    assert db.get_day_summary(conn, ticker, source)["underlying_price"] == 111.0
+
+    # A row built by other formulas is asked to be rebuilt, exactly as a
+    # missing one is: an upgrade that changed a formula must not show its own
+    # release as a market event.
+    conn.execute(
+        "UPDATE ticker_day_summary SET core_sha = 'older' WHERE ticker = %s AND day = %s",
+        (ticker, dt.date(2026, 9, 15)),
+    )
+    conn.commit()
+
+    # Now the real path: snapshots plus a run log, and the backfill reading
+    # them. A day nothing was collected on simply has no row to build.
+    backfill_ticker = "DAYFILL"
+    today = dt.datetime.utcnow().replace(microsecond=0)
+    at = today - dt.timedelta(days=1)
+    while at.isoweekday() > 5:
+        at -= dt.timedelta(days=1)
+    chain = _day_chain(at, 100.0, expiry)
+    db.insert_snapshot(
+        conn, backfill_ticker, at, 100.0,
+        chain.drop(columns=["collected_at", "underlying_price"]), source=source,
+    )
+    db.log_run(conn, at, at + dt.timedelta(seconds=20), backfill_ticker, "success",
+               rows_fetched=len(chain), source=source)
+
+    # The rollup of that same moment: the volatility average this table does
+    # hold, read by key. The flow numbers are not here, and the day row is why.
+    rollup = db.get_moment_rollup(conn, backfill_ticker, source, at)
+    assert rollup is not None and "iv_weighted_avg" in rollup
+    assert db.get_moment_rollup(conn, backfill_ticker, source, at - dt.timedelta(days=9)) is None
+
+    missing = db.missing_day_summaries(conn, backfill_ticker, source, 7, day_summary.CODE_SHA)
+    assert missing, "a collected day with no row must be offered for building"
+    counted = day_summary.backfill(conn, source, [backfill_ticker], 7, dry_run=True)
+    assert counted == len(missing)
+    assert db.get_day_summary(conn, backfill_ticker, source) is None, "dry run must write nothing"
+
+    written = day_summary.backfill(conn, source, [backfill_ticker], 7)
+    assert written == len(missing), written
+    built = db.get_day_summary(conn, backfill_ticker, source)
+    assert built is not None and built["core_sha"] == day_summary.CODE_SHA
+
+    # Run again: everything is current, so nothing is built and nothing is read
+    # beyond the one query that says so.
+    assert day_summary.backfill(conn, source, [backfill_ticker], 7) == 0
+    assert db.missing_day_summaries(conn, backfill_ticker, source, 7, day_summary.CODE_SHA) == []
+
+    conn.execute("DELETE FROM ticker_day_summary WHERE ticker IN (%s, %s)", (ticker, backfill_ticker))
+    conn.execute("DELETE FROM collection_runs WHERE ticker = %s", (backfill_ticker,))
+    conn.execute("DELETE FROM option_snapshots WHERE ticker = %s", (backfill_ticker,))
+    conn.commit()
+    conn.close()
+    print("day-summary storage checks passed (upsert, the previous day, backfill, and its second run)")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -1872,6 +2127,8 @@ def main():
     check_a_stopped_collection_does_not_look_healthy()
     check_the_run_log_answers_how_collection_is_going()
     check_realized_volatility_is_stored_once_a_day_and_read_back()
+    check_the_day_row_and_the_ladder()
+    check_day_summaries_are_written_and_filled_in()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

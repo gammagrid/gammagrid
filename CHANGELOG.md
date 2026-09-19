@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **A new view, "Changes": two trading days of your own collection, side by
+  side.** The one thing this tool has that a web page of today's numbers does
+  not is the history it kept on your machine, and it used to show that history
+  in four places that never said so. This view says it: pick two days, and read
+  what moved between them — the regime, the price, net GEX, the walls, the
+  flip, max pain and the expected move of the same expiry, put/call by volume
+  and open interest, the weighted volatility, the open interest by side, the
+  expiries that rolled off or were newly listed, and the size of the chain.
+  Levels are reported in strikes rather than percent, because a strike is the
+  grid a wall actually moves on. Colour is reserved for the regime — green
+  towards dealer hedging damping moves, purple towards amplifying them — so a
+  coloured line means the kind of day changed, not merely a number. Both days'
+  GEX profiles are drawn on one chart. The rows behind it are written after
+  every collection, and the days a switched-off machine missed are filled in on
+  the next start.
+- **One line above every view says what the whole chain adds up to.** Eight
+  views answered eight questions and none of them answered the first one: is
+  dealer hedging damping this or amplifying it today. Net GEX, the walls, the
+  gamma flip and the distance to it, with a word for the regime and a sentence
+  saying what that word means.
 - **Every screen now says when its data stopped being current.** A chart that
   has quietly frozen is worse than an empty one: the empty screen is read
   correctly and the frozen one is not, and until now the only clue that

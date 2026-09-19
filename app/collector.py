@@ -232,11 +232,44 @@ def collect_watchlist(
                     "Nothing has been deleted."
                 )
 
+    collected = [t for t, r in results.items() if r == "success"]
     # The underlying's own volatility, refreshed here rather than where it is
     # displayed. See refresh_realized_volatility: it is at most one request per
     # ticker per day, and it runs on a pass somebody already asked for.
-    refresh_realized_volatility(conn, [t for t, r in results.items() if r == "success"])
+    refresh_realized_volatility(conn, collected)
+    # What the day ended up looking like, from the chain just stored. Written
+    # here rather than when the Changes view is opened because it is the whole
+    # point of that view that yesterday can still be read tomorrow: computed on
+    # demand, a day nobody opened would simply not exist.
+    _write_day_summaries(conn, collected, active.name)
     return results
+
+
+def _write_day_summaries(conn, tickers: list[str], source: str) -> int:
+    """Store the day row for each ticker just collected. Returns rows written.
+
+    NOTHING HERE MAY BREAK A COLLECTION PASS, for the same reason the
+    volatility refresh above may not: the chains are already stored, and a row
+    that cannot be built costs one view a day rather than the snapshot
+    somebody actually asked for. Late import because day_summary reads
+    snapshots through db, and db is imported by everything.
+    """
+    from app import day_summary
+
+    written = 0
+    for ticker in tickers:
+        try:
+            moment = db.get_collection_moments(conn, ticker, days=1, source=source)
+            if not moment:
+                continue
+            row = day_summary.build_row(conn, ticker, source, moment[0], metrics.DEFAULT_PRICING)
+            if row is None:
+                continue
+            db.upsert_day_summary(conn, ticker, source, row, day_summary.CODE_SHA)
+            written += 1
+        except Exception:  # noqa: BLE001 — a summary is not worth a failed pass
+            log.error("Day summary not written for %s", ticker, exc_info=True)
+    return written
 
 
 def refresh_realized_volatility(

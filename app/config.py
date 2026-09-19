@@ -171,6 +171,39 @@ CATALOGUE_REFRESH_DAYS = int(os.environ.get("CATALOGUE_REFRESH_DAYS", "7"))
 CONTRACT_ARCHIVE_GRACE_DAYS = int(os.environ.get("CONTRACT_ARCHIVE_GRACE_DAYS", "30"))
 
 
+# --- the daily summary and the day-to-day comparison ---
+
+# How the one-line summary above the views decides which weather a regime is
+# in. The sign of net GEX says whether hedging damps or amplifies; the distance
+# to the gamma flip says how much that sign is worth relying on today. "Near"
+# is a distance an ordinary session can cover, "far" one that takes an event —
+# as a percentage of the underlying price, because a point is a different
+# thing on a $40 fund and a $600 index.
+GAMMA_WEATHER_NEAR_FLIP_PCT = float(os.environ.get("GAMMA_WEATHER_NEAR_FLIP_PCT", "1.0"))
+GAMMA_WEATHER_FAR_FLIP_PCT = float(os.environ.get("GAMMA_WEATHER_FAR_FLIP_PCT", "3.0"))
+
+# How far ahead the summary looks. A window in days rather than a count of
+# expiries: "the nearest three" measures how densely the exchange listed
+# expiries, which is two days on a liquid index and four months on a thin
+# commodity fund. The floor is for those thin calendars — a summary built on a
+# single expiry summarises nothing — and the line says the range it actually
+# used rather than the one it asked for.
+GAMMA_WEATHER_HORIZON_DAYS = int(os.environ.get("GAMMA_WEATHER_HORIZON_DAYS", "30"))
+GAMMA_WEATHER_MIN_EXPIRIES = int(os.environ.get("GAMMA_WEATHER_MIN_EXPIRIES", "2"))
+
+# How many open contracts an expiry needs before its max pain and expected
+# move are worth reporting. A max pain resting on three contracts moves a
+# strike a day on noise, and a view whose whole job is to report what changed
+# would be reporting the noise.
+MIN_CONTRACTS_FOR_EXPIRY_METRICS = int(os.environ.get("MIN_CONTRACTS_FOR_EXPIRY_METRICS", "10"))
+
+# How far back the day rows are filled in when some are missing — a machine
+# that was switched off, or an upgrade that brought the rows in for the first
+# time. Bounded because it is work nobody asked for, and generous because it
+# only ever runs until it has caught up.
+DAY_SUMMARY_BACKFILL_DAYS = int(os.environ.get("DAY_SUMMARY_BACKFILL_DAYS", "45"))
+
+
 # --- which revision this is ---
 
 # Read from CHANGELOG.md rather than written down here, and that is the whole

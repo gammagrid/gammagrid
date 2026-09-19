@@ -24,7 +24,16 @@ import logging
 import sys
 import time
 
-from app import catalogue, collector, config, db, iv_backfill, market_calendar, providers
+from app import (
+    catalogue,
+    collector,
+    config,
+    day_summary,
+    db,
+    iv_backfill,
+    market_calendar,
+    providers,
+)
 
 log = logging.getLogger("worker")
 
@@ -34,6 +43,7 @@ log = logging.getLogger("worker")
 IDLE_POLL_SECONDS = 60
 
 _ARCHIVE_MARKER = "last_archive_pass_date"
+_DAY_SUMMARY_MARKER = "last_day_summary_backfill_date"
 
 
 # Which trading day the single closed-market collection has been spent on, and
@@ -132,6 +142,33 @@ def rebuild_stale_volume_stats(conn) -> None:
             continue
         written = db.rebuild_volume_stats(conn, ticker)
         log.info("Rebuilt volume statistics for %s: %s contract(s).", ticker, written)
+
+
+def fill_missing_day_summaries(conn) -> int:
+    """Build the day rows that are absent, at most once a day.
+
+    THE HOLE THIS FILLS IS INVISIBLE, which is why it is filled without being
+    asked for. A machine switched off for a week, an upgrade that introduces
+    these rows for the first time, a formula that changed — all leave the same
+    gap, and a gap in a view about what changed cannot be told apart from
+    nothing having changed. Bounded by a day marker and by how far back it
+    looks, so a machine that has been running costs one query per ticker.
+    """
+    today = dt.date.today().isoformat()
+    if db.get_setting(conn, _DAY_SUMMARY_MARKER) == today:
+        return 0
+    written = 0
+    for ticker in db.get_watchlist(conn):
+        source = db.active_source(conn, ticker)
+        if source is None:
+            continue
+        written += day_summary.backfill(
+            conn, source, [ticker], config.DAY_SUMMARY_BACKFILL_DAYS
+        )
+    db.set_setting(conn, _DAY_SUMMARY_MARKER, today)
+    if written:
+        log.info("Filled in %s missing day summary row(s).", written)
+    return written
 
 
 def refresh_catalogue_if_due(conn) -> int:
@@ -234,6 +271,10 @@ def run_forever() -> None:
             # Same argument, and the same cost when there is nothing to do: one
             # setting read, then nothing for a week.
             refresh_catalogue_if_due(conn)
+            # Once a day, and for the same reason as the two above: a day row
+            # that is missing makes a view about change look like an absence of
+            # change, and the machines this runs on are switched off overnight.
+            fill_missing_day_summaries(conn)
         except Exception:
             # A failed pass must not end the worker: the usual causes are a
             # source that is briefly unreachable and a machine that just woke
