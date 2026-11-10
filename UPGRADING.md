@@ -39,6 +39,28 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.8.0 → next release (unreleased)
+
+**Risk: safe. No migration; nothing in the database is rewritten or deleted.**
+
+**What you may notice on the first run.**
+
+- **The call and put walls may move.** A call wall now stands at or above the
+  price and a put wall at or below it, within twice the expected move (at
+  least 5%) of the price; a side with nothing there reads "no wall above
+  price" or "no wall below price". Nothing stored holds a wall the screens
+  read back except the Changes rows, and those are covered next.
+- **The worker rebuilds the Changes rows once.** Each row records which
+  version of the formulas produced it, and this release changes them. Rows
+  built by the older code are rebuilt from the stored snapshots at the
+  worker's next start, up to 45 days back (`DAY_SUMMARY_BACKFILL_DAYS`), so
+  the upgrade does not show up in Changes as a wall that moved overnight.
+- **SPX, NDX, RUT and DJX on their monthly expiration date.** Time to expiry
+  for those dates is measured to the 09:30 open rather than the 16:00 close
+  until that morning's open, so their volatility, greeks and GEX shift a
+  little in the days before a monthly expiration. Time to expiry for every
+  other ticker and date is exactly what it was.
+
 ## v0.7.0 → v0.8.0
 
 **Risk: safe. No migration; nothing in the database is rewritten or deleted.**

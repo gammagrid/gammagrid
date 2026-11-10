@@ -1526,8 +1526,8 @@ if active_view == "GEX Heatmap":
 
         col_price, col_call, col_put, col_flip, col_zone = st.columns(5)
         col_price.metric("Underlying price", f"{spot_at_snapshot:,.2f}")
-        col_call.metric("Call Wall", f"{walls['call_wall']:g}" if walls["call_wall"] is not None else "n/a")
-        col_put.metric("Put Wall", f"{walls['put_wall']:g}" if walls["put_wall"] is not None else "n/a")
+        col_call.metric("Call Wall", metrics.wall_label(walls["call_wall"], "call", "g"))
+        col_put.metric("Put Wall", metrics.wall_label(walls["put_wall"], "put", "g"))
         col_flip.metric("Gamma Flip", f"{flip:,.2f}" if flip is not None else "n/a")
         col_zone.metric("Regime", "Neg" if total_net_gex < 0 else "Pos")
 
@@ -1608,8 +1608,11 @@ if active_view == "GEX Heatmap":
                 "hidden from the table entirely. The strike closest to the current underlying "
                 "price is marked “➤” and outlined, and the table shows a strike window "
                 "centered on it.\n\n"
-                "**Call Wall / Put Wall** — the strike with maximum open interest in calls/puts "
-                "respectively, aggregated over the shown expiries — a common proxy for "
+                "**Call Wall / Put Wall** — the strike with the most open interest in calls at or "
+                "above the price, and in puts at or below it, aggregated over the shown expiries "
+                "and no further from the price than twice the widest expected move among them "
+                "(at least 5%); a tie goes to the strike nearer the price. A side with no open "
+                "interest in that range shows \"no wall above/below price\". A common proxy for "
                 "support/resistance levels created by dealer hedging flows.\n\n"
                 "**Gamma Flip** — the approximate underlying price at which total GEX across the "
                 "shown expiries flips sign (linear interpolation between the nearest strikes). "

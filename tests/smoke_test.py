@@ -1108,8 +1108,11 @@ def main():
 
     walls = metrics.dealer_walls(df)
     print("Dealer walls:", walls, "\n")
-    # strike 100 holds the highest OI (65) of all synthetic strikes (the rest have 50)
-    assert walls["call_wall"] == 100.0, f"expected call wall at strike 100, got {walls['call_wall']}"
+    # Strike 100 holds the highest OI (65) of all synthetic strikes (the rest
+    # have 50), but the last snapshot's price is above 100 — a call wall stands
+    # at or above the price, so it is the nearest of the equal strikes above,
+    # 105; the put wall keeps 100.
+    assert walls["call_wall"] == 105.0, f"expected call wall at strike 105, got {walls['call_wall']}"
     assert walls["put_wall"] == 100.0, f"expected put wall at strike 100, got {walls['put_wall']}"
 
     flip = metrics.gamma_flip_price(df)

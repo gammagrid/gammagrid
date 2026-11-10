@@ -2666,6 +2666,322 @@ def check_day_summaries_are_written_and_filled_in():
     print("day-summary storage checks passed (upsert, the previous day, backfill, and its second run)")
 
 
+def check_am_settled_expiry_moment():
+    """The standard monthly SPX/NDX/RUT/DJX series settle at the
+    09:30 open of the expiration date, everything else at the 16:00 close.
+    Known answers, by hand: 20.11.2026 is a third Friday in winter time —
+    09:30 ET = 14:30 UTC, 16:00 ET = 21:00 UTC; 18.06.2026 is summer — 13:30."""
+    from app import metrics_core as core
+
+    hour = 3600 / core._YEAR_SECONDS
+    opex = pd.Timestamp("2026-11-20")
+    open_, close = pd.Timestamp("2026-11-20 14:30"), pd.Timestamp("2026-11-20 21:00")
+    # (a) the symbol's root decides, with or without the ticker, any prefix.
+    for symbol in ("SPX261120C07500000", "O:SPX261120C07500000", "NDX261120P20000000",
+                   "RUT261120C02500000", "DJX261120C00450000"):
+        assert core._expiry_moment(opex, contract_symbol=symbol) == open_, symbol
+    for symbol in ("SPXW261120C07500000", "NDXP261120C20000000", "XSP261120C00750000",
+                   "DJXW261120C00450000", "SPY261120C00600000"):
+        assert core._expiry_moment(opex, contract_symbol=symbol, ticker="SPX") == close, symbol
+    # A known ticker outside the list: the close, whatever the symbol says.
+    assert core._expiry_moment(opex, contract_symbol="SPX261120C07500000", ticker="SPY") == close
+    # (b) no symbol: the ticker and the date. ^SPX and SPX are one index.
+    for ticker in ("SPX", "^SPX", "spx", "NDX", "RUT", "DJX"):
+        assert core._expiry_moment(opex, ticker=ticker) == open_, ticker
+    for ticker in ("SPY", "XSP", "QQQ", None, ""):
+        assert core._expiry_moment(opex, ticker=ticker) == close, ticker
+    assert core._expiry_moment(pd.Timestamp("2026-11-13"), ticker="SPX") == pd.Timestamp("2026-11-13 21:00")
+    # An empty symbol is no symbol, and neither is a label shorter than any
+    # OCC symbol (the backfill's "SPXW0"): the rule decides, row by row.
+    assert core._expiry_moment(opex, contract_symbol="", ticker="SPX") == open_
+    assert core._expiry_moment(opex, contract_symbol="SPXW0", ticker="SPX") == open_
+    assert core._expiry_moments(pd.Series([opex]), pd.Series(["SPXW0"]), "SPX").iloc[0] == open_
+    # Holidays on the third Friday move the monthly to Thursday; an ordinary
+    # Thursday before a third Friday is a daily PM series.
+    for day, monthly in (("2026-06-18", True), ("2026-06-19", False),   # Juneteenth, Friday
+                         ("2027-06-17", True), ("2027-06-18", False),   # Juneteenth Sat → Fri 18
+                         ("2025-04-17", True), ("2025-04-18", False),   # Good Friday
+                         ("2026-11-19", False), ("2026-11-20", True),
+                         ("2026-04-17", True), ("2026-12-18", True)):
+        assert core._is_monthly_expiry(dt.date.fromisoformat(day)) is monthly, day
+    assert core._expiry_moment(pd.Timestamp("2026-06-18"), ticker="SPX") == pd.Timestamp("2026-06-18 13:30")
+    # Thursday 15:00 ET before the opex: AM is exactly 6.5 h shorter.
+    thursday = pd.Timestamp("2026-11-19 20:00")
+    am = core.years_to_expiry(opex, thursday, "SPX261120C07500000")
+    pm = core.years_to_expiry(opex, thursday, "SPXW261120C07500000")
+    assert abs((pm - am) / hour - 6.5) < 1e-9 and abs(am / hour - 18.5) < 1e-9, (am / hour, pm / hour)
+    # Friday 10:00 ET: the AM series has settled, the PM one has six hours.
+    friday = pd.Timestamp("2026-11-20 15:00")
+    assert core.years_to_expiry(opex, friday, "SPX261120C07500000") < 0
+    assert abs(core.years_to_expiry(opex, friday, "SPXW261120C07500000") / hour - 6.0) < 1e-9
+    # The date-level question keeps its answer: the date trades until 16:00.
+    assert core.years_to_expiry(opex, friday) > 0
+    # The rule without a symbol holds until the open; from it, the row is the
+    # PM series' stand-in (a stored chain keeps the AM row where both listed).
+    assert abs(core.years_to_expiry(opex, thursday, ticker="SPX") / hour - 18.5) < 1e-9
+    assert abs(core.years_to_expiry(opex, pd.Timestamp("2026-11-20 14:00"), ticker="SPX") / hour - 0.5) < 1e-9
+    assert abs(core.years_to_expiry(opex, pd.Timestamp("2026-11-20 14:30"), ticker="SPX") / hour - 6.5) < 1e-9
+    assert abs(core.years_to_expiry(opex, friday, ticker="SPX") / hour - 6.0) < 1e-9
+    assert core.years_to_expiry(opex, friday, "SPX261120C07500000", "SPX") < 0, "a symbol still settles at the open"
+    # The open itself (14:30 UTC) already reads the close, on the vector path too.
+    stamps = pd.Series(pd.to_datetime(["2026-11-19 20:00", "2026-11-20 14:30", "2026-11-20 15:00"]), index=[3, 6, 9])
+    by_moment = core.years_to_expiry_by_moment(opex, stamps, ticker="SPX") / hour
+    assert list(by_moment.index) == [3, 6, 9], by_moment
+    assert [round(v, 9) for v in by_moment] == [18.5, 6.5, 6.0], by_moment
+    per_row = core._expiry_moments(pd.Series([opex] * 3, index=[4, 5, 8]), None, "SPX", stamps)
+    assert per_row.tolist() == [open_, close, close], per_row
+    # Vectorised: one per row, symbol over rule, rule where the symbol is blank.
+    expiry = pd.Series([opex, opex, opex, pd.Timestamp("2026-11-13"), pd.NaT], index=[5, 6, 7, 8, 9])
+    symbols = pd.Series(["SPX261120C07500000", "SPXW261120C07500000", "", None, None], index=expiry.index)
+    got = core._expiry_moments(expiry, symbols, "SPX")
+    assert list(got.index) == [5, 6, 7, 8, 9]
+    assert got.iloc[:4].tolist() == [open_, close, open_, pd.Timestamp("2026-11-13 21:00")] and pd.isna(got.iloc[4])
+    # A chain that is not a listed index is untouched, bit for bit.
+    plain = core._expiry_moments(expiry)
+    assert core._expiry_moments(expiry, symbols, "SPY").equals(plain)
+    assert core._expiry_moments(expiry, None, "SPY").equals(plain)
+    assert core._expiry_moments(expiry, None, "SPX").iloc[:3].tolist() == [open_] * 3
+    print("AM settlement: root decides, ticker-and-date rule, holidays, DST, vector = scalar")
+
+
+def check_am_settlement_reaches_every_core_path():
+    """Every place the core prices time — the IV solver, the screener, GEX
+    (batched and per row), the contract history, the surface — measures an
+    AM row to 09:30 and a PM row of the same date to 16:00. Known answer: a
+    premium priced at sigma 0.20 to the AM settlement solves back to 0.20
+    only if the solver measured to 09:30."""
+    from app import metrics_core as core
+
+    opex = pd.Timestamp("2026-11-20")
+    thursday = pd.Timestamp("2026-11-19 20:00")   # 15:00 ET
+    friday = pd.Timestamp("2026-11-20 15:00")     # 10:00 ET
+    spot, strike, sigma = 7500.0, 7500.0, 0.20
+    rate = core.DEFAULT_PRICING.rate_for(0.002)
+
+    def chain(at, with_symbols=True, ticker_column=True):
+        rows = pd.DataFrame({
+            "collected_at": [at] * 4, "underlying_price": [spot] * 4, "expiry": [opex] * 4,
+            "strike": [strike, strike, strike + 50, strike + 50],
+            "option_type": ["call", "put", "call", "put"],
+            "implied_volatility": [sigma] * 4, "open_interest": [1000, 300, 500, 100],
+            "last_price": [np.nan] * 4, "bid": [np.nan] * 4, "ask": [np.nan] * 4,
+            "delta": [np.nan] * 4, "gamma": [np.nan] * 4, "theta": [np.nan] * 4, "vega": [np.nan] * 4,
+        })
+        if with_symbols:
+            rows["contract_symbol"] = ["SPX261120C07500000", "SPX261120P07500000",
+                                       "SPXW261120C07550000", "SPXW261120P07550000"]
+        if ticker_column:
+            rows["ticker"] = "SPX"
+        return rows
+
+    am_years = core.years_to_expiry(opex, thursday, "SPX261120C07500000")
+    pm_years = core.years_to_expiry(opex, thursday, "SPXW261120C07550000")
+    # The solver: a mid priced at the AM time comes back as sigma.
+    frame = chain(thursday)
+    price = core._bs_price(spot, strike, am_years, sigma, core.DEFAULT_PRICING.rate_for(am_years), True,
+                           core.DEFAULT_PRICING.dividend_yield)
+    frame.loc[0, ["bid", "ask", "last_price"]] = [float(price)] * 3
+    solved = core.with_solved_iv(frame, core.DEFAULT_PRICING, ticker="SPX")
+    assert abs(solved.loc[0, "implied_volatility"] - sigma) < 1e-6, solved.loc[0, "implied_volatility"]
+    # The screener: gamma of each row at its own time.
+    table = core.screener_table(chain(thursday))
+    def gamma(level, years):
+        return core._black_scholes_greeks(
+            spot, level, years, sigma, core.DEFAULT_PRICING.rate_for(years), "call"
+        )["gamma"]
+
+    expected = {(strike, "call"): gamma(strike, am_years), (strike + 50, "call"): gamma(strike + 50, pm_years)}
+    for (k, side), want in expected.items():
+        got = table[(table["strike"] == k) & (table["option_type"] == side)]["gamma"].iloc[0]
+        assert abs(got - want) < 1e-12, (k, side, got, want)
+    # GEX: the batched matrix and the per-row profile agree, and on Friday
+    # morning the settled AM strike carries nothing while the PM strike does.
+    for at in (thursday, friday):
+        matrix = core.gex_matrix(chain(at), as_of=at)
+        profile = core.gamma_exposure_profile(chain(at), opex, as_of=at).set_index("strike")["gex"]
+        for k in (strike, strike + 50):
+            assert abs(matrix.loc[k, opex] - profile.loc[k]) < 1e-9, (at, k)
+    friday_matrix = core.gex_matrix(chain(friday), as_of=friday)
+    assert friday_matrix.loc[strike, opex] == 0 and friday_matrix.loc[strike + 50, opex] != 0
+    # Without symbols the ticker rule takes the whole monthly date as AM
+    # while the AM series is alive — from the ticker argument or from the
+    # frame's own column. Observed after the open, a row without a symbol is
+    # the PM series' stand-in and lives to the close: the date is not zeroed
+    # on its own expiration day. With neither symbol nor ticker, the close.
+    bare_thursday = core.screener_table(chain(thursday, with_symbols=False))
+    got = bare_thursday[(bare_thursday["strike"] == strike + 50) & (bare_thursday["option_type"] == "call")]
+    assert abs(got["gamma"].iloc[0] - gamma(strike + 50, am_years)) < 1e-12, "before the open: 09:30"
+    pm_friday = core.years_to_expiry(opex, friday, "SPXW261120C07500000")
+    bare_friday = core.screener_table(chain(friday, False, False), ticker="^SPX")
+    got = bare_friday[(bare_friday["strike"] == strike) & (bare_friday["option_type"] == "call")]
+    assert abs(got["gamma"].iloc[0] - gamma(strike, pm_friday)) < 1e-12, "after the open: the close"
+    assert core.gex_matrix(chain(friday, False, False), as_of=friday, ticker="SPX").equals(
+        core.gex_matrix(chain(friday, False, False), as_of=friday)), "after the open = no rule at all"
+    assert not core.gex_matrix(chain(thursday, False, False), as_of=thursday, ticker="SPX").equals(
+        core.gex_matrix(chain(thursday, False, False), as_of=thursday)), "before the open the rule applies"
+    series = core.net_gex_series(chain(friday))
+    assert abs(series["net_gex"].iloc[0] - friday_matrix[opex].sum()) < 1e-9
+    both = pd.concat([chain(thursday, False, False), chain(friday, False, False)], ignore_index=True)
+    rollup = core.expiry_rollup(both, ticker="SPX").set_index("collected_at")["net_gex"]
+    alone = {at: core.gex_matrix(chain(at, False, False), as_of=at, ticker="SPX")[opex].sum() for at in (thursday, friday)}
+    assert all(abs(rollup[at] - alone[at]) < 1e-6 for at in alone), (rollup, alone)
+    # The contract history: one contract, its own settlement.
+    history = pd.concat([chain(thursday), chain(friday)], ignore_index=True)
+    am_history = core.contract_greeks_history(history, strike, opex, "call")
+    pm_history = core.contract_greeks_history(history, strike + 50, opex, "call")
+    assert abs(am_history["gamma"].iloc[0] - expected[(strike, "call")]) < 1e-12
+    assert am_history["gamma"].iloc[1] == 0 and pm_history["gamma"].iloc[1] > 0
+    # The surface: each point's T is its own.
+    surface = core.iv_surface(chain(thursday))
+    years = dict(zip(surface["strike"], surface["years_to_expiry"]))
+    assert abs(years[strike] - am_years) < 1e-12 and abs(years[strike + 50] - pm_years) < 1e-12, years
+    assert rate > 0
+    print("AM settlement reaches the solver, screener, GEX (both paths), history and surface")
+
+
+def _walls_chain(at, rows, spot=755.0):
+    """A collected moment from (expiry, option_type, strike, open_interest,
+    implied_volatility) tuples — the columns the walls and the screens read."""
+    frame = pd.DataFrame(rows, columns=["expiry", "option_type", "strike", "open_interest", "implied_volatility"])
+    return frame.assign(
+        expiry=pd.to_datetime(frame["expiry"]), strike=frame["strike"].astype(float),
+        open_interest=frame["open_interest"].astype(float), underlying_price=spot, collected_at=at,
+        volume=0.0, bid=0.0, ask=0.0, last_price=0.0, contract_symbol=[f"W{i}" for i in range(len(frame))],
+    )
+
+
+def check_dealer_walls_side_and_window():
+    """A call wall stands at or above the price and a put wall at or below
+    it, inside a window of max(2 expected moves, 5 %) of the price; a tie goes
+    to the strike nearer the price; a side with no open interest there has no
+    wall. Own data with known answers; the moment is a literal compared with
+    nothing. Then the words every screen prints for an empty side."""
+    from app import day_summary, weather
+    from app import metrics_core as core
+
+    expiry = pd.Timestamp("2026-11-02")
+    close = core._expiry_moment(expiry)
+    zero_dte = close - pd.Timedelta(hours=6)
+    month = close - pd.Timedelta(days=30)
+    sigma = 0.15
+
+    def walls(at, rows, spot=755.0, expiries=None):
+        return core.dealer_walls(_walls_chain(at, rows, spot), at, expiries=expiries)
+
+    # SPY 0DTE before the open, 02.11: put 775 above call 774 at a price of
+    # 755. The old rule read the chain whole: call 740, put 775 — inverted.
+    inverted = [(expiry, "put", 775, 20000, sigma), (expiry, "put", 750, 3000, sigma),
+                (expiry, "call", 774, 9000, sigma), (expiry, "call", 760, 4000, sigma),
+                (expiry, "call", 740, 50000, sigma)]
+    assert walls(zero_dte, inverted) == {"call_wall": 774.0, "put_wall": 750.0}
+
+    # A tie goes to the strike nearer the price, on both sides.
+    tied = [(expiry, "call", 760, 9000, sigma), (expiry, "call", 774, 9000, sigma),
+            (expiry, "put", 750, 3000, sigma), (expiry, "put", 745, 3000, sigma)]
+    assert walls(zero_dte, tied) == {"call_wall": 760.0, "put_wall": 750.0}
+
+    # No put below the price — or only empty ones — is no put wall, not a
+    # strike with nothing on it.
+    above = [(expiry, "call", 760, 100, sigma), (expiry, "put", 775, 9000, sigma), (expiry, "put", 780, 100, sigma)]
+    assert walls(zero_dte, above) == {"call_wall": 760.0, "put_wall": None}
+    empty = above + [(expiry, "put", 740, 0, sigma)]
+    assert walls(zero_dte, empty)["put_wall"] is None
+
+    # A strike at the price serves both sides.
+    at_money = [(expiry, "call", 755, 10, sigma), (expiry, "put", 755, 10, sigma)]
+    assert walls(zero_dte, at_money) == {"call_wall": 755.0, "put_wall": 755.0}
+
+    # The window. Thirty days at 15 %: 2 x 0.15 x sqrt(30.x / 365) = 8.6 %
+    # of 755 — 700 (-7.3 %) is in, 680 (-9.9 %) is out.
+    far_puts = [(expiry, "put", 680, 90000, sigma), (expiry, "put", 700, 50000, sigma),
+                (expiry, "put", 750, 3000, sigma), (expiry, "call", 755, 10, sigma)]
+    reach = core.wall_reach(_walls_chain(month, far_puts), month)
+    assert abs(reach[expiry] - sigma * np.sqrt(core.years_to_expiry(expiry, month))) < 1e-15
+    assert 0.085 < core.wall_window(reach) < 0.087, core.wall_window(reach)
+    assert walls(month, far_puts)["put_wall"] == 700.0
+    # No volatility above the solver floor (a provider's 1e-5 placeholder):
+    # the floor alone, 5 %, and 700 is out too.
+    no_iv = [(e, side, k, oi, 1e-5) for e, side, k, oi, _ in far_puts]
+    assert core.wall_window(core.wall_reach(_walls_chain(month, no_iv), month)) == core.WALL_WINDOW_FLOOR
+    assert walls(month, no_iv)["put_wall"] == 750.0
+    # A year-long expiry in the set widens the window to 2 x 0.15 x 1 = 30 %:
+    # 680 is back in. Taken over the near expiry alone, it is not.
+    year = pd.Timestamp("2027-10-29")
+    with_year = far_puts + [(year, "call", 755, 0, sigma), (year, "put", 755, 0, sigma)]
+    assert walls(month, with_year)["put_wall"] == 680.0
+    assert walls(month, with_year, expiries=[expiry])["put_wall"] == 700.0
+    # The window's edge is inside it: the floor at 800 is exactly 40 points.
+    edge = [(expiry, "call", 840, 10, 1e-5), (expiry, "put", 760, 10, 1e-5)]
+    assert walls(month, edge, spot=800.0) == {"call_wall": 840.0, "put_wall": 760.0}
+    # On a price in cents the edge survives the floats too: 0.05 has no exact
+    # binary form, and at 50.20 the bare |K - S| <= w S drops 47.69, which is
+    # exactly 5 % below. A cent past the edge stays out.
+    cents = [(expiry, "call", 52.71, 10, 1e-5), (expiry, "put", 47.69, 10, 1e-5)]
+    assert walls(month, cents, spot=50.20) == {"call_wall": 52.71, "put_wall": 47.69}
+    past = [(expiry, "call", 52.72, 10, 1e-5), (expiry, "put", 47.68, 10, 1e-5)]
+    assert walls(month, past, spot=50.20) == {"call_wall": None, "put_wall": None}
+
+    # The words for an empty side, wherever a wall is printed: the shared
+    # label, the summary panel's tiles and the day's ladder.
+    assert metrics.wall_label(None, "call") == "no wall above price"
+    assert metrics.wall_label(float("nan"), "put") == "no wall below price"
+    assert metrics.wall_label(774.0, "call") == "774.00" and metrics.wall_label(774.0, "call", "g") == "774"
+    panel = weather.panel({"state": metrics.WEATHER_FAIR, "net_gex": 1.0, "gamma_flip": 100.0,
+                           "underlying_price": 101.0, "flip_distance_pct": 1.0,
+                           "collected_at": "2026-11-02 14:00", "call_wall": 105.0, "put_wall": None})
+    assert ">105.00<" in panel and ">no wall below price<" in panel, panel
+    day = {"call_wall": 105.0, "put_wall": None, "underlying_price": 101.0}
+    walls_moved = {line["key"]: line for line in day_summary.changes({**day, "put_wall": 100.0}, day, None, None)}
+    assert day_summary.format_value(walls_moved["put_wall"], "after") == "no wall below price"
+    assert day_summary.format_value(walls_moved["put_wall"], "before") == "100.00"
+    # The first day on record has nothing before it: no data, not "no wall".
+    first = {line["key"]: line for line in day_summary.changes(None, day, None, None)}
+    assert day_summary.format_value(first["call_wall"], "before") == "—"
+    assert day_summary.format_value(first["put_wall"], "after") == "no wall below price"
+
+    print("Walls keep to their side of the price and to the window; an empty side says so")
+
+
+def check_stored_chains_reach_the_am_rule():
+    """A chain read back from the database carries its ticker and no contract
+    symbol, and that is enough: every core function called without a ticker
+    takes it from the frame's own `ticker` column. Known answer: before the
+    open of a monthly expiration, a ^SPX row's gamma is the one measured to
+    09:30; a SPY row on the same date keeps the close."""
+    from app import metrics_core as core
+
+    conn = db.get_connection()
+    opex = "2026-11-20"
+    thursday = datetime(2026, 11, 19, 20, 0)   # 15:00 New York
+    for ticker in ("^SPX", "SPY"):
+        db.insert_snapshot(conn, ticker, thursday, 7500.0, pd.DataFrame([
+            _chain_row(opex, 7500.0, "call", implied_volatility=0.2, open_interest=1000),
+            _chain_row(opex, 7500.0, "put", implied_volatility=0.2, open_interest=300),
+        ]))
+    spx = db.get_latest_snapshot(conn, "^SPX")
+    spy = db.get_latest_snapshot(conn, "SPY")
+    conn.close()
+    assert "ticker" in spx.columns and "contract_symbol" not in spx.columns, list(spx.columns)
+
+    def gamma(years):
+        return core._black_scholes_greeks(
+            7500.0, 7500.0, years, 0.2, core.DEFAULT_PRICING.rate_for(years), "call"
+        )["gamma"]
+
+    am = core.years_to_expiry(pd.Timestamp(opex), thursday, ticker="SPX")
+    pm = core.years_to_expiry(pd.Timestamp(opex), thursday)
+    assert abs((pm - am) * core._YEAR_SECONDS / 3600 - 6.5) < 1e-9
+    for frame, years in ((spx, am), (spy, pm)):
+        table = metrics.screener_table(frame)
+        got = table[table["option_type"] == "call"]["gamma"].iloc[0]
+        assert abs(got - gamma(years)) < 1e-12, (frame["ticker"].iloc[0], got, gamma(years))
+    # The heatmap, the summary card and the rollup go through the same frame.
+    assert metrics.gex_matrix(spx).equals(metrics.gex_matrix(spx, ticker="SPX"))
+    assert not metrics.gex_matrix(spx).equals(metrics.gex_matrix(spx.drop(columns="ticker")))
+    assert metrics.gex_matrix(spy).equals(metrics.gex_matrix(spy.drop(columns="ticker")))
+    print("Stored chains carry their ticker into the AM settlement rule")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -2723,6 +3039,10 @@ def main():
     check_the_day_row_and_the_ladder()
     check_a_day_is_a_session_that_opened()
     check_day_summaries_are_written_and_filled_in()
+    check_am_settled_expiry_moment()
+    check_am_settlement_reaches_every_core_path()
+    check_stored_chains_reach_the_am_rule()
+    check_dealer_walls_side_and_window()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

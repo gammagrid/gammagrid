@@ -307,14 +307,12 @@ def changes(
         net["kind"] = DAMPING if net["after"] >= 0 else AMPLIFYING
     lines.append(net)
 
-    lines.append(_number_change(
-        "call_wall", "Call wall", prev.get("call_wall"), current.get("call_wall"),
-        unit="strikes", step=step,
-    ))
-    lines.append(_number_change(
-        "put_wall", "Put wall", prev.get("put_wall"), current.get("put_wall"),
-        unit="strikes", step=step,
-    ))
+    for key, label in (("call_wall", "Call wall"), ("put_wall", "Put wall")):
+        wall = _number_change(key, label, prev.get(key), current.get(key), unit="strikes", step=step)
+        # A wall missing from a day that has a row is a side with no wall;
+        # missing because there is no earlier day is no data, and stays "—".
+        wall["empty_is_no_wall"] = {"before": previous is not None, "after": True}
+        lines.append(wall)
     lines.append(_number_change(
         "gamma_flip", "Gamma flip", prev.get("gamma_flip"), current.get("gamma_flip"), unit="price",
     ))
@@ -442,6 +440,8 @@ def format_value(line: dict, side: str) -> str:
     place for "what is this number" to be answered differently.
     """
     value = line.get(side)
+    if value is None and line.get("empty_is_no_wall", {}).get(side):
+        return metrics.wall_label(None, line["key"].split("_")[0])
     if value is None:
         return "—"
     unit = line["unit"]
