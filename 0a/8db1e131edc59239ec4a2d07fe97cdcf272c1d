@@ -1,0 +1,118 @@
+app/day_summary.py
+  s_246e70d90c122a::t_db9b60ca10c41a 444
+  s_246e70d90c122a::t_971aa2983ec5e2 310-315,443
+app/metrics_core.sha256
+  s_246e70d90c122a::t_808f68cd33cc90 1
+tests/smoke_test.py
+  s_246e70d90c122a::t_093012b3a93a97 1111-1115
+app/weather.py
+  s_246e70d90c122a::t_db9b60ca10c41a 203-208
+tests/unit_tests.py
+  s_246e70d90c122a::t_039c2c3cd2a3a5 2669-2932,2941-2984,3042-3045
+  s_246e70d90c122a::t_971aa2983ec5e2 2933-2940
+app/dashboard.py
+  s_246e70d90c122a::t_db9b60ca10c41a 1529-1530,1611-1615
+CHANGELOG.md
+  s_246e70d90c122a::t_0336dbdaeb9c23 45-46
+  s_246e70d90c122a::t_59debd0b295d7b 15
+  s_246e70d90c122a::t_6ca99f7c9bf5d8 10-14,16-36,44,47-48
+  s_246e70d90c122a::t_e9fb25323b51bd 37-43
+UPGRADING.md
+  s_246e70d90c122a::t_72e3ae4c91d4e5 61-62
+  s_246e70d90c122a::t_f44f5069027ab1 42-60,63
+app/metrics_core.py
+  s_246e70d90c122a::t_808f68cd33cc90 240-387,397-403,415-419,431,434,436-438,443-472,475-482,484,488,492,496-498,1090,1092,1131-1133,1152,1175,1205-1207,1226,1241-1244,1248-1249,1302,1333,1342-1344,1371,1378-1380,1391,1454-1532,1536-1541,1546-1549,1551,1554-1555,1927-1928,1959-1966,2071,2088-2090
+README.md
+  s_246e70d90c122a::t_1ac9cd2b690a99 425-434,438
+  s_246e70d90c122a::t_5530099f5d6f57 435-437
+app/metrics.py
+  s_246e70d90c122a::t_b7136650ad4146 336-348
+  s_246e70d90c122a::t_83c6ed69d8da63 414
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "0.0.68",
+  "base_commit_sha": "0a8db1e131edc59239ec4a2d07fe97cdcf272c1d",
+  "prompts": {},
+  "sessions": {
+    "s_246e70d90c122a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "adac2d6d-9937-408d-a255-57817acd2ad1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null,
+      "usage": [
+        {
+          "model": "claude-opus-5-5",
+          "input_tokens": 106,
+          "output_tokens": 44906,
+          "cache_read_tokens": 8100655,
+          "cache_write_5m_tokens": 18118,
+          "cache_write_1h_tokens": 56486,
+          "assistant_messages": 52,
+          "turns": 0,
+          "ai_wall_ms": 162305,
+          "first_ts": "2026-11-10T11:52:02.259Z",
+          "last_ts": "2026-11-10T11:55:54.287Z",
+          "session_total_output_tokens": 121592
+        }
+      ],
+      "tools": [
+        {
+          "tool": "Bash",
+          "model": "claude-opus-5-5",
+          "calls": 19,
+          "result_chars": 19700,
+          "result_input_tokens": 40,
+          "result_cache_write_5m_tokens": 9811,
+          "result_cache_write_1h_tokens": 16160,
+          "call_output_tokens": 10511
+        },
+        {
+          "tool": "Edit",
+          "model": "claude-opus-5-5",
+          "calls": 3,
+          "result_chars": 261,
+          "result_input_tokens": 4,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 1887,
+          "call_output_tokens": 2704
+        },
+        {
+          "tool": "SendMessage",
+          "model": "claude-opus-5-5",
+          "calls": 1,
+          "result_chars": 376,
+          "result_input_tokens": 2,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 4053,
+          "call_output_tokens": 3901
+        },
+        {
+          "tool": "SubagentHandback",
+          "model": "claude-opus-5-5",
+          "calls": 1,
+          "result_chars": 61,
+          "result_input_tokens": 0,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 0,
+          "call_output_tokens": 2503
+        },
+        {
+          "tool": "ToolSearch",
+          "model": "claude-opus-5-5",
+          "calls": 1,
+          "result_chars": 0,
+          "result_input_tokens": 4,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 2109,
+          "call_output_tokens": 93
+        }
+      ],
+      "accepted_lines": 778,
+      "overridden_lines": 0
+    }
+  },
+  "install_id": "28c9ea98-f828-46d5-aadb-a21d4164fb17"
+}
