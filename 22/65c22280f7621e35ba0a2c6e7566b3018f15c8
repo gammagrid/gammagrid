@@ -1,0 +1,96 @@
+app/weather.py
+  s_246e70d90c122a::t_db9b60ca10c41a 203-208
+app/metrics.py
+  s_246e70d90c122a::t_b7136650ad4146 336-348
+  s_246e70d90c122a::t_83c6ed69d8da63 414
+app/dashboard.py
+  s_246e70d90c122a::t_db9b60ca10c41a 1529-1530,1611-1615
+CHANGELOG.md
+  s_246e70d90c122a::t_e9fb25323b51bd 37-43
+  s_246e70d90c122a::t_6ca99f7c9bf5d8 10-36,44-49
+tests/smoke_test.py
+  s_246e70d90c122a::t_093012b3a93a97 1111-1115
+tests/unit_tests.py
+  s_246e70d90c122a::t_039c2c3cd2a3a5 2669-2932,2941-2984,3042-3045
+  s_246e70d90c122a::t_971aa2983ec5e2 2933-2940
+app/metrics_core.py
+  s_246e70d90c122a::t_808f68cd33cc90 240-387,397-403,415-419,431,434,436-438,443-472,475-482,484,488,492,496-498,1090,1092,1131-1133,1152,1175,1205-1207,1226,1241-1244,1248-1249,1302,1333,1342-1344,1371,1378-1380,1391,1454-1532,1536-1541,1546-1549,1551,1554-1555,1927-1928,1959-1966,2071,2088-2090
+app/metrics_core.sha256
+  s_246e70d90c122a::t_808f68cd33cc90 1
+app/day_summary.py
+  s_246e70d90c122a::t_971aa2983ec5e2 310-315,443
+  s_246e70d90c122a::t_db9b60ca10c41a 444
+README.md
+  s_246e70d90c122a::t_1ac9cd2b690a99 425-434,438
+  s_246e70d90c122a::t_5530099f5d6f57 435-437
+UPGRADING.md
+  s_246e70d90c122a::t_72e3ae4c91d4e5 61-62
+  s_246e70d90c122a::t_f44f5069027ab1 42-60,63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "0.0.68",
+  "base_commit_sha": "2265c22280f7621e35ba0a2c6e7566b3018f15c8",
+  "prompts": {},
+  "sessions": {
+    "s_246e70d90c122a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "adac2d6d-9937-408d-a255-57817acd2ad1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ggrid-io <hello@gammagrid.io>",
+      "usage": [
+        {
+          "model": "claude-opus-5-5",
+          "input_tokens": 54,
+          "output_tokens": 18841,
+          "cache_read_tokens": 3628648,
+          "cache_write_5m_tokens": 18118,
+          "cache_write_1h_tokens": 24635,
+          "assistant_messages": 27,
+          "turns": 0,
+          "ai_wall_ms": 75798,
+          "first_ts": "2026-11-10T11:52:02.259Z",
+          "last_ts": "2026-11-10T11:53:43.605Z",
+          "session_total_output_tokens": 95527
+        }
+      ],
+      "tools": [
+        {
+          "tool": "Bash",
+          "model": "claude-opus-5-5",
+          "calls": 11,
+          "result_chars": 13342,
+          "result_input_tokens": 22,
+          "result_cache_write_5m_tokens": 9811,
+          "result_cache_write_1h_tokens": 8314,
+          "call_output_tokens": 6249
+        },
+        {
+          "tool": "Edit",
+          "model": "claude-opus-5-5",
+          "calls": 1,
+          "result_chars": 88,
+          "result_input_tokens": 4,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 1123,
+          "call_output_tokens": 424
+        },
+        {
+          "tool": "SubagentHandback",
+          "model": "claude-opus-5-5",
+          "calls": 1,
+          "result_chars": 61,
+          "result_input_tokens": 0,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 0,
+          "call_output_tokens": 2503
+        }
+      ],
+      "accepted_lines": 779,
+      "overridden_lines": 0
+    }
+  },
+  "install_id": "28c9ea98-f828-46d5-aadb-a21d4164fb17"
+}
