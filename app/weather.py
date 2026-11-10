@@ -200,10 +200,12 @@ def panel(reading: dict, latest_moment=None) -> str:
         _level("Net GEX", format_gex(reading["net_gex"]),
                "gg-green" if reading["net_gex"] >= 0 else "gg-purple"),
     ]
-    if reading.get("call_wall") is not None:
-        levels.append(_level("Call wall", f"{reading['call_wall']:,.2f}", "gg-green"))
-    if reading.get("put_wall") is not None:
-        levels.append(_level("Put wall", f"{reading['put_wall']:,.2f}", "gg-purple"))
+    # Both walls always have a tile: an empty side says so in words rather
+    # than vanishing, which would read as a level that failed to load.
+    for key, label, side, tone in (("call_wall", "Call wall", "call", "gg-green"),
+                                   ("put_wall", "Put wall", "put", "gg-purple")):
+        level = reading.get(key)
+        levels.append(_level(label, metrics.wall_label(level, side), tone if level is not None else ""))
     levels.append(_level(
         "Gamma flip",
         "—" if flip is None else f"{flip:,.2f}",

@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **The call wall now stands at or above the price and the put wall at or
+  below it, within reach of the price.** A wall used to be the strike with the
+  most open interest anywhere in the chain, so it could land on the wrong side
+  of the price or far out of the money: a SPY 0DTE chain before the open, with
+  the price at 755, showed a put wall at 775 above a call wall at 774. Now the
+  call wall is the strike with the most call open interest at or above the
+  price, the put wall the strike with the most put open interest at or below
+  it, and neither may lie further from the price than twice the largest
+  expected move (at-the-money volatility × √time) among the expiries it is
+  taken over, or 5%, whichever is wider. A tie goes to the strike nearer the
+  price. A side with no open interest in that range has no wall, and the
+  screens say "no wall above price" or "no wall below price" instead of a
+  number or "n/a". **The levels you are used to may move** — on the heatmap,
+  the summary panel and in Changes — and the heatmap's "How to read this"
+  describes the new rule.
+
+### Fixed
+- **The monthly SPX, NDX, RUT and DJX options expire at the open, and are
+  now priced that way.** Their standard monthly series settle on the opening
+  print of the expiration date, but time to expiry was measured to the 16:00
+  New York close like everything else — six and a half hours too long on the
+  last day, a quarter to a third of all the time left on the Thursday before,
+  which skews the solved volatility, the greeks and GEX of the series that
+  holds most of the monthly open interest. Time to expiry is now measured to
+  09:30 New York for these four indices on their standard monthly expiration
+  date (the third Friday, or the Thursday before it when the exchange is
+  closed that Friday). Weeklies, dailies, XSP and every other ticker keep the
+  close. A stored chain has no contract symbols, so the series is told by
+  ticker and date: before the open of the monthly date, the few PM-settled
+  contracts served at strikes the monthly series does not list are measured
+  to 09:30 too. From the open of expiration day the rows are read as the PM
+  series of the same strike, which trades until the close, so the date does
+  not drop to zero on its own expiration morning.
+
+Both changes are in the shared formulas (`app/metrics_core.py`, sha256
+`367b901e…`). Day rows written by the previous formulas are rebuilt by the worker on its next daily pass, as far
+back as `DAY_SUMMARY_BACKFILL_DAYS` reaches (45 days by default).
+
 ## [0.8.0] - 2026-10-12
 
 ### Added

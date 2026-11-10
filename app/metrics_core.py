@@ -237,8 +237,154 @@ def _close_of(date: dt.date) -> pd.Timestamp:
     return pd.Timestamp(local.astimezone(dt.timezone.utc)).tz_localize(None)
 
 
-def _expiry_moment(expiry) -> pd.Timestamp:
-    """The instant a contract actually stops trading, as naive UTC.
+EXPIRY_OPEN_ET = dt.time(9, 30)
+
+
+# Index options whose STANDARD monthly series settles on the opening print of
+# the expiration date (the Special Opening Quotation), not at the close. Their
+# OCC root is the index itself; every sibling series — weeklies, dailies and
+# PM-settled monthlies (SPXW, NDXP, RUTW, DJXW) and the mini index XSP — has a
+# root of its own and settles at the close. Checked against Cboe's product
+# specifications: DJX lists third-Friday AM monthlies beside PM weeklies.
+AM_SETTLED_ROOTS = frozenset({"SPX", "NDX", "RUT", "DJX"})
+
+
+# The first five characters of an AM-settled symbol: root plus the first digit
+# of the date, with and without the `O:` prefix one provider writes. Matched as
+# a fixed-width prefix in C — a regex per row cost a third of an SPX chain's
+# fold elsewhere in this codebase.
+_AM_PREFIXES = tuple(f"{root}{digit}" for root in sorted(AM_SETTLED_ROOTS) for digit in range(10))
+_AM_PREFIXES_TAGGED = tuple(f"O:{prefix}" for prefix in _AM_PREFIXES)
+
+
+@functools.lru_cache(maxsize=4096)
+def _open_of(date: dt.date) -> pd.Timestamp:
+    """09:30 New York on `date`, as naive UTC — memoised and keyed by the
+    calendar date for the same reasons as `_close_of`."""
+    local = dt.datetime.combine(date, EXPIRY_OPEN_ET, tzinfo=EXPIRY_TZ)
+    return pd.Timestamp(local.astimezone(dt.timezone.utc)).tz_localize(None)
+
+
+def _good_friday(year: int) -> dt.date:
+    """Easter Sunday by the anonymous Gregorian algorithm, minus two days."""
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    m = (32 + 2 * e + 2 * i - h - k) % 7
+    n = (a + 11 * h + 22 * m) // 451
+    month, day = divmod(h + m - 7 * n + 114, 31)
+    return dt.date(year, month, day + 1) - dt.timedelta(days=2)
+
+
+def _exchange_holiday_on_third_friday(friday: dt.date) -> bool:
+    """Whether the exchange is closed on this third Friday. Only two holidays
+    can land there (the 15th to the 21st): Good Friday, and Juneteenth — on
+    the 19th itself, or observed on Friday the 18th when the 19th is a
+    Saturday. A closure nobody can schedule (a day of mourning) is beyond any
+    calendar; the contract symbol, where it is present, still decides."""
+    if friday == _good_friday(friday.year):
+        return True
+    if friday.month == 6 and friday.year >= 2022:
+        juneteenth = dt.date(friday.year, 6, 19)
+        observed = juneteenth - dt.timedelta(days=1) if juneteenth.weekday() == 5 else juneteenth
+        return friday == observed
+    return False
+
+
+@functools.lru_cache(maxsize=4096)
+def _is_monthly_expiry(date: dt.date) -> bool:
+    """Whether `date` is the standard monthly expiration: the third Friday of
+    its month, or the Thursday before it when the exchange is closed that
+    Friday. An ordinary Thursday before a third Friday is a daily PM series
+    and is NOT monthly."""
+    first = date.replace(day=1)
+    friday = first + dt.timedelta(days=(4 - first.weekday()) % 7 + 14)
+    if _exchange_holiday_on_third_friday(friday):
+        return date == friday - dt.timedelta(days=1)
+    return date == friday
+
+
+def _index_root(ticker) -> str | None:
+    """The ticker as an OCC root: `^SPX`, `$SPX` and `spx` all read `SPX`."""
+    if not isinstance(ticker, str) or not ticker.strip():
+        return None
+    return ticker.strip().upper().lstrip("^$")
+
+
+def _ticker_of(frame: pd.DataFrame, ticker=None) -> str | None:
+    """The ticker a chain belongs to: the caller's, else the frame's own
+    `ticker` column (a chain is one ticker's)."""
+    if ticker is not None:
+        return ticker
+    if "ticker" in frame.columns and len(frame):
+        named = frame["ticker"].dropna()
+        return str(named.iloc[0]) if len(named) else None
+    return None
+
+
+# The shortest OCC symbol: a one-letter root, six digits of date, the type and
+# eight digits of strike. Anything shorter is a label rather than a contract's
+# symbol and is read as no symbol at all.
+_OCC_MIN_LENGTH = 16
+
+
+def _symbol_code(symbol) -> int:
+    """1 — the symbol names an AM-settled root, 2 — it names any other root,
+    0 — there is no symbol, and the ticker-and-date rule decides."""
+    if not isinstance(symbol, str) or len(symbol) < _OCC_MIN_LENGTH:
+        return 0
+    return 1 if symbol.startswith(_AM_PREFIXES) or symbol.startswith(_AM_PREFIXES_TAGGED) else 2
+
+
+def _settlement_codes(symbols, index: pd.Index) -> np.ndarray:
+    """`_symbol_code` for every row, matched as fixed-width prefixes in C."""
+    if symbols is None:
+        return np.zeros(len(index), dtype=np.int8)
+    # OCC symbols are upper-case as every provider writes them; a missing
+    # one becomes the empty string, which no prefix matches.
+    full = pd.Series(symbols, index=index).fillna("").to_numpy(dtype="<U24")
+    tagged = full.astype("<U6")
+    am = np.isin(tagged.astype("<U4"), _AM_PREFIXES) | np.isin(tagged, _AM_PREFIXES_TAGGED)
+    known = np.char.str_len(full) >= _OCC_MIN_LENGTH
+    return np.where(am, 1, np.where(known, 2, 0)).astype(np.int8)
+
+
+def _settles_at_open(date: dt.date, code: int, index_root: str | None) -> bool:
+    # A known ticker outside the list settles at the close whatever its rows
+    # say: its chain cannot hold an index's AM series, and not reading the
+    # symbols of every other chain is what keeps the common path free.
+    if index_root is not None and index_root not in AM_SETTLED_ROOTS:
+        return False
+    if code:
+        return code == 1
+    return index_root in AM_SETTLED_ROOTS and _is_monthly_expiry(date)
+
+
+def _expiry_moment(expiry, contract_symbol=None, ticker=None, as_of=None) -> pd.Timestamp:
+    """The instant a contract's life ends, as naive UTC: its settlement.
+
+    16:00 New York on the expiration date for nearly everything. The standard
+    monthly series of the indices in AM_SETTLED_ROOTS settle on the OPENING
+    print of that date instead, 09:30 — measuring them to 16:00 adds six and
+    a half hours to the last day, a quarter to a third of all the time left
+    on the Thursday before, and keeps a series that has already settled alive
+    through Friday morning.
+
+    Which series a row is: its contract symbol, when the caller has one — the
+    root decides, whatever the date (unless the ticker is known and is not one
+    of the listed indices: then the close). Without a symbol, the ticker and the date
+    decide: an index from the list on its monthly expiration date is taken as
+    the AM series — but only while it is still alive: observed (`as_of`) at or
+    after the open of that date, the row is read as the PM series of the same
+    strike, which trades until the close. A stored chain keeps one row per
+    strike, and where both series list it that row is the AM one; once the AM
+    series has settled, it is the best stand-in the chain has for the PM
+    contract beside it, and pricing it as settled would zero the whole date
+    on the day it matters most. With neither symbol nor ticker, the close, as
+    before — which is also the right answer to "is this DATE still trading".
 
     The date is read in the expiry's own zone. A missing expiry (None, NaN,
     NaT) has no moment and gives NaT, so the time left is NaN like any other
@@ -248,7 +394,13 @@ def _expiry_moment(expiry) -> pd.Timestamp:
     stamp = pd.Timestamp(expiry)
     if pd.isna(stamp):
         return pd.NaT
-    return _close_of(stamp.date())
+    date = stamp.date()
+    code = _symbol_code(contract_symbol)
+    if _settles_at_open(date, code, _index_root(ticker)):
+        if code == 0 and as_of is not None and _as_naive_utc(as_of) >= _open_of(date):
+            return _close_of(date)
+        return _open_of(date)
+    return _close_of(date)
 
 
 def _as_naive_utc(moment) -> pd.Timestamp:
@@ -260,8 +412,11 @@ def _as_naive_utc(moment) -> pd.Timestamp:
     return stamp.tz_convert("UTC").tz_localize(None) if stamp.tzinfo is not None else stamp
 
 
-def years_to_expiry(expiry, as_of) -> float:
-    """Time to expiry in years, measured to the 16:00 ET close.
+def years_to_expiry(expiry, as_of, contract_symbol=None, ticker=None) -> float:
+    """Time to expiry in years, measured to the contract's settlement — the
+    16:00 ET close, or the 09:30 open for an AM-settled index series
+    (`_expiry_moment`). Without a symbol or a ticker: the close, which is
+    when the expiration DATE stops trading.
 
     Replaces `(expiry - as_of).days / 365`, which was wrong twice over
     (reported live): it compared against MIDNIGHT of the expiration date, so a
@@ -273,35 +428,74 @@ def years_to_expiry(expiry, as_of) -> float:
 
     Negative once trading has stopped, which callers rely on to tell a
     finished contract from a live one."""
-    return (_expiry_moment(expiry) - _as_naive_utc(as_of)).total_seconds() / _YEAR_SECONDS
+    return (_expiry_moment(expiry, contract_symbol, ticker, as_of) - _as_naive_utc(as_of)).total_seconds() / _YEAR_SECONDS
 
 
-def _expiry_moments(expiry) -> pd.Series:
+def _expiry_moments(expiry, symbols=None, ticker=None, as_of=None) -> pd.Series:
     """`_expiry_moment` for every row, computed once per distinct expiry:
-    the same values, index and dtype as a row-by-row map."""
+    the same values, index and dtype as a row-by-row map. `symbols` is the
+    rows' contract symbols (or None), `ticker` the chain's, `as_of` the
+    instant each row was observed — one for all, or one per row (or None)."""
     series = pd.Series(expiry)
     if series.empty:
         return pd.to_datetime(series.map(_expiry_moment))
     codes, distinct = pd.factorize(series, use_na_sentinel=False)
-    moments = pd.to_datetime(pd.Series([_expiry_moment(value) for value in distinct]))
-    return pd.Series(moments.to_numpy()[codes], index=series.index)
+    closes = pd.to_datetime(pd.Series([_expiry_moment(value) for value in distinct])).to_numpy()
+    index_root = _index_root(ticker)
+    if (symbols is None or index_root is not None) and index_root not in AM_SETTLED_ROOTS:
+        # Every chain that is not one of the listed indices: nothing settles
+        # at the open, and nothing below is worth its cost.
+        return pd.Series(closes[codes], index=series.index)
+    rows = _settlement_codes(symbols, series.index)
+    dates = [None if pd.isna(stamp := pd.Timestamp(value)) else stamp.date() for value in distinct]
+    opens = pd.to_datetime(pd.Series(
+        [pd.NaT if date is None else _open_of(date) for date in dates]
+    )).to_numpy().astype(closes.dtype)
+    by_rule = np.array([date is not None and _settles_at_open(date, 0, index_root) for date in dates])[codes]
+    if as_of is not None and by_rule.any():
+        if not np.ndim(as_of):
+            when = np.datetime64(_as_naive_utc(as_of))
+        else:
+            # Positional: a per-row `as_of` may carry an index of its own. A
+            # naive datetime column is taken as it is, without a copy.
+            when = np.asarray(as_of)
+            if when.dtype.kind != "M":
+                stamps = pd.to_datetime(pd.Series(when))
+                if stamps.dt.tz is not None:
+                    stamps = stamps.dt.tz_convert("UTC").dt.tz_localize(None)
+                when = stamps.to_numpy()
+        by_rule &= ~(when >= opens[codes])
+    moments = np.where(
+        rows == 1, opens[codes],
+        np.where(rows == 2, closes[codes], np.where(by_rule, opens[codes], closes[codes])),
+    )
+    return pd.Series(moments, index=series.index)
 
 
-def years_to_expiry_series(expiry: pd.Series, as_of) -> pd.Series:
+def _frame_expiry_moments(frame: pd.DataFrame, ticker=None) -> pd.Series:
+    """`_expiry_moments` for a chain: its own contract symbols where it
+    carries them, its ticker from the caller or from its `ticker` column."""
+    return _expiry_moments(frame["expiry"], frame.get("contract_symbol"), _ticker_of(frame, ticker),
+                           frame.get("collected_at"))
+
+
+def years_to_expiry_series(expiry: pd.Series, as_of, symbols=None, ticker=None) -> pd.Series:
     """Vectorized counterpart — the screener and GEX price whole chains."""
-    moments = _expiry_moments(expiry)
+    moments = _expiry_moments(expiry, symbols, ticker, as_of)
     return (moments - _as_naive_utc(as_of)).dt.total_seconds() / _YEAR_SECONDS
 
 
-def years_to_expiry_by_moment(expiry, moments: pd.Series) -> pd.Series:
+def years_to_expiry_by_moment(expiry, moments: pd.Series, contract_symbol=None, ticker=None) -> pd.Series:
     """The other vectorized shape: ONE contract observed at many moments —
     a contract's history — where `years_to_expiry_series` is many contracts
     at one moment. Row for row what `years_to_expiry(expiry, moment)` gives,
-    by the same definition (the 16:00 New York close, naive UTC)."""
+    by the same definition (the contract's settlement, naive UTC)."""
     when = pd.to_datetime(pd.Series(moments))
     if when.dt.tz is not None:
         when = when.dt.tz_convert("UTC").dt.tz_localize(None)
-    return (_expiry_moment(expiry) - when).dt.total_seconds() / _YEAR_SECONDS
+    moments = _expiry_moments(pd.Series(expiry, index=when.index), None if contract_symbol is None else
+                              pd.Series(contract_symbol, index=when.index), ticker, when)
+    return (moments - when).dt.total_seconds() / _YEAR_SECONDS
 
 
 def risk_free_rate(curve: dict[float, float], years_to_expiry: float) -> float | None:
@@ -893,9 +1087,9 @@ def with_solved_iv(
     # PER ROW, not per frame. `years_to_expiry_series` takes ONE instant and is
     # right for a single snapshot; a history frame carries a different
     # `collected_at` on every row, and passing the column to it raises. Built
-    # the same way it builds — expiry mapped to its 16:00 New York close — so
+    # the same way it builds — expiry mapped to the contract's settlement — so
     # the two cannot drift apart on the definition of "time to expiry".
-    expiry_moments = _expiry_moments(frame["expiry"])
+    expiry_moments = _frame_expiry_moments(frame, ticker)
     collected = pd.to_datetime(frame["collected_at"])
     years = (expiry_moments - collected).dt.total_seconds() / _YEAR_SECONDS
     price = contract_price_for_iv(frame)
@@ -934,7 +1128,9 @@ def with_solved_iv(
     return frame
 
 
-def screener_table(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -> pd.DataFrame:
+def screener_table(
+    df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING, ticker: str | None = None
+) -> pd.DataFrame:
     """Flat table of every contract in the ticker's latest snapshot with DTE
     and the full set of greeks (spec FR25) — the basis for the range-filter
     screener. Latest snapshot only, not the full history: the screener is a
@@ -953,7 +1149,7 @@ def screener_table(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -
     snapshot["dte"] = (
         pd.to_datetime(snapshot["expiry"], errors="coerce") - snapshot_date
     ).dt.days
-    years = years_to_expiry_series(snapshot["expiry"], snapshot_date)
+    years = (_frame_expiry_moments(snapshot, ticker) - _as_naive_utc(snapshot_date)).dt.total_seconds() / _YEAR_SECONDS
 
     greeks = _black_scholes_greeks_batch(
         snapshot["underlying_price"], snapshot["strike"], years,
@@ -976,7 +1172,7 @@ def screener_table(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -
     return table[columns].sort_values(["expiry", "strike", "option_type"]).reset_index(drop=True)
 
 
-def _contract_gex(frame: pd.DataFrame, pricing: PricingInputs) -> pd.Series:
+def _contract_gex(frame: pd.DataFrame, pricing: PricingInputs, ticker: str | None = None) -> pd.Series:
     """Dealer GEX for every row of `frame`, obtained in ONE batched greeks call.
 
     THE QUANTITY IS THE ONE `gamma_exposure_profile` DEFINES, and this is the
@@ -1006,9 +1202,9 @@ def _contract_gex(frame: pd.DataFrame, pricing: PricingInputs) -> pd.Series:
     """
     spot = pd.to_numeric(frame["underlying_price"], errors="coerce")
     collected = pd.to_datetime(frame["collected_at"])
-    # Per row, the same way `years_to_expiry` builds it — expiry mapped to its
-    # 16:00 New York close.
-    expiry_moments = _expiry_moments(frame["expiry"])
+    # Per row, the same way `years_to_expiry` builds it — expiry mapped to the
+    # contract's settlement.
+    expiry_moments = _frame_expiry_moments(frame, ticker)
     years = (expiry_moments - collected).dt.total_seconds() / _YEAR_SECONDS
     greeks = _black_scholes_greeks_batch(
         spot, pd.to_numeric(frame["strike"], errors="coerce"), years,
@@ -1027,6 +1223,7 @@ def gamma_exposure_profile(
     expiry: pd.Timestamp,
     pricing: PricingInputs = DEFAULT_PRICING,
     as_of: pd.Timestamp | None = None,
+    ticker: str | None = None,
 ) -> pd.DataFrame:
     """Approximate dealer GEX profile by strike for the given expiry (spec FR6).
     `as_of=None` — the latest snapshot (current state); otherwise a specific
@@ -1041,12 +1238,15 @@ def gamma_exposure_profile(
         return pd.DataFrame(columns=["strike", "gex"])
 
     spot = snapshot["underlying_price"].iloc[0]
-    years = years_to_expiry(expiry, snapshot_date)
+    # Per row: one date can hold an AM- and a PM-settled series.
+    snapshot["__years__"] = (
+        _frame_expiry_moments(snapshot, ticker) - _as_naive_utc(snapshot_date)
+    ).dt.total_seconds() / _YEAR_SECONDS
 
     snapshot["gamma"] = snapshot.apply(
         lambda row: _black_scholes_greeks(
-            spot, row["strike"], years, row["implied_volatility"],
-            pricing.rate_for(years), row["option_type"],
+            spot, row["strike"], row["__years__"], row["implied_volatility"],
+            pricing.rate_for(row["__years__"]), row["option_type"],
             dividend_yield=pricing.dividend_yield,
         )["gamma"],
         axis=1,
@@ -1099,6 +1299,7 @@ def gex_matrix(
     as_of: pd.Timestamp | None = None,
     pricing: PricingInputs = DEFAULT_PRICING,
     expiries: list | None = None,
+    ticker: str | None = None,
 ) -> pd.DataFrame:
     """GEX matrix strike × expiry for a single snapshot (spec section 12, GEX
     Heatmap). Needs no new data — one snapshot already contains the full chain.
@@ -1129,7 +1330,7 @@ def gex_matrix(
     combined = pd.DataFrame({
         "strike": snapshot["strike"],
         "expiry": snapshot["expiry"],
-        "gex": _contract_gex(snapshot, pricing),
+        "gex": _contract_gex(snapshot, pricing, ticker),
     })
     # fill_value=0, not NaN: if an expiry has no listing at a given strike,
     # dealer exposure there is genuinely zero (not "unknown") — this removes
@@ -1138,7 +1339,9 @@ def gex_matrix(
     return matrix.sort_index(ascending=False)
 
 
-def net_gex_series(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -> pd.DataFrame:
+def net_gex_series(
+    df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING, ticker: str | None = None
+) -> pd.DataFrame:
     """Net GEX for EVERY (moment, expiry) in the frame (tier 2 of R-01.1).
 
     Same quantity `net_gamma_exposure(gamma_exposure_profile(…))` produces for
@@ -1165,14 +1368,16 @@ def net_gex_series(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -
 
     frame = df.copy()
     collected = pd.to_datetime(frame["collected_at"])
-    contract_gex = _contract_gex(frame, pricing)
+    contract_gex = _contract_gex(frame, pricing, ticker)
     grouped = contract_gex.groupby([collected, frame["expiry"]]).sum()
     result = grouped.reset_index()
     result.columns = columns
     return result
 
 
-def expiry_rollup(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) -> pd.DataFrame:
+def expiry_rollup(
+    df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING, ticker: str | None = None
+) -> pd.DataFrame:
     """Tier 2 in one call: max pain and net GEX per (moment, expiry).
 
     The two numbers are stored on one row, so they are computed together — and
@@ -1183,7 +1388,7 @@ def expiry_rollup(df: pd.DataFrame, pricing: PricingInputs = DEFAULT_PRICING) ->
     what happened.
     """
     pain = max_pain_series(df)
-    gex = net_gex_series(df, pricing)
+    gex = net_gex_series(df, pricing, ticker)
     if pain.empty and gex.empty:
         return pd.DataFrame(columns=["collected_at", "expiry", "max_pain", "net_gex"])
     merged = pain.merge(gex, on=["collected_at", "expiry"], how="outer")
@@ -1246,24 +1451,108 @@ def net_gex_by_expiry(
     })
 
 
+# How far from the underlying price a wall may stand: twice the expected
+# move of the expiries it is taken over, but never closer than five percent.
+# A strike outside that window holds open interest nobody expects the price
+# to reach before those contracts expire — a level, not a wall.
+WALL_WINDOW_MOVES = 2.0
+WALL_WINDOW_FLOOR = 0.05
+
+
+def wall_reach(df: pd.DataFrame, as_of: pd.Timestamp | None = None) -> pd.Series:
+    """One expected move per expiry, as a share of the underlying price:
+    `σ_ATM × √T`, indexed by expiry. Only expiries that still trade and have
+    an at-the-money volatility are listed; the others widen no window.
+
+    σ_ATM is the mean implied volatility at the strike nearest the price,
+    calls and puts alike, counting only values above the solver floor: a
+    provider's placeholder (1e-5 on in-the-money contracts) is not a
+    volatility, and one of the two contracts at the money is always slightly
+    in the money."""
+    snapshot_date = as_of if as_of is not None else df["collected_at"].max()
+    snapshot = df[df["collected_at"] == snapshot_date]
+    if snapshot.empty:
+        return pd.Series(dtype=float)
+    spot = pd.to_numeric(snapshot["underlying_price"], errors="coerce").iloc[0]
+    if not np.isfinite(spot) or spot <= 0:
+        return pd.Series(dtype=float)
+    iv = pd.to_numeric(snapshot["implied_volatility"], errors="coerce")
+    strike = pd.to_numeric(snapshot["strike"], errors="coerce")
+    usable = snapshot.assign(_iv=iv, _distance=(strike - spot).abs())[(iv > _IV_FLOOR) & strike.notna()]
+    if usable.empty:
+        return pd.Series(dtype=float)
+    nearest = usable.groupby("expiry")["_distance"].transform("min")
+    sigma = usable[usable["_distance"] == nearest].groupby("expiry")["_iv"].mean()
+    years = pd.Series([years_to_expiry(expiry, snapshot_date) for expiry in sigma.index], index=sigma.index)
+    live = years > 0
+    return (sigma[live] * np.sqrt(years[live])).astype(float)
+
+
+def wall_window(reach: pd.Series, expiries=None) -> float:
+    """The half-width of the strike window, as a share of the price, for a
+    set of expiries (all of `reach` by default): the farthest expected move
+    among them, doubled, floored at `WALL_WINDOW_FLOOR`."""
+    if expiries is not None:
+        reach = reach[reach.index.isin(expiries)]
+    widest = float(reach.max()) if not reach.empty else 0.0
+    return max(WALL_WINDOW_MOVES * widest, WALL_WINDOW_FLOOR)
+
+
+def pick_wall(ladder: pd.Series | None, side: str, spot: float, window: float) -> float | None:
+    """One side's wall from its open interest by strike (index ascending):
+    the strike with the most open interest on that side's half of the chain —
+    a call at or above the price, a put at or below it — and inside the
+    window. A tie goes to the strike nearer the price. None when that side
+    holds no open interest there at all: a put wall above the price would be
+    a level dealers sit on the wrong side of, not support."""
+    if ladder is None or ladder.empty:
+        return None
+    return pick_wall_arrays(ladder.index.to_numpy(dtype=float), ladder.to_numpy(dtype=float), side, spot, window)
+
+
+def pick_wall_arrays(strikes: np.ndarray, values: np.ndarray, side: str, spot: float, window: float) -> float | None:
+    """`pick_wall` on bare arrays (strikes ascending), for callers that hold
+    many ladders as one grid and would otherwise box each into a Series."""
+    if len(strikes) == 0 or spot is None or not np.isfinite(spot) or spot <= 0:
+        return None
+    # A relative tolerance of 1e-12 keeps a strike that sits exactly on the
+    # edge inside: 0.05 has no exact binary form, and without it about four
+    # in ten exact edges on a cent grid fall out, while no strike a cent past
+    # the edge falls in.
+    reach = np.abs(strikes - spot) <= window * spot * (1 + 1e-12)
+    half = strikes >= spot if side == "call" else strikes <= spot
+    allowed = reach & half & (values > 0)
+    if not allowed.any():
+        return None
+    candidates = np.where(allowed, values, -np.inf)
+    if side == "call":
+        return float(strikes[int(np.argmax(candidates))])
+    return float(strikes[len(strikes) - 1 - int(np.argmax(candidates[::-1]))])
+
+
 def dealer_walls(
     df: pd.DataFrame, as_of: pd.Timestamp | None = None, expiries: list | None = None
 ) -> dict[str, float | None]:
-    """Call Wall / Put Wall — the strike with maximum open interest in
-    calls/puts, aggregated across the snapshot's expiries — all by default, or
-    the given subset (a common proxy for support/resistance levels created by
-    dealer hedging flows, spec section 12)."""
+    """Call Wall / Put Wall — the strike with the most open interest in
+    calls (at or above the price) and in puts (at or below it), aggregated
+    across the snapshot's expiries — all by default, or the given subset —
+    and no further from the price than `wall_window` allows (a common proxy
+    for support/resistance levels created by dealer hedging flows, spec
+    section 12). See `pick_wall` for ties and an empty side."""
     snapshot_date = as_of if as_of is not None else df["collected_at"].max()
     snapshot = df[df["collected_at"] == snapshot_date]
     if expiries is not None:
         snapshot = snapshot[snapshot["expiry"].isin(expiries)]
+    if snapshot.empty:
+        return {"call_wall": None, "put_wall": None}
+    spot = float(pd.to_numeric(snapshot["underlying_price"], errors="coerce").iloc[0])
+    window = wall_window(wall_reach(snapshot, snapshot_date))
     oi_by_strike = snapshot.groupby(["option_type", "strike"])["open_interest"].sum()
+    sides = oi_by_strike.index.get_level_values("option_type")
 
     def wall(option_type: str) -> float | None:
-        if option_type not in oi_by_strike.index.get_level_values("option_type"):
-            return None
-        series = oi_by_strike.loc[option_type]
-        return float(series.idxmax()) if not series.empty else None
+        ladder = oi_by_strike.loc[option_type] if option_type in sides else None
+        return pick_wall(ladder, option_type, spot, window)
 
     return {"call_wall": wall("call"), "put_wall": wall("put")}
 
@@ -1635,6 +1924,8 @@ def contract_greeks_history(
     expiry: pd.Timestamp,
     option_type: str,
     pricing: PricingInputs = DEFAULT_PRICING,
+    ticker: str | None = None,
+    contract_symbol: str | None = None,
 ) -> pd.DataFrame:
     """Price, IV, and full-greeks history of a specific contract across
     collection dates (spec FR14). Replaces the former iv_by_contract — the
@@ -1665,7 +1956,14 @@ def contract_greeks_history(
     # a missing volatility or spot is NaN, not a number (the scalar returns
     # NaN for every greek; the batch would say 0.0), and a provider's greek
     # wins where the row carries one, whatever ours came to.
-    years = years_to_expiry_by_moment(expiry, contract["collected_at"])
+    # One contract, one settlement: its symbol from the caller or its rows.
+    if contract_symbol is None and "contract_symbol" in contract.columns:
+        named = contract["contract_symbol"].dropna()
+        named = named[named.astype(str) != ""]
+        contract_symbol = str(named.iloc[0]) if len(named) else None
+    years = years_to_expiry_by_moment(
+        expiry, contract["collected_at"], contract_symbol, _ticker_of(contract, ticker)
+    )
     spot = pd.to_numeric(contract["underlying_price"], errors="coerce")
     iv = pd.to_numeric(reliable_iv, errors="coerce")
     greeks = _black_scholes_greeks_batch(
@@ -1770,7 +2068,7 @@ def oi_delta(df: pd.DataFrame) -> pd.DataFrame:
     return result.sort_values("oi_delta", key=abs, ascending=False)
 
 
-def iv_surface(df: pd.DataFrame) -> pd.DataFrame:
+def iv_surface(df: pd.DataFrame, ticker: str | None = None) -> pd.DataFrame:
     """Volatility surface points from the latest snapshot: for each strike, the
     OTM contract's IV is taken (put below spot, call above — standard vol
     surface practice, since ITM quotes are usually less liquid and noisier).
@@ -1787,7 +2085,9 @@ def iv_surface(df: pd.DataFrame) -> pd.DataFrame:
         snapshot["strike"] < spot, snapshot["option_type"] == "put", snapshot["option_type"] == "call"
     )
     otm = snapshot[is_otm & snapshot["implied_volatility"].notna() & (snapshot["implied_volatility"] > 0)].copy()
-    otm["years_to_expiry"] = years_to_expiry_series(otm["expiry"], latest_date)
+    otm["years_to_expiry"] = (
+        _frame_expiry_moments(otm, ticker) - _as_naive_utc(latest_date)
+    ).dt.total_seconds() / _YEAR_SECONDS
     return otm[["strike", "expiry", "years_to_expiry", "implied_volatility"]].sort_values(["expiry", "strike"])
 
 

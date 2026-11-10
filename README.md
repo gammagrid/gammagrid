@@ -422,6 +422,20 @@ is listed, SPXW only at the strikes where it is not. GammaGrid stores what is
 served, so on that expiry the 0DTE picture is the monthly series' rather than
 the weeklies' wherever the two overlap. Every other day is unaffected.
 
+**The monthly SPX, NDX, RUT and DJX series expire at the open.** They settle
+on the opening print of the expiration date, so time to expiry — and with it
+the solved volatility, the greeks and GEX — is measured to 09:30 New York on
+that date rather than to the 16:00 close. A stored chain does not carry the
+contract symbol, so the series is told by the ticker and the date: one of these
+four indices on its standard monthly expiration (the third Friday, or the
+Thursday before it when the exchange is closed that Friday). From the open of
+that day on, its rows are read as the PM series of the same strike, which
+trades until the close — otherwise the whole date would read as expired on the
+day it matters most. Weeklies, dailies, PM-settled monthlies and XSP keep the
+close on every other date. On the monthly date itself the rule cannot tell
+the series apart: before the open, the SPXW contracts Yahoo serves at strikes
+the monthly series does not list (see above) are measured to 09:30 as well.
+
 **Implied volatility here is ours, not Yahoo's.** The source omits it on part
 of a chain and reports figures that do not reproduce the quoted price on
 another part, and every greek on every screen is built on that number — so the

@@ -333,6 +333,19 @@ def expected_move(
     }
 
 
+def wall_label(level, side: str, spec: str = ",.2f") -> str:
+    """A call or put wall as the screens print it.
+
+    A wall stands on its own side of the price — a call wall at or above it, a
+    put wall at or below it — inside a window around the price
+    (`metrics_core.dealer_walls`). When that side holds no open interest there,
+    there is no wall, and saying so is the answer: a dash or "n/a" would read
+    as data that failed to load."""
+    if level is None or not np.isfinite(float(level)):
+        return "no wall above price" if side == "call" else "no wall below price"
+    return format(float(level), spec)
+
+
 # Re-exports, including the underscore-prefixed helpers: `app.metrics` stays the
 # single entry point for callers and tests, so moving a function into the core
 # must not force every call site to learn where it went. Listing them here is
@@ -398,4 +411,5 @@ __all__ = [
     "years_to_expiry",
     "years_to_expiry_by_moment",
     "years_to_expiry_series",
+    "wall_label",
 ]
