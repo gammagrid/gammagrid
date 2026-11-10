@@ -152,8 +152,12 @@ def check_archiving_moves_and_keeps(conn):
     before = db.get_snapshots(conn, ticker, days=None)
     assert len(before) == 2, before
 
+    # The count is the whole test database's, not this ticker's: fixtures
+    # inserted earlier carry fixed expiry dates that fall past the grace period
+    # as the calendar moves on, and the same pass archives them. That exactly
+    # this ticker's expired contract moved is what the counts below assert.
     moved = db.archive_expired_contracts(conn, grace_days=30)
-    assert moved == 1, f"exactly the long-expired contract should have moved, got {moved}"
+    assert moved >= 1, f"the long-expired contract should have moved, got {moved}"
 
     hot = conn.execute(
         "SELECT count(*) FROM option_snapshots WHERE ticker = %s", (ticker,)

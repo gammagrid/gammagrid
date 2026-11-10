@@ -799,8 +799,12 @@ def check_archiving_goes_through_the_registry():
         _chain_row(old, 10.0, "call"),
         _chain_row(live, 20.0, "call"),
     ]))
+    # The count is the whole test database's, not this ticker's: fixtures of
+    # other checks carry fixed expiry dates that fall past the grace period as
+    # the calendar moves on, and they are archived by the same pass. Which of
+    # ARCH's rows moved is asserted on the tables below.
     moved = db.archive_expired_contracts(conn, grace_days=30)
-    assert moved == 1, f"exactly the expired contract moves, got {moved}"
+    assert moved >= 1, f"the expired contract moves, got {moved}"
 
     # The hot table specifically, not db.get_snapshots — that reads both tables
     # by design, so it would show the same two rows whether archiving worked or
