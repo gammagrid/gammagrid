@@ -1557,14 +1557,117 @@ def dealer_walls(
     return {"call_wall": wall("call"), "put_wall": wall("put")}
 
 
-# Smallest share of the cumulative profile's largest absolute value that a
-# value on each side of a zero crossing must exceed for the crossing to count
-# as the gamma flip — see `gamma_flip_from_matrix`.
+# Furthest the flip may lie from the underlying price, as a share of it. It is
+# also the half-width of the price grid the flip is searched on, so a sign
+# change further away is never looked for — see `gamma_flip_price`.
+GAMMA_FLIP_MAX_DISTANCE = 0.25
+
+# Spacing of that grid, as a share of the underlying price: 0.05%, or 1,001
+# prices across the search range — see `gamma_flip_price`.
+GAMMA_FLIP_GRID_STEP = 0.0005
+
+# Smallest share of the largest absolute value of the re-priced curve that a
+# value on each side of a sign change must exceed for the change to count as
+# the gamma flip — see `gamma_flip_price`.
 GAMMA_FLIP_MIN_SHARE = 1e-4
 
-# Furthest the flip may lie from the underlying price, as a share of it; a
-# crossing further away is reported as no flip — see `gamma_flip_from_matrix`.
-GAMMA_FLIP_MAX_DISTANCE = 0.25
+# Contracts priced on the grid per block. Bounds the temporary arrays at
+# block x grid floats (about 16 MB each at the default step) whatever the
+# chain's size; the answer does not depend on it.
+_FLIP_BLOCK_ROWS = 2048
+
+
+def gamma_flip_grid(spot: float) -> np.ndarray:
+    """The hypothetical underlying prices the flip is searched on: the spot
+    itself and `GAMMA_FLIP_GRID_STEP` steps of it either way, out to
+    `GAMMA_FLIP_MAX_DISTANCE`. Exactly symmetric and exactly through the
+    spot, so the curve's value there is the net GEX the rest of the app
+    shows."""
+    steps = int(round(GAMMA_FLIP_MAX_DISTANCE / GAMMA_FLIP_GRID_STEP))
+    return float(spot) * (1.0 + GAMMA_FLIP_GRID_STEP * np.arange(-steps, steps + 1))
+
+
+def _repriced_inputs(snapshot: pd.DataFrame, pricing: PricingInputs, ticker: str | None):
+    """Per contract, what its dealer GEX at a hypothetical price needs.
+
+    At an underlying price S a contract's GEX is sign * OI * 100 * S * gamma(S)
+    (`_contract_gex`), and Black-Scholes gamma is exp(-qT) * pdf(d1) /
+    (S * sigma * sqrt(T)) — so the S cancels and the contribution is
+    `weight * exp(-d1(S)^2 / 2)` with d1(S) = (ln S - ln K + drift) / vol. The
+    four arrays returned are ln K, drift, vol and weight, for the contracts
+    that can carry gamma at all: time left, a positive strike, open interest
+    other than zero, and a volatility above the solver's floor. Everything
+    else contributes exactly zero at every price.
+
+    THE FLOOR, NOT ZERO. A source files deep in-the-money contracts with a
+    placeholder volatility of 1e-5 — 9-17% of the rows of a live thirty-day
+    chain. At the actual spot such a contract is many standard deviations
+    from its strike and contributes nothing, so `_contract_gex` can keep it;
+    re-priced, the grid walks straight through its strike, where a width of
+    sigma * sqrt(T) ~ 2e-6 makes it a spike some 1e4 times taller than an
+    ordinary contract. One put with an open interest of 10 moved a synthetic
+    flip from 97.19 to 100.40; on SPX the spikes multiplied the curve's peak
+    eighteenfold, and the significance threshold with it. A volatility no
+    solver would return is not a sticky-strike volatility to hold fixed."""
+    collected = pd.to_datetime(snapshot["collected_at"])
+    years = ((_frame_expiry_moments(snapshot, ticker) - collected).dt.total_seconds() / _YEAR_SECONDS).to_numpy(
+        dtype=float)
+    strike = pd.to_numeric(snapshot["strike"], errors="coerce").to_numpy(dtype=float)
+    iv = pd.to_numeric(snapshot["implied_volatility"], errors="coerce").to_numpy(dtype=float)
+    oi = pd.to_numeric(snapshot["open_interest"], errors="coerce").fillna(0).to_numpy(dtype=float)
+    rate = pricing.rate_series(pd.Series(years))
+    keep = (years > 0) & (iv > _IV_FLOOR) & (strike > 0) & np.isfinite(oi) & (oi != 0)
+    years, strike, iv, oi, rate = years[keep], strike[keep], iv[keep], oi[keep], rate[keep]
+    q = pricing.dividend_yield
+    vol = iv * np.sqrt(years)
+    drift = (rate - q + iv ** 2 / 2) * years
+    sign = np.where((snapshot["option_type"] == "put").to_numpy()[keep], -1.0, 1.0)
+    weight = sign * oi * 100 * np.exp(-q * years) / (vol * _SQRT_2PI)
+    return keep, np.log(strike), drift, vol, weight
+
+
+def repriced_gex_by_group(
+    snapshot: pd.DataFrame,
+    prices: np.ndarray,
+    groups: np.ndarray,
+    n_groups: int,
+    pricing: PricingInputs = DEFAULT_PRICING,
+    ticker: str | None = None,
+) -> np.ndarray:
+    """Dealer GEX of a single-moment chain re-priced at every price in `prices`,
+    summed per group of contracts: row g, column j is the total over the
+    contracts with `groups == g` had the underlying stood at `prices[j]`.
+
+    Only the underlying moves. Each contract keeps its own implied volatility
+    (sticky strike), its time to expiry and its open interest, which is how
+    every published "gamma flip" is computed; at the actual spot the result
+    is `_contract_gex` summed, to rounding.
+
+    Priced in blocks of contracts so memory stays flat on the largest chains,
+    with the contracts ordered by group so each block is summed per group by
+    one `np.add.reduceat`. A matrix product with a group-membership matrix
+    was the obvious alternative and the wrong one: 584 ms for all 52 SPX
+    expiries against 85 ms this way, because a multithreaded BLAS spends that
+    time coordinating threads on products this small (100 ms on one thread)."""
+    prices = np.asarray(prices, dtype=float)
+    totals = np.zeros((n_groups, len(prices)))
+    if snapshot.empty or not len(prices):
+        return totals
+    keep, log_strike, drift, vol, weight = _repriced_inputs(snapshot, pricing, ticker)
+    groups = np.asarray(groups)[keep]
+    order = np.argsort(groups, kind="stable")
+    groups, log_strike, drift, vol, weight = (
+        groups[order], log_strike[order], drift[order], vol[order], weight[order])
+    log_prices = np.log(prices)
+    for start in range(0, len(weight), _FLIP_BLOCK_ROWS):
+        block = slice(start, start + _FLIP_BLOCK_ROWS)
+        d1 = (log_prices[None, :] - log_strike[block, None] + drift[block, None]) / vol[block, None]
+        exposure = np.exp(-0.5 * d1 * d1)
+        exposure *= weight[block, None]
+        members = groups[block]
+        starts = np.flatnonzero(np.r_[True, members[1:] != members[:-1]])
+        totals[members[starts]] += np.add.reduceat(exposure, starts, axis=0)
+    return totals
 
 
 def gamma_flip_price(
@@ -1572,185 +1675,142 @@ def gamma_flip_price(
     as_of: pd.Timestamp | None = None,
     pricing: PricingInputs = DEFAULT_PRICING,
     expiries: list | None = None,
+    ticker: str | None = None,
 ) -> float | None:
-    """Approximate underlying price at which total dealer GEX (across all
-    expiries) flips sign — a proxy for the "gamma flip" level (spec section
-    12). Simplification: take the already-computed per-strike GEX profile (at
-    the actual current underlying price, as everywhere in the app), sum across
-    expiries, walk strikes in ascending order and find where the cumulative
-    sum changes sign — with linear interpolation between the two nearest
-    strikes so the result is a price level, not just a strike. Does not
-    re-price greeks on a grid of hypothetical underlying prices (more accurate
-    but substantially more expensive) — the same class of assumption already
-    used for net GEX (spec FR6/FR15).
+    """The gamma flip: the underlying price nearest the spot at which total
+    dealer GEX (over `expiries`, every expiry by default) changes sign once
+    every contract is RE-PRICED at that price — or None if there is no such
+    price within `GAMMA_FLIP_MAX_DISTANCE` of the spot.
 
-    The underlying price comes from the snapshot itself: the profile alone does
-    not say which of its zero crossings is the one being asked about — see
-    `gamma_flip_from_matrix`."""
+    THE DEFINITION. Total GEX as a function of a hypothetical underlying price
+    S, with gammas recomputed at S and everything else held (see
+    `repriced_gex_by_group`); the flip is where that function crosses zero.
+    This is the accepted meaning of the level — the price at which dealer
+    hedging would turn from damping moves to amplifying them — and the one
+    other tools publish.
+
+    WHAT IT REPLACED, AND WHY THAT WAS A DEFECT RATHER THAN A SIMPLIFICATION.
+    The flip used to be the zero of the CUMULATIVE per-strike profile at the
+    current spot: GEX summed strike by strike from the bottom of the chain.
+    That is a different quantity, and on an ordinary chain it cannot give the
+    accepted answer. With net exposure negative, put exposure below the money
+    and call exposure above it, the running sum first falls and then rises
+    without ever getting back above max(first value, total) < 0 — so there is
+    no crossing at all, by construction. SPY, QQQ, SPX, IWM and NVDA all showed
+    "no flip" on the same morning while other tools put theirs 1-3% above the
+    price. With net exposure positive the running sum crosses once, above the
+    spot, while the re-priced flip of such a chain lies below it: a synthetic
+    chain at 750 gave 754.34 against 744.92. The answer changed sides of the
+    price, not just its value.
+
+    THE GRID. The function is evaluated on `gamma_flip_grid` — the spot and
+    `GAMMA_FLIP_GRID_STEP` steps either side out to `GAMMA_FLIP_MAX_DISTANCE`
+    — and the zero is interpolated linearly between the two grid prices
+    bracketing it. The step is set by the nearest expiry near its close, the
+    narrowest feature the curve has: with fifteen minutes left an at-the-money
+    contract's gamma is about 0.08% of the price wide, and with five minutes
+    left a 0.1% step put SPX's flip 0.34% off the level a fifty-times finer
+    grid finds, against 0.10% at 0.05%. Right at the close the curve changes
+    sign at nearly every strike and the level is noisy at any step. Re-pricing
+    the whole chain at every grid price is the cost of the definition (about
+    25 ms for SPY's thirty-day chain, 85 ms for SPX's), which is why the
+    worker computes it and screens read the stored level.
+
+    Three rules decide which sign change is the flip, each carried over from
+    the cumulative walk because each answers a question the definition does
+    not.
+
+    A CHANGE IS BETWEEN A STRICTLY POSITIVE AND A STRICTLY NEGATIVE VALUE.
+    Prices at which nothing carries gamma — far beyond the chain, where every
+    density has underflowed — are exactly 0.0 and take no part; a curve that
+    passes through 0.0 on its way from one sign to the other still changes,
+    because the signed values either side of the flat part bracket it.
+
+    BOTH SIDES MUST BE SIGNIFICANT. A value takes part only when its magnitude
+    exceeds `GAMMA_FLIP_MIN_SHARE` of the curve's largest absolute value, and
+    a change counts when the nearest such values either side have opposite
+    signs. Far from the money the curve is the faint tail of a few deep
+    strikes and can change sign at magnitudes of nothing; that is not a
+    change of regime. The level of a change that counts is still interpolated
+    between the two grid prices that bracket the actual sign change.
+
+    OF THE CHANGES THAT COUNT, THE ONE NEAREST THE SPOT. The level stands next
+    to the price, the walls and the regime and is read as "how far is the
+    regime change from here"; a chain whose curve changes sign twice in range
+    answers with the nearer one, the first on a tie.
+
+    The search range is `GAMMA_FLIP_MAX_DISTANCE` either way: a quarter of the
+    price, about one and a half monthly standard deviations for the most
+    volatile chain collected (implied volatility near 57%) and seven for an
+    index at 13%. A level further away does not answer the question above,
+    and a re-priced curve that far out is the tail of the chain rather than
+    its body."""
     snapshot_date = as_of if as_of is not None else df["collected_at"].max()
     snapshot = df[df["collected_at"] == snapshot_date]
+    chosen = sorted(snapshot["expiry"].unique()) if expiries is None else sorted(expiries)
+    flips = gamma_flip_by_depth(snapshot, chosen, pricing, snapshot_date, ticker)
+    return flips[-1] if flips else None
+
+
+def gamma_flip_by_depth(
+    df: pd.DataFrame,
+    expiries: list,
+    pricing: PricingInputs = DEFAULT_PRICING,
+    as_of: pd.Timestamp | None = None,
+    ticker: str | None = None,
+) -> list[float | None]:
+    """The flip of every leading block of `expiries`, in one pass: entry d is
+    the flip over the first d + 1 of them, in the order given.
+
+    The heatmap's depth slider shows the nearest one, two, ... expiries, and
+    each position has its own flip. Re-pricing is linear in the contracts, so
+    each expiry's curve is priced once and every depth's curve is a running
+    sum of those — the cost of the deepest position, not of all of them.
+    `gamma_flip_price` is the last entry of this over its expiries sorted,
+    so the card and the heatmap at the same expiries do the same arithmetic
+    rather than two that agree to a tolerance."""
+    if not expiries:
+        return []
+    snapshot_date = as_of if as_of is not None else df["collected_at"].max()
+    snapshot = df[(df["collected_at"] == snapshot_date) & df["expiry"].isin(expiries)]
     if snapshot.empty:
-        return None
-    return gamma_flip_from_matrix(
-        gex_matrix(df, as_of, pricing, expiries=expiries),
-        snapshot["underlying_price"].iloc[0],
-    )
+        return [None] * len(expiries)
+    spot = pd.to_numeric(snapshot["underlying_price"], errors="coerce").iloc[0]
+    if not np.isfinite(spot) or spot <= 0:
+        return [None] * len(expiries)
+    position = {expiry: number for number, expiry in enumerate(expiries)}
+    groups = snapshot["expiry"].map(position).to_numpy(dtype=int)
+    grid = gamma_flip_grid(spot)
+    curves = np.cumsum(repriced_gex_by_group(snapshot, grid, groups, len(expiries), pricing, ticker), axis=0)
+    return [_nearest_crossing(grid, curve, float(spot)) for curve in curves]
 
 
-def gamma_flip_from_matrix(matrix: pd.DataFrame, spot: float) -> float | None:
-    """The flip level of a matrix that has already been built.
-
-    Same walk over the cumulative profile as `gamma_flip_price`, which is now
-    this function plus one `gex_matrix` call. Split because the heatmap draws
-    the matrix and the flip together: computing the matrix twice was 15 ms of a
-    88 ms render even after the batched rewrite, and this whole rewrite is
-    about not doing the same arithmetic three times per screen.
-
-    THE PROFILE CROSSES ZERO MORE THAN ONCE, AND THE LOWEST CROSSING IS THE
-    WRONG ANSWER. The walk runs over the whole strike
-    range on purpose — the flip must not move when the display band moves — and
-    that range reaches far below the money, where the cumulative sum is still
-    hovering around nothing and changes sign on rounding. Taking the FIRST
-    crossing therefore reported the deepest one: AAPL on prod showed a flip of
-    137.24 against an underlying of 319.70, while the visible matrix changed
-    sign between 305 and 307.5. Measured over the local base, 161 of 200
-    snapshots have more than one crossing, so this was the normal case and not
-    an edge: GLD had eleven, the first at 232.11 against a spot of 408.89; SPY
-    reported 496.33 against 769.74.
-
-    Four rules, and all are needed — each leaves a real chain wrong without it.
-
-    A CROSSING IS A CHANGE BETWEEN A STRICTLY POSITIVE AND A STRICTLY NEGATIVE
-    TOTAL, so strikes carrying no exposure at all take no part. `np.sign` maps
-    an untouched strike to 0 and a 0 → -1 step counts as a change, which is how
-    SPX reported 2,800 against a spot of 7,711.76: below 2,800 the chain has
-    nothing listed, the cumulative sum is exactly 0.0 there, and the profile was
-    read as crossing zero at the point where it merely left it. It never
-    actually changes sign anywhere, and the honest answer is that there is no
-    flip level in this range. A profile that genuinely passes through 0.0 on its
-    way from one sign to the other still crosses, because the two strictly
-    signed values on either side of the flat part bracket it.
-
-    OF THE REMAINING CROSSINGS, THE ONE NEAREST THE UNDERLYING PRICE. The metric
-    stands next to Underlying price, Call Wall, Put Wall and Regime, all of them
-    near-money reference levels, and it is read as "how far is the regime
-    change from here" — a crossing 176 points below the money does not answer
-    that question no matter how genuine it is. The alternative worth taking
-    seriously was the LAST crossing, the level above which the sign is settled;
-    it differs from this one in 3 of those 200 snapshots, and in all three it
-    was the further of the two from the money (GLD 424.13 against 421.37 with
-    the spot at 421.37). It is also the rule that fails the same way the old one
-    did, only upwards, as soon as a chain carries junk above the money.
-
-    A CROSSING HAS TO SEPARATE TWO SIGNIFICANT VALUES, and the nearest-crossing
-    rule needs this third one beneath it: when the profile never changes sign
-    anywhere near the money, the nearest crossing left is the noise far below
-    it. SPY with the spot at 766 reported a flip of 348.81: the cumulative sum
-    there wandered between +$0.4K and +$5K while the profile reached -$1.5B and
-    stayed negative all the way up — a curve grazing zero, not changing regime.
-    So a value takes part only once its magnitude exceeds
-    `GAMMA_FLIP_MIN_SHARE` of the profile's largest absolute value, and a
-    crossing counts when the nearest such values on either side of it have
-    opposite signs. Where it counts, the level is still interpolated between
-    the two strikes that bracket the actual sign change, so a crossing that
-    passes keeps exactly the level it had. One that does not pass is the same
-    answer as no sign change at all: no flip level in this range. The share is
-    relative because GEX has no natural unit across tickers. A window around
-    the spot was the other candidate and is the wrong instrument: it measures
-    distance, not size, so it would keep a graze that happens to lie near the
-    money and drop a genuine flip on a name that moves ten percent a week.
-    On daily profiles every graze measured did lie far away, but per expiry
-    some sit within 1-4% of the spot: an expiry hours from its close, whose
-    gamma off the money is at machine zero, or a dip of 2e-5 of the profile
-    between two positive values — exactly the cases a window would keep.
-    The share's value comes from the gap between the two populations on 209
-    daily profiles of eleven tickers: the grazing crossings peak at 1.8e-5 of
-    the profile, all of them 38-76% away from the spot, and the next crossing
-    up reaches 3.6e-4. Every share from 3e-5 to 3e-4 drops the same fifteen and
-    moves no other flip; 1e-4 sits in the middle of that range on a log scale,
-    a factor of five from the noise and three and a half from the weakest
-    crossing kept.
-
-    A FLIP MORE THAN `GAMMA_FLIP_MAX_DISTANCE` FROM THE PRICE IS NO FLIP. The
-    size rule keeps a real crossing wherever it is, and the next real one can
-    lie on the far side of the money: GLD with the spot at 378 had its flip
-    jump from 212 to 627 once a graze below stopped counting. A level 65% away
-    does not answer "how far is the regime change from here" any better than
-    the graze did, so the nearest crossing that passes is still dropped when it
-    lies further than a quarter of the price away. A quarter because the
-    question is about moves the shown expiries can plausibly see: it is about
-    one and a half monthly standard deviations for the most volatile chain
-    collected (implied volatility near 57%), seven for an index at 13%. A
-    tighter cut starts removing levels a volatile name does reach within the
-    month; on 594 daily snapshots it drops 11 of 484 weather flips (2.3%), the
-    furthest 42% away."""
-    if matrix.empty:
-        return None
-
-    # Coerced at the boundary, like every other number arriving from a frame.
-    # A NaN reference is not a slightly worse answer here but the old defect
-    # restored in silence: every distance below would be NaN, no comparison
-    # would ever hold, and the search would keep the lowest crossing.
-    reference = pd.to_numeric(spot, errors="coerce")
-    if not np.isfinite(reference):
-        return None
-
-    ordered = matrix.sort_index()
-    totals = _running_totals(ordered.to_numpy(dtype=float))[:, -1]
-    return _nearest_crossing(ordered.index.to_numpy(dtype=float), totals, reference)
-
-
-def gamma_flip_by_depth(matrix: pd.DataFrame, listed: np.ndarray, spot: float) -> list[float | None]:
-    """The flip of every leading block of the matrix's columns, in one pass.
-
-    Entry d is `gamma_flip_from_matrix` of the first d + 1 columns cropped to
-    the rows `listed[d]` marks (a boolean mask over `matrix.index`), exactly."""
-    listed = np.asarray(listed, dtype=bool)
-    reference = pd.to_numeric(spot, errors="coerce")
-    if matrix.empty or not np.isfinite(reference):
-        return [None] * len(listed)
-    order = np.argsort(matrix.index.to_numpy(dtype=float), kind="stable")
-    strikes = matrix.index.to_numpy(dtype=float)[order]
-    running = _running_totals(matrix.to_numpy(dtype=float)[order])
-    return [
-        _nearest_crossing(strikes[rows], running[rows, depth], reference)
-        for depth, rows in enumerate(mask[order] for mask in listed)
-    ]
-
-
-def _running_totals(values: np.ndarray) -> np.ndarray:
-    """Row totals accumulated left to right, NaN as zero: column k is the
-    total of the first k + 1 columns. A fixed order, so the flip does not
-    depend on how a frame happens to be laid out in memory."""
-    return np.cumsum(np.where(np.isnan(values), 0.0, values), axis=1)
-
-
-def _nearest_crossing(strikes: np.ndarray, totals: np.ndarray, reference: float) -> float | None:
-    """Crossings of the cumulative profile between strictly signed values,
-    interpolated linearly; of those whose nearest significant values on either
-    side differ in sign, the one nearest the reference, the first on a tie —
-    or None if even that one is further from it than `GAMMA_FLIP_MAX_DISTANCE`."""
-    cumulative = np.cumsum(totals)
-    carrying = np.flatnonzero(cumulative)
+def _nearest_crossing(prices: np.ndarray, curve: np.ndarray, reference: float) -> float | None:
+    """Sign changes of `curve` over ascending `prices` between strictly signed
+    values, interpolated linearly; of those whose nearest significant values
+    on either side differ in sign, the one nearest the reference, the first
+    on a tie — or None if even that one is further from it than
+    `GAMMA_FLIP_MAX_DISTANCE`."""
+    carrying = np.flatnonzero(curve)
     if len(carrying) < 2:
         return None
     before, after = carrying[:-1], carrying[1:]
-    y0, y1 = cumulative[before], cumulative[after]
+    y0, y1 = curve[before], curve[after]
     change = np.sign(y0) != np.sign(y1)
-    # Indices of the values large enough to take part (`gamma_flip_from_matrix`,
-    # third rule). At least one exists: the largest value exceeds any share of
-    # itself below one, since `carrying` is not empty.
-    magnitude = np.abs(cumulative)
+    # Indices of the values large enough to take part (`gamma_flip_price`,
+    # second rule). At least one exists: the largest value exceeds any share
+    # of itself below one, since `carrying` is not empty.
+    magnitude = np.abs(curve)
     significant = np.flatnonzero(magnitude > GAMMA_FLIP_MIN_SHARE * magnitude.max())
     left = np.searchsorted(significant, before, side="right") - 1
     right = np.searchsorted(significant, after, side="left")
     bracketed = (left >= 0) & (right < len(significant))
-    left_sign = np.sign(cumulative[significant[np.clip(left, 0, len(significant) - 1)]])
-    right_sign = np.sign(cumulative[significant[np.clip(right, 0, len(significant) - 1)]])
+    left_sign = np.sign(curve[significant[np.clip(left, 0, len(significant) - 1)]])
+    right_sign = np.sign(curve[significant[np.clip(right, 0, len(significant) - 1)]])
     change &= bracketed & (left_sign != right_sign)
     if not change.any():
         return None
-    x0, x1 = strikes[before][change], strikes[after][change]
+    x0, x1 = prices[before][change], prices[after][change]
     y0, y1 = y0[change], y1[change]
     # y0 and y1 are nonzero with opposite signs, so they cannot be equal and
     # the interpolation cannot divide by zero.

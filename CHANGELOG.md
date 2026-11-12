@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **The gamma flip is now found where other GEX tools look for it.** It is the
+  price nearest the current one at which total dealer GEX would change sign if
+  the underlying moved there: every contract's gamma is recomputed at prices up
+  to 25% either side of the current one, each contract keeping its own implied
+  volatility, time to expiry and open interest, and the flip is where that
+  total crosses zero (searched in steps of 0.05% of the price, interpolated
+  between them). It used to be where GEX summed strike by strike from the
+  bottom of the chain crossed zero, at the current price only — a different
+  quantity. **What you will see:** with net GEX negative that running sum
+  could not cross zero at all, so SPY, QQQ, SPX and other index-like chains
+  often showed no flip; they now show one, usually above the price. With net
+  GEX positive the old level sat above the price and the new one sits below
+  it — the flip can change sides of the price, not just move. A chain whose
+  re-priced total keeps one sign across the whole range still shows no flip,
+  and the rules that drop a crossing grazing zero or one more than 25% away
+  are unchanged. Contracts the source files with a placeholder volatility
+  (deep in the money, about 1e-5) are left out of the re-pricing: re-priced at
+  their own strike they would be needle spikes thousands of times taller than
+  a real contract. The level is shown on the heatmap, in the summary above
+  the views and in Changes; the heatmap's "How to read this" describes the
+  new definition. Re-pricing costs more than the old walk: about 50 ms more
+  per summary on an SPX-sized chain, and on the heatmap 20-80 ms more per
+  slider move depending on how many expiries are shown.
+
+The change is in the shared formulas (`app/metrics_core.py`, sha256 `a3543076…`):
+`gamma_flip_from_matrix` is removed, `gamma_flip_by_depth` takes a chain and
+a list of expiries instead of a matrix, and `gamma_flip_grid` and
+`repriced_gex_by_group` are new. Day rows written by the previous formulas are
+rebuilt by the worker on its next daily pass, as far back as
+`DAY_SUMMARY_BACKFILL_DAYS` reaches (45 days by default).
+
 ## [0.9.0] - 2026-11-10
 
 ### Changed

@@ -1510,17 +1510,14 @@ if active_view == "GEX Heatmap":
         matrix_band = strikes_around_money(matrix_full, spot_at_snapshot, strikes_each_side)
 
         walls = metrics.dealer_walls(snapshot_df, as_of=as_of, expiries=shown_expiries)
-        # BOTH READ OFF THE MATRIX ABOVE instead of pricing the chain again.
-        # `gamma_flip_price` and `net_gex_by_expiry` each rebuilt it
-        # internally, so this screen evaluated the same greeks three times over
-        # — and every slider on it reruns the whole script, so the cost was
-        # paid on each nudge. Measured on the hosted product, whose matrix is
-        # the same function: 854.6 ms to 66.7 ms on a 13,160-contract SPY
-        # chain, and the numbers coming out are bit-for-bit the ones that went
-        # in before (max |Δ| = 0 over 357 × 10 cells of a live chain). The flip
-        # still walks the full strike range rather than the displayed band —
-        # `matrix_full` is the unbanded matrix.
-        flip = metrics.gamma_flip_from_matrix(matrix_full, spot_at_snapshot)
+        # Net GEX per expiry is READ OFF THE MATRIX ABOVE instead of pricing
+        # the chain again: every slider on this screen reruns the whole
+        # script, so a second pricing would be paid on each nudge. The flip
+        # cannot be read off it — the matrix holds GEX at the actual price
+        # only, and the flip is GEX re-priced at hypothetical prices — so it
+        # re-prices the shown expiries' contracts itself, over every strike
+        # they list rather than the displayed band.
+        flip = metrics.gamma_flip_price(snapshot_df, as_of=as_of, expiries=shown_expiries)
         net_by_expiry = metrics.net_gex_from_matrix(matrix_full, expiries=shown_expiries)
         total_net_gex = net_by_expiry["net_gex"].sum()
 
@@ -1614,27 +1611,27 @@ if active_view == "GEX Heatmap":
                 "(at least 5%); a tie goes to the strike nearer the price. A side with no open "
                 "interest in that range shows \"no wall above/below price\". A common proxy for "
                 "support/resistance levels created by dealer hedging flows.\n\n"
-                "**Gamma Flip** — the approximate underlying price at which total GEX across the "
-                "shown expiries flips sign (linear interpolation between the nearest strikes). "
-                "The cumulative profile can cross zero several times far from the money, where "
-                "exposure is near nothing. A crossing counts only if the profile reaches a "
-                "meaningful size on both sides of it — a curve that merely grazes zero is not a "
-                "flip — and of the crossings that count, the level shown is the one nearest the "
-                "current price. No flip is shown when none count, or when the nearest one is "
-                f"more than {GAMMA_FLIP_MAX_DISTANCE:.0%} away from the price; then only the "
-                "regime is known. "
-                "This is not a re-pricing of greeks at hypothetical underlying prices (more "
-                "accurate but noticeably more expensive to compute), but a proxy based on the "
-                "already-computed profile at the current price — the same class of assumption as "
-                "net GEX. **Regime** Neg/Pos — the sign of total net GEX across the shown "
-                "expiries.\n\n"
+                "**Gamma Flip** — the underlying price at which total GEX across the shown "
+                "expiries would change sign if the price moved there. Every contract's gamma is "
+                f"recomputed at prices up to {GAMMA_FLIP_MAX_DISTANCE:.0%} either side of the current "
+                "one, each contract keeping its own implied volatility, expiry and open interest, "
+                "and the flip is where that total crosses zero: on one side of it dealer hedging "
+                "damps moves, on the other it amplifies them. Far from the money the total can "
+                "change sign at sizes of almost nothing; such a crossing does not count, and of "
+                "those that do, the level shown is the one nearest the current price. No flip is "
+                "shown when the total keeps one sign across the whole range — then only the regime "
+                "is known. This is how GEX tools that re-price compute the flip, so their level and "
+                "this one can be compared directly; differences come mostly from the expiries "
+                "included, from when the chain was collected and from the assumption about which "
+                "side of each contract dealers hold. **Regime** Neg/Pos — the sign of total net "
+                "GEX across the shown expiries.\n\n"
                 "A ticker can have 20-30+ expiries (including far-dated LEAPS 1-2 years out) "
                 "with very different strike ranges — the full matrix would be mostly empty and "
                 "unreadable. The sliders above limit the view to the nearest N expiries and a "
                 "number of strikes each side of the money; the expiry count also decides which "
                 "subset Call/Put Wall, Gamma Flip, and per-expiry Net GEX are computed over, "
-                "while the strike count is display only — the flip is found over the whole "
-                "strike range. The approximation formulas themselves don't change.\n\n"
+                "while the strike count is display only — the flip is found over every strike "
+                "of the shown expiries. The approximation formulas themselves don't change.\n\n"
                 "The snapshot selector lets you pick an earlier collection from history (Replay) "
                 "and see how the picture looked at that moment — no new data is needed, and "
                 "there is no real-time auto-refresh (collection happens only via the “Collect "

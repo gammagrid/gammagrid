@@ -50,7 +50,8 @@ from app.metrics_core import (
     dealer_walls,
     expiry_rollup,
     gamma_exposure_profile,
-    gamma_flip_from_matrix,
+    gamma_flip_by_depth,
+    gamma_flip_grid,
     gamma_flip_price,
     gex_matrix,
     greek_attribution,
@@ -113,11 +114,10 @@ def weather_state(
     from unsettled, in both directions.
 
     NO FLIP IN RANGE IS NOT THE SAME AS A FLIP FAR AWAY, even though both end
-    up settled. A chain can have no sign change at all — an index does, since
-    below its lowest listed strike the cumulative profile is flat zero rather
-    than negative. There is then no boundary to be near, so the sign decides
-    alone, and the summary says as much in words rather than implying a
-    distance nobody measured.
+    up settled. A chain can have no sign change at all: its re-priced GEX
+    keeps one sign everywhere within a quarter of the price either way. There
+    is then no boundary to be near, so the sign decides alone, and the summary
+    says as much in words rather than implying a distance nobody measured.
     """
     positive = net_gex >= 0
     if gamma_flip is None or not np.isfinite(spot) or spot <= 0:
@@ -177,8 +177,9 @@ def gamma_weather(
     WHY IT IS ASSEMBLED IN ONE PLACE. The summary sits above the view switcher,
     which means it is drawn on every view — so computing it piecemeal would put
     a full `gex_matrix` into views that do not otherwise need one. The matrix is
-    built here exactly once and three numbers are read off it, which is the same
-    lesson the heatmap already paid for.
+    built here exactly once and the net figure and the profile are read off it,
+    which is the same lesson the heatmap already paid for. The flip is not: it
+    is GEX re-priced at hypothetical prices, which the matrix does not hold.
 
     IT LOOKS AT THE NEAR TERM, deliberately. Reading the whole chain makes it
     disagree with the GEX Heatmap directly below it — same labels, different
@@ -213,11 +214,14 @@ def gamma_weather(
         return None
 
     net_gex = float(matrix.to_numpy(dtype=float).sum())
-    flip = gamma_flip_from_matrix(matrix, spot)
+    # Re-priced on a grid of hypothetical prices (`gamma_flip_price`), not read
+    # off the matrix: the matrix holds GEX at the actual spot only, and its
+    # cumulative profile was the defect the re-priced level replaced.
+    flip = gamma_flip_price(snapshot, moment, pricing, expiries=chosen)
     walls = dealer_walls(df, moment, expiries=chosen)
-    # The same matrix folded by strike — the profile the flip and the net figure
-    # are read off — handed out so that a caller drawing it does not build the
-    # matrix a second time. No new arithmetic: a sum over what is already here.
+    # The same matrix folded by strike — the profile the net figure is read
+    # off — handed out so that a caller drawing it does not build the matrix a
+    # second time. No new arithmetic: a sum over what is already here.
     by_strike = matrix.sum(axis=1)
     profile = [
         [float(strike), float(gex)]
@@ -384,7 +388,8 @@ __all__ = [
     "dealer_walls",
     "expiry_rollup",
     "gamma_exposure_profile",
-    "gamma_flip_from_matrix",
+    "gamma_flip_by_depth",
+    "gamma_flip_grid",
     "gamma_flip_price",
     "gex_matrix",
     "greek_attribution",

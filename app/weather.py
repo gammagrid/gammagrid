@@ -74,11 +74,11 @@ def describe(weather: dict, latest_moment=None) -> dict:
 
     A CHAIN WITH NO FLIP GETS ITS OWN SENTENCE. Four of the five states are
     phrased in terms of distance to the flip, and there is no honest way to say
-    "far from" a boundary that does not exist — an index whose cumulative
-    profile never changes sign below its lowest strike is the ordinary case,
-    not a corner one. The sign then speaks alone and says so. The sentence
-    names the reach rather than the strike range: the core also drops a
-    crossing that only grazes zero, and one further than
+    "far from" a boundary that does not exist — a chain whose re-priced GEX
+    keeps one sign across the whole search range happens, and the sign then
+    speaks alone and says so. The sentence names the reach rather than the
+    strike range: the core searches only that far, and also drops a crossing
+    that only grazes zero, and one further than
     `GAMMA_FLIP_MAX_DISTANCE` from the price, so "no flip" means none within
     that distance, not none anywhere in the chain.
 

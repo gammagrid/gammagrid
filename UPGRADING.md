@@ -39,6 +39,29 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.9.0 → Unreleased
+
+**Risk: safe. No migration; nothing in the database is rewritten or deleted.**
+
+**What you may notice on the first run.**
+
+- **The gamma flip may move, appear or change sides of the price.** It is now
+  the price at which total GEX, recomputed as if the underlying stood there,
+  changes sign — the definition other GEX tools use. Chains that showed no
+  flip, most often with net GEX negative, now usually show one above the
+  price; with net GEX positive the level now lies below the price rather than
+  above it. The heatmap and the summary compute it as you look, so they show
+  the new level at once.
+- **The worker rebuilds the Changes rows once.** Each row records which
+  version of the formulas produced it (`CODE_SHA`), and this release changes
+  them. Rows built by the older code are rebuilt from the stored snapshots at
+  the worker's next start, up to 45 days back (`DAY_SUMMARY_BACKFILL_DAYS`),
+  so the upgrade does not show up in Changes as a flip that moved overnight.
+  Days older than that keep the flip they were stored with.
+- **The heatmap and the summary take a little longer.** Re-pricing the chain
+  on a grid of prices costs about 50 ms more per summary on an SPX-sized
+  chain and 20-80 ms more per heatmap slider move.
+
 ## v0.8.0 → v0.9.0
 
 **Risk: safe. No migration; nothing in the database is rewritten or deleted.**

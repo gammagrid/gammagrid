@@ -1400,10 +1400,11 @@ def check_the_batched_gex_path_returns_the_old_numbers():
 
     WHICH MAKES THIS CHECK THE POINT OF THE WHOLE CHANGE. A faster path that
     answers differently is not an optimisation, it is a silent change to the
-    numbers people read. So the two paths are held against each other here:
-    exactly equal for the flip, and to a floating-point tolerance for the
-    per-expiry sums, where the difference is summation ORDER — down the strikes
-    rather than over the raw rows — and nothing else.
+    numbers people read. So the two paths are held against each other here, to
+    a floating-point tolerance for the per-expiry sums, where the difference is
+    summation ORDER — down the strikes rather than over the raw rows — and
+    nothing else. (The flip is no longer read off the matrix at all: it is GEX
+    re-priced at hypothetical prices — see `check_gamma_flip_is_repriced`.)
 
     `expiry_rollup` is checked against the same reference in the same breath.
     Nothing in this product calls it yet; it is part of the shared core, so it
@@ -1436,13 +1437,6 @@ def check_the_batched_gex_path_returns_the_old_numbers():
     matrix = metrics.gex_matrix(chain, as_of=moment, expiries=[pd.Timestamp(e) for e in expiries])
     assert not matrix.empty and len(matrix.columns) == 2, matrix
 
-    # The flip: the batched read and the function that builds its own matrix.
-    from_matrix = metrics.gamma_flip_from_matrix(matrix, 100.0)
-    rebuilt = metrics.gamma_flip_price(chain, as_of=moment, expiries=[pd.Timestamp(e) for e in expiries])
-    assert (from_matrix is None) == (rebuilt is None), (from_matrix, rebuilt)
-    if from_matrix is not None:
-        assert abs(from_matrix - rebuilt) < 1e-9, (from_matrix, rebuilt)
-
     # Per-expiry net GEX, read off the matrix against the path that priced the
     # chain again. Relative, because the two sum in different orders.
     read_off = metrics.net_gex_from_matrix(matrix, expiries=[pd.Timestamp(e) for e in expiries])
@@ -1474,109 +1468,88 @@ def check_the_batched_gex_path_returns_the_old_numbers():
     print("batched GEX checks passed (one matrix, the same numbers)")
 
 
-def _matrix_with_cumulative(cumulative: dict[float, float]) -> pd.DataFrame:
-    """A one-column matrix whose cumulative profile is exactly `cumulative`.
+def _flip_on_curve(curve: dict[float, float], spot: float) -> float | None:
+    """The flip rules applied to a re-priced curve given as {price: total GEX}.
 
-    Written the other way round on purpose: the argument is the shape the
-    flip walks over, so the assertions can be read against it without anyone
-    summing five numbers in their head.
+    The rules (strict sign, significant sides, nearest the spot, within reach)
+    used to walk the cumulative per-strike profile; they now walk the curve of
+    total GEX re-priced at each grid price (`metrics_core._nearest_crossing`).
+    The shapes below were written as cumulative profiles and are the same
+    arrays now, so each case keeps the answer it had: only what the array
+    means changed, not the walk over it.
     """
-    strikes = sorted(cumulative)
-    running = 0.0
-    per_strike = []
-    for strike in strikes:
-        per_strike.append(cumulative[strike] - running)
-        running = cumulative[strike]
-    return pd.DataFrame({pd.Timestamp("2026-09-18"): per_strike}, index=pd.Index(strikes, name="strike"))
+    from app import metrics_core as core
+
+    prices = np.array(sorted(curve), dtype=float)
+    return core._nearest_crossing(prices, np.array([curve[price] for price in prices], dtype=float), spot)
 
 
 def check_the_flip_is_the_crossing_by_the_money():
     """The flip must be the zero crossing nearest the underlying price.
 
-    The profile is walked over the WHOLE strike range so
-    the flip does not move when the display band moves, and that range reaches
-    far below the traded part of the chain, where the cumulative sum is still
-    hovering around nothing. Taking the first crossing therefore reported the
-    deepest one: AAPL on prod showed 137.24 against an underlying of 319.70
-    while the visible matrix changed sign between 305 and 307.5. Measured on the
-    local base afterwards, 161 of 200 snapshots had more than one crossing.
+    The curve is walked over its WHOLE range, and that range reaches far from
+    the traded part of the chain, where the total is still hovering around
+    nothing. Taking the first crossing therefore reported the deepest one:
+    AAPL on prod showed 137.24 against an underlying of 319.70 while the
+    visible matrix changed sign between 305 and 307.5. Measured on the local
+    base afterwards, 161 of 200 snapshots had more than one crossing.
 
-    The profile below is built to tell the three candidate rules apart rather
+    The curve below is built to tell the three candidate rules apart rather
     than merely to have a flip: it crosses zero three times, once far below the
     money on values of ±1 (the deep-tail wobble), once just under it, and once
     far above. "First" answers 135.0, "last" answers 608.57, and only "nearest
-    to the spot" answers 304.0. Own data throughout — a matrix this test builds
+    to the spot" answers 304.0. Own data throughout — arrays this test builds
     itself, no chain, no database, no reliance on any other check having run.
     """
-    expiry = pd.Timestamp("2026-09-18")
     spot = 320.0
-    matrix_with = _matrix_with_cumulative
 
-    three = matrix_with({130.0: 1.0, 140.0: -1.0, 300.0: -8000.0,
-                         310.0: 12000.0, 600.0: 3000.0, 610.0: -500.0})
-    got = metrics.gamma_flip_from_matrix(three, spot)
+    three = {130.0: 1.0, 140.0: -1.0, 300.0: -8000.0,
+             310.0: 12000.0, 600.0: 3000.0, 610.0: -500.0}
+    got = _flip_on_curve(three, spot)
     assert got is not None and abs(got - 304.0) < 1e-9, (
         f"the flip against a spot of {spot} came back {got}, not the crossing at "
         f"304.0 next to the money. 135.0 means the lowest crossing is still being "
         f"taken (the AAPL 137.24 defect); 608.57 means the highest one is"
     )
 
-    # A STRIKE CARRYING NOTHING IS NOT A CROSSING. `np.sign` maps an untouched
-    # strike to 0, so a 0 → -1 step reads as a change of sign and the profile
-    # was reported as crossing zero at the point where it merely left it. This
-    # is SPX, which reported 2,800 against a spot of 7,711.76 — and nearest-to-
-    # the-money does not fix it on its own, because that artefact was the only
-    # candidate in the whole profile.
-    below_the_chain = matrix_with({50.0: 0.0, 60.0: 0.0, 300.0: -8000.0, 310.0: 12000.0})
-    got = metrics.gamma_flip_from_matrix(below_the_chain, spot)
+    # A PRICE CARRYING NOTHING IS NOT A CROSSING. `np.sign` maps an exact zero
+    # to 0, so a 0 → -1 step reads as a change of sign and the curve was
+    # reported as crossing zero at the point where it merely left it. This is
+    # SPX, which reported 2,800 against a spot of 7,711.76 — and
+    # nearest-to-the-money does not fix it on its own, because that artefact
+    # was the only candidate in the whole curve.
+    below_the_chain = {50.0: 0.0, 60.0: 0.0, 300.0: -8000.0, 310.0: 12000.0}
+    got = _flip_on_curve(below_the_chain, spot)
     assert got is not None and abs(got - 304.0) < 1e-9, (
-        f"a run of strikes with no exposure at all produced {got} instead of 304.0 — "
+        f"a run of prices with no exposure at all produced {got} instead of 304.0 — "
         f"60.0 means leaving zero is still counted as crossing it"
     )
 
-    # Same artefact with nothing real after it: the profile never changes sign,
-    # and saying so is the honest answer. Reporting 60.0 here is how SPX got a
-    # flip 4,900 points below the money.
-    never_crosses = matrix_with({50.0: 0.0, 60.0: 0.0, 300.0: -8000.0, 310.0: -12000.0})
-    assert metrics.gamma_flip_from_matrix(never_crosses, spot) is None, (
-        "a profile that only ever leaves zero and stays negative has no flip level, "
-        f"but one was reported: {metrics.gamma_flip_from_matrix(never_crosses, spot)}"
+    # Same artefact with nothing real after it: the curve never changes sign,
+    # and saying so is the honest answer.
+    never_crosses = {50.0: 0.0, 60.0: 0.0, 300.0: -8000.0, 310.0: -12000.0}
+    assert _flip_on_curve(never_crosses, spot) is None, (
+        "a curve that only ever leaves zero and stays negative has no flip level, "
+        f"but one was reported: {_flip_on_curve(never_crosses, spot)}"
     )
 
-    # A profile that passes exactly THROUGH zero on its way over still crosses:
+    # A curve that passes exactly THROUGH zero on its way over still crosses:
     # the two strictly signed values on either side of the flat part bracket it.
-    through_zero = matrix_with({300.0: -8000.0, 305.0: 0.0, 310.0: 12000.0})
-    got = metrics.gamma_flip_from_matrix(through_zero, spot)
+    through_zero = {300.0: -8000.0, 305.0: 0.0, 310.0: 12000.0}
+    got = _flip_on_curve(through_zero, spot)
     assert got is not None and abs(got - 304.0) < 1e-9, (
-        f"a profile touching 0.0 between two opposite signs lost its crossing: {got}"
+        f"a curve touching 0.0 between two opposite signs lost its crossing: {got}"
     )
 
     # Without a reference price there is no "nearest", and every distance would
-    # be NaN — which compares false and quietly leaves the lowest crossing.
-    assert metrics.gamma_flip_from_matrix(three, float("nan")) is None, (
-        "a NaN underlying price must not select a crossing"
-    )
-
-    # And the two entries stay one function: the chain-side one reads the spot
-    # off the snapshot rather than being told it.
-    moment = dt.datetime(2026, 8, 20, 15, 0)
-    chain = pd.DataFrame([
-        {"collected_at": moment, "expiry": expiry, "strike": strike,
-         "option_type": option_type, "underlying_price": 100.0,
-         "implied_volatility": 0.25,
-         "open_interest": 300 if option_type == "call" else 900,
-         "volume": 5}
-        for strike in (80.0, 90.0, 100.0, 110.0, 120.0)
-        for option_type in ("call", "put")
-    ])
+    # be NaN — which compares false and quietly leaves the lowest crossing. The
+    # guard lives in the chain-side entry, which reads the spot off the
+    # snapshot: a NaN or zero underlying price is no flip, not the first one.
+    chain = _ordinary_chain(1.6, 0.6, 0.5, 1.0)
     pricing = metrics.PricingInputs()
-    by_hand = metrics.gamma_flip_from_matrix(
-        metrics.gex_matrix(chain, pricing=pricing), 100.0
-    )
-    by_chain = metrics.gamma_flip_price(chain, pricing=pricing)
-    assert (by_hand is None) == (by_chain is None) and (
-        by_hand is None or abs(by_hand - by_chain) < 1e-9
-    ), f"the chain-side entry stopped reading the spot off the snapshot: {by_chain} vs {by_hand}"
+    assert metrics.gamma_flip_price(chain, pricing=pricing) is not None, "the fixture must have a flip"
+    for broken in (float("nan"), 0.0, None):
+        assert metrics.gamma_flip_price(chain.assign(underlying_price=broken), pricing=pricing) is None, broken
 
     print("Gamma flip picks the crossing by the money (3 crossings, deep wobble ignored)")
 
@@ -1584,14 +1557,13 @@ def check_the_flip_is_the_crossing_by_the_money():
 def check_a_grazing_crossing_is_not_a_flip():
     """A crossing counts only between values of significant size.
 
-    Found 12.10.2026 on SPY 2026-09-08 with the spot at 766: the flip came back
-    348.81. Far below the money the cumulative profile wandered between +$0.4K
-    and +$5K, then fell to -$1.5B and stayed negative all the way up — net GEX
-    -0.64B, no regime change anywhere near the price. With no real crossing to
-    prefer, "nearest to the spot" kept the only one there was: a curve grazing
-    zero 418 points below the money. The fix makes a crossing count only when
-    the nearest values on either side larger than GAMMA_FLIP_MIN_SHARE of the
-    profile's peak have opposite signs. Own data: matrices this test builds.
+    Found on SPY with the spot at 766: the flip came back 348.81. Far below
+    the money the profile wandered between +$0.4K and +$5K, then fell to
+    -$1.5B and stayed negative all the way up — no regime change anywhere near
+    the price. With no real crossing to prefer, "nearest to the spot" kept the
+    only one there was: a curve grazing zero 418 points below the money. A
+    crossing counts only when the nearest values on either side larger than
+    GAMMA_FLIP_MIN_SHARE of the curve's peak have opposite signs. Own data.
     """
     from app import metrics_core as core
 
@@ -1601,33 +1573,30 @@ def check_a_grazing_crossing_is_not_a_flip():
     # The SPY shape: a positive wobble of a few thousand dollars, then -$1.5B.
     # Moved up to 640, inside the distance rule's reach (next check), so that
     # only the size of the wobble can drop it.
-    grazing = _matrix_with_cumulative({600.0: 400.0, 620.0: 5000.0, 640.0: 3000.0, 650.0: -20000.0,
-                                       700.0: -1.5e9, 766.0: -9e8, 800.0: -6.4e8})
-    got = metrics.gamma_flip_from_matrix(grazing, spot)
+    grazing = {600.0: 400.0, 620.0: 5000.0, 640.0: 3000.0, 650.0: -20000.0,
+               700.0: -1.5e9, 766.0: -9e8, 800.0: -6.4e8}
+    got = _flip_on_curve(grazing, spot)
     assert got is None, (
-        f"a profile that only grazes zero below the money reported a flip of {got} — "
-        f"about 641.3 means the +$5K wobble against a -$1.5B profile is still read as a regime change"
+        f"a curve that only grazes zero below the money reported a flip of {got} — "
+        f"about 641.3 means the +$5K wobble against a -$1.5B curve is still read as a regime change"
     )
-    assert core.gamma_flip_by_depth(grazing, np.ones((1, len(grazing)), dtype=bool), spot) == [None]
 
-    # The same graze at the top end: the profile climbs from -$1.5B to a few
-    # thousand dollars above zero at its last strike. Not a flip either.
-    grazing_up = _matrix_with_cumulative({600.0: -1.5e9, 760.0: -3e8, 900.0: -2000.0, 910.0: 3000.0})
-    assert metrics.gamma_flip_from_matrix(grazing_up, spot) is None
+    # The same graze at the top end. Not a flip either.
+    grazing_up = {600.0: -1.5e9, 760.0: -3e8, 900.0: -2000.0, 910.0: 3000.0}
+    assert _flip_on_curve(grazing_up, spot) is None
 
-    # A real flip next to the money survives, at exactly the level the old
-    # rule gave it: the interpolation is between the two strikes that bracket
-    # the sign change, whatever the graze below does.
-    real = _matrix_with_cumulative({300.0: 400.0, 320.0: 5000.0, 340.0: 3000.0, 350.0: -20000.0,
-                                    650.0: -1.5e9, 760.0: -2e8, 770.0: 3e8, 800.0: 1e8})
-    got = metrics.gamma_flip_from_matrix(real, spot)
+    # A real flip next to the money survives, interpolated between the two
+    # prices that bracket the sign change, whatever the graze below does.
+    real = {300.0: 400.0, 320.0: 5000.0, 340.0: 3000.0, 350.0: -20000.0,
+            650.0: -1.5e9, 760.0: -2e8, 770.0: 3e8, 800.0: 1e8}
+    got = _flip_on_curve(real, spot)
     assert got is not None and abs(got - 764.0) < 1e-9, f"the flip next to the money moved or vanished: {got}"
 
-    # Where the graze is nearer the spot than the real crossing, the old rule
-    # took the graze; the real one, further away, is the answer now.
-    far_real = _matrix_with_cumulative({480.0: 400.0, 490.0: 5000.0, 500.0: 3000.0, 510.0: -20000.0,
-                                        520.0: -1.5e9, 700.0: -2e8, 710.0: 3e8})
-    got = metrics.gamma_flip_from_matrix(far_real, 600.0)
+    # Where the graze is nearer the spot than the real crossing, the real one,
+    # further away, is the answer.
+    far_real = {480.0: 400.0, 490.0: 5000.0, 500.0: 3000.0, 510.0: -20000.0,
+                520.0: -1.5e9, 700.0: -2e8, 710.0: 3e8}
+    got = _flip_on_curve(far_real, 600.0)
     assert got is not None and abs(got - 704.0) < 1e-9, (
         f"with the spot at 600 the flip came back {got}, not the real crossing at 704.0; "
         f"about 501.3 means the graze is still preferred for being nearer"
@@ -1637,78 +1606,205 @@ def check_a_grazing_crossing_is_not_a_flip():
     # crossing, half of it is not. Pins the constant's meaning, not its value.
     peak = 1.5e9
     for wobble, kept in ((peak * share * 2, True), (peak * share / 2, False)):
-        edge = _matrix_with_cumulative({300.0: wobble, 350.0: -peak, 800.0: -peak / 2})
-        got = metrics.gamma_flip_from_matrix(edge, 330.0)
+        edge = {300.0: wobble, 350.0: -peak, 800.0: -peak / 2}
+        got = _flip_on_curve(edge, 330.0)
         assert (got is not None) == kept, (wobble / peak, got)
 
-    print(f"Gamma flip ignores a graze of zero (share {share:g} of the profile's peak)")
+    print(f"Gamma flip ignores a graze of zero (share {share:g} of the curve's peak)")
 
 
 def check_a_far_flip_is_no_flip():
     """A crossing further than GAMMA_FLIP_MAX_DISTANCE from the price is no flip.
 
-    Owner's decision 12.10.2026, after the graze rule above: with a graze below
-    the money no longer counting, GLD's heatmap flip jumped from 212 to 627
-    against a spot of 378 — a real crossing, 65% away, and no more use to the
-    reader than the graze was. The rule drops the nearest crossing that passes
-    when it lies further than a quarter of the price away, strictly. Own data.
+    With a graze below the money no longer counting, GLD's heatmap flip jumped
+    from 212 to 627 against a spot of 378 — a real crossing, 65% away, and no
+    more use to the reader than the graze was. The rule drops the nearest
+    crossing that passes when it lies further than a quarter of the price
+    away, strictly. Own data.
     """
     from app import metrics_core as core
 
     reach = core.GAMMA_FLIP_MAX_DISTANCE
     spot = 400.0
-    # One real crossing at exactly spot * (1 + offset): the profile is -1e9 one
+    # One real crossing at exactly spot * (1 + offset): the curve is -1e9 one
     # point below that level and +1e9 one point above, so it crosses midway.
     for offset, kept in ((reach - 0.01, True), (reach, True), (reach + 0.01, False), (-(reach + 0.01), False)):
         level = spot * (1 + offset)
-        matrix = _matrix_with_cumulative({level - 1.0: -1e9, level + 1.0: 1e9})
-        got = metrics.gamma_flip_from_matrix(matrix, spot)
+        got = _flip_on_curve({level - 1.0: -1e9, level + 1.0: 1e9}, spot)
         assert (got is not None) == kept, (
             f"a crossing {offset:+.0%} from the price came back {got}; "
             f"the reach is {reach:.0%} and only a flip within it is shown"
         )
-        assert core.gamma_flip_by_depth(matrix, np.ones((1, 2), dtype=bool), spot) == [got]
 
     # The rule looks at the nearest crossing that passes, so a far one behind a
     # near one changes nothing.
-    both = _matrix_with_cumulative({380.0: -1e9, 382.0: 1e9, 640.0: 1e9, 642.0: -1e9})
-    got = metrics.gamma_flip_from_matrix(both, spot)
+    got = _flip_on_curve({380.0: -1e9, 382.0: 1e9, 640.0: 1e9, 642.0: -1e9}, spot)
     assert got is not None and abs(got - 381.0) < 1e-9, got
 
     print(f"Gamma flip further than {reach:.0%} from the price is not shown")
 
 
-def check_gamma_flip_by_depth_is_each_crop():
-    """`gamma_flip_by_depth` returns the flip of every leading block of a
-    matrix's columns in one pass; each entry must be `gamma_flip_from_matrix`
-    of that block's crop — the first d columns, the rows the mask marks — to
-    the last bit. A 20-expiry matrix with mixed signs, so the profiles cross
-    zero several times, and masks that grow the way a depth slider's do."""
+_FLIP_MOMENT = dt.datetime(2026, 8, 20, 15, 0)
+
+
+def _flip_chain(rows, spot=100.0, moment=_FLIP_MOMENT):
+    """A single-moment chain from (expiry, option_type, strike, open_interest,
+    implied_volatility) tuples. The moment and the expiries are literals in
+    the past together, so the time left is fixed by the pair and does not
+    depend on the day the tests run."""
+    frame = pd.DataFrame(rows, columns=["expiry", "option_type", "strike", "open_interest", "implied_volatility"])
+    return frame.assign(expiry=pd.to_datetime(frame["expiry"]), strike=frame["strike"].astype(float),
+                        open_interest=frame["open_interest"].astype(float), underlying_price=spot,
+                        collected_at=moment, volume=0.0)
+
+
+def _ordinary_chain(put_below, put_above, call_below, call_above, spot=100.0):
+    """The usual shape of an index chain: open interest peaked at the money,
+    weighted per side and per half — the four factors decide the regime."""
+    rows = []
+    for expiry in ("2026-08-28", "2026-09-18"):
+        for strike in np.arange(70.0, 131.0, 1.0):
+            base = 1000.0 * np.exp(-((strike - spot) / 8.0) ** 2)
+            below = strike < spot
+            rows.append((expiry, "put", strike, base * (put_below if below else put_above), 0.2))
+            rows.append((expiry, "call", strike, base * (call_below if below else call_above), 0.2))
+    return _flip_chain(rows, spot)
+
+
+def _cumulative_crossings(chain) -> list[float]:
+    """The old flip's candidates: sign changes of the per-strike GEX profile
+    summed from the bottom of the chain, at the actual spot — kept here only
+    to show the defect the re-priced flip replaced."""
+    matrix = metrics.gex_matrix(chain).sort_index()
+    running = np.cumsum(matrix.to_numpy(dtype=float).sum(axis=1))
+    strikes = matrix.index.to_numpy(dtype=float)
+    return [float(strikes[i]) for i in range(1, len(running)) if np.sign(running[i - 1]) * np.sign(running[i]) < 0]
+
+
+def check_gamma_flip_is_repriced():
+    """The gamma flip is where total GEX, RE-PRICED at a hypothetical spot,
+    changes sign.
+
+    The defect it replaces: the flip was the zero of the cumulative per-strike
+    profile at the actual spot. On an ordinary chain with net GEX below zero
+    that sum cannot cross by construction, so SPY, QQQ, SPX, IWM and NVDA all
+    showed "no flip" the same morning while other tools put theirs 1-3% above
+    the price; with net GEX above zero it crossed above the spot while the
+    accepted flip lies below. Own data throughout, answers known in advance.
+    """
+    from app import config
     from app import metrics_core as core
 
+    pricing = metrics.PricingInputs()
+    rate = config.RISK_FREE_RATE
+
+    # A CLOSED-FORM ANSWER. One call at 105 and one put at 95, same open
+    # interest, volatility and expiry: their re-priced GEX are equal and
+    # opposite where d1 of one is minus d1 of the other, i.e. at
+    # S* = sqrt(95 * 105) * exp(-(r - q + sigma^2 / 2) * T). The grid's linear
+    # interpolation has to land on it.
+    pair = _flip_chain([("2026-09-18", "call", 105.0, 500, 0.2), ("2026-09-18", "put", 95.0, 500, 0.2)])
+    years = core.years_to_expiry(pd.Timestamp("2026-09-18"), pd.Timestamp(_FLIP_MOMENT))
+    exact = np.sqrt(95.0 * 105.0) * np.exp(-(rate + 0.2 ** 2 / 2) * years)
+    got = metrics.gamma_flip_price(pair, pricing=pricing)
+    assert got is not None and abs(got - exact) < 1e-3, (
+        f"two-contract chain: flip {got}, closed form {exact:.6f} — the re-pricing or the grid is off"
+    )
+
+    # THE CURVE IS `_contract_gex` AT EVERY PRICE. Brute force: the same
+    # chain with its underlying price replaced, priced row by row through the
+    # app's own GEX, against the re-priced curve. At the actual spot the
+    # curve is the net GEX the screens show.
+    negative = _ordinary_chain(1.6, 0.6, 0.5, 1.0)
+    for price in (80.0, 97.3, 100.0, 104.0, 124.0):
+        brute = float(core._contract_gex(negative.assign(underlying_price=price), pricing).sum())
+        curve = core.repriced_gex_by_group(negative, np.array([price]), np.zeros(len(negative), dtype=int), 1, pricing)
+        assert abs(curve[0, 0] - brute) <= 1e-9 * abs(brute), (price, curve[0, 0], brute)
+    grid = metrics.gamma_flip_grid(100.0)
+    assert len(grid) == 2 * round(core.GAMMA_FLIP_MAX_DISTANCE / core.GAMMA_FLIP_GRID_STEP) + 1
+    assert grid[len(grid) // 2] == 100.0 and abs(grid[0] - 75.0) < 1e-9 and abs(grid[-1] - 125.0) < 1e-9
+
+    # NET GEX BELOW ZERO: the old walk had nothing to find, the flip exists
+    # and sits above the price (puts dominate here; calls take over higher up).
+    net = float(metrics.gex_matrix(negative).to_numpy(dtype=float).sum())
+    assert net < 0, net
+    assert _cumulative_crossings(negative) == [], "the fixture must reproduce the old defect"
+    flip = metrics.gamma_flip_price(negative, pricing=pricing)
+    assert flip is not None and 100.0 < flip < 110.0, (
+        f"a negative ordinary chain has a re-priced flip above the spot; got {flip}. "
+        f"None means the cumulative walk is back"
+    )
+
+    # NET GEX ABOVE ZERO: the old walk crossed above the spot, the re-priced
+    # flip lies below it — the answer changes sides of the price.
+    positive = _ordinary_chain(1.0, 0.6, 0.5, 1.2)
+    assert float(metrics.gex_matrix(positive).to_numpy(dtype=float).sum()) > 0
+    assert all(level >= 100.0 for level in _cumulative_crossings(positive))
+    flip = metrics.gamma_flip_price(positive, pricing=pricing)
+    assert flip is not None and 90.0 < flip < 100.0, (
+        f"a positive ordinary chain has its re-priced flip below the spot; got {flip}"
+    )
+
+    # A PLACEHOLDER VOLATILITY IS NOT A VOLATILITY. A source files deep
+    # in-the-money contracts at IV 1e-5; at the spot they carry nothing, but
+    # re-priced at their own strike each is a spike ~1e4 times an ordinary
+    # contract. One such put with an open interest of 10 must not move the
+    # flip. The strike is set so the spike's centre,
+    # K * exp(-(r + sigma^2 / 2) * T), lands exactly on the grid price 99.0 —
+    # between the flip and the spot, where the curve is positive, so a
+    # negative spike there is two new sign changes nearer the spot; between
+    # two grid prices it would vanish by luck, not by the floor.
+    on_grid = grid[np.argmin(np.abs(grid - 99.0))]
+    spike_strike = on_grid * np.exp((rate + 1e-5 ** 2 / 2) * years)
+    spiked = pd.concat([positive, _flip_chain([("2026-09-18", "put", spike_strike, 10, 1e-5)])], ignore_index=True)
+    assert metrics.gamma_flip_price(spiked, pricing=pricing) == flip, (
+        f"a contract at the placeholder IV 1e-5 moved the flip {flip} → "
+        f"{metrics.gamma_flip_price(spiked, pricing=pricing)}: the solver's floor is not applied"
+    )
+
+    # ONE SIGN EVERYWHERE: calls only, so the curve is positive at every price
+    # and there is no flip — not a level at the edge of the range.
+    calls_only = negative[negative["option_type"] == "call"]
+    assert metrics.gamma_flip_price(calls_only, pricing=pricing) is None
+
+    # Nothing to price: no rows at the moment, an expiry list that matches
+    # nothing, no time left, no open interest, no grid.
+    assert metrics.gamma_flip_price(negative.iloc[:0], pricing=pricing) is None
+    assert metrics.gamma_flip_price(negative, pricing=pricing, expiries=[pd.Timestamp("2030-01-18")]) is None
+    expired = negative.assign(collected_at=dt.datetime(2026, 9, 19, 12, 0))
+    assert metrics.gamma_flip_price(expired, pricing=pricing) is None
+    assert metrics.gamma_flip_price(negative.assign(open_interest=0.0), pricing=pricing) is None
+    assert core.repriced_gex_by_group(negative, np.array([]), np.zeros(len(negative), dtype=int), 1).shape == (1, 0)
+    print(f"Gamma flip is re-priced: closed form {exact:.4f} → {got:.4f}; negative chain flips above, positive below")
+
+
+def check_gamma_flip_by_depth_is_each_prefix():
+    """`gamma_flip_by_depth` returns the flip of every leading block of
+    expiries in one pass; each entry must be `gamma_flip_price` over that
+    block's expiries, exactly. Own data: six expiries whose regimes
+    alternate, so depths differ."""
     rng = np.random.default_rng(7)
-    strikes = np.arange(80.0, 120.5, 0.5)
-    expiries = list(pd.date_range("2026-10-02", periods=20, freq="7D"))
-    values = rng.normal(0.0, 1e9, size=(len(strikes), len(expiries))) * rng.random((len(strikes), 1))
-    values[rng.random(values.shape) < 0.3] = 0.0
-    matrix = pd.DataFrame(values, index=pd.Index(strikes[::-1], name="strike"), columns=expiries)
-    listed = np.zeros(len(strikes), dtype=bool)
-    masks = []
-    for _ in expiries:
-        listed = listed | (rng.random(len(strikes)) < 0.4)
-        masks.append(listed)
-    spot = 100.3
-    batch = core.gamma_flip_by_depth(matrix, np.array(masks), spot)
+    expiries = list(pd.date_range("2026-08-21", periods=6, freq="7D"))
+    rows = []
+    for number, expiry in enumerate(expiries):
+        tilt = 1.8 if number % 2 else 0.6
+        for strike in np.arange(80.0, 120.5, 0.5):
+            base = 800.0 * np.exp(-((strike - 100.0) / 7.0) ** 2) * rng.random()
+            rows.append((expiry, "put", strike, base * (tilt if strike < 100 else 0.5), 0.15 + 0.1 * rng.random()))
+            rows.append((expiry, "call", strike, base * (0.5 if strike < 100 else 1.0), 0.15 + 0.1 * rng.random()))
+    chain = _flip_chain(rows, spot=100.3)
+    pricing = metrics.PricingInputs(dividend_yield=0.013)
+    batch = metrics.gamma_flip_by_depth(chain, expiries, pricing)
     assert len(batch) == len(expiries)
-    crossings = 0
-    for depth, (mask, flip) in enumerate(zip(masks, batch), start=1):
-        one = metrics.gamma_flip_from_matrix(matrix.loc[mask, expiries[:depth]], spot)
+    for depth, flip in enumerate(batch, start=1):
+        one = metrics.gamma_flip_price(chain, pricing=pricing, expiries=expiries[:depth])
         assert flip == one, (depth, flip, one)
-        crossings += flip is not None
-    assert crossings >= len(expiries) // 2, "the fixture must cross zero at most depths"
-    assert core.gamma_flip_by_depth(matrix, np.array(masks), float("nan")) == [None] * len(expiries)
-    assert core.gamma_flip_by_depth(matrix.iloc[:0], np.zeros((3, 0), dtype=bool), spot) == [None] * 3
-    print(f"Gamma flip by depth: {len(expiries)} depths equal their crops")
+    assert sum(flip is not None for flip in batch) >= 3, f"the fixture must have flips at most depths: {batch}"
+    assert len(set(batch)) > 1, "depths must differ, or the running sum is not exercised"
+    assert metrics.gamma_flip_by_depth(chain, [], pricing) == []
+    assert metrics.gamma_flip_by_depth(chain.assign(underlying_price=float("nan")), expiries) == [None] * 6
+    assert metrics.gamma_flip_by_depth(chain.iloc[:0], expiries[:3]) == [None] * 3
+    print(f"Gamma flip by depth: {len(expiries)} depths equal gamma_flip_price on their prefix")
 
 
 def check_normal_kernels_are_scipys():
@@ -3025,7 +3121,8 @@ def main():
     check_the_flip_is_the_crossing_by_the_money()
     check_a_grazing_crossing_is_not_a_flip()
     check_a_far_flip_is_no_flip()
-    check_gamma_flip_by_depth_is_each_crop()
+    check_gamma_flip_is_repriced()
+    check_gamma_flip_by_depth_is_each_prefix()
     check_normal_kernels_are_scipys()
     check_expiry_moment_cache_changes_nothing()
     check_expiry_moments_are_the_row_map()
