@@ -1,0 +1,68 @@
+CHANGELOG.md
+  s_406eface2c4948::t_4100fb7b1e44d5 35
+  s_406eface2c4948::t_bdd0266559b1c2 10-34,36-41
+app/dashboard.py
+  s_406eface2c4948::t_2afc216ce07fbe 1513-1520,1614-1625,1633-1634
+  s_406eface2c4948::t_e1bcab680ab3e1 1626-1627
+tests/unit_tests.py
+  s_406eface2c4948::t_a08d6732190cbe 1403-1407
+  s_406eface2c4948::t_677593f22561f2 1471-1472,1474-1479,1481-1484,1490-1495,1497,1501,1506-1508,1515-1522,1524,1528-1533,1536,1538-1539,1541,1545-1548,1550-1552,1560-1566,1576-1578,1580-1581,1583-1592,1595-1599,1609-1610,1613,1619-1623,1629,1633,1641,1647-1695,1698-1785,1787-1797,1799-1800,1802-1807,3124-3125
+app/metrics_core.py
+  s_406eface2c4948::t_ebcd540fae3ca6 1560-1571,1574-1670,1678,1680-1747,1750-1752,1755-1794,1798,1800-1803,1808-1809,1813
+app/weather.py
+  s_406eface2c4948::t_f9c57ac8ef5a26 77-81
+app/metrics.py
+  s_406eface2c4948::t_bce97e8bcec89a 53-54,117-120,180-182,217-220,222-224,391-392
+UPGRADING.md
+  s_406eface2c4948::t_bdd0266559b1c2 42-64
+app/metrics_core.sha256
+  s_406eface2c4948::t_ebcd540fae3ca6 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "0.0.68",
+  "base_commit_sha": "01b4b1fe774dd2cb5ecef1fdae61121aea196bfd",
+  "prompts": {},
+  "sessions": {
+    "s_406eface2c4948": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "99e83f58-4458-4cb7-8271-f7cf006a84b7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ggrid-io <hello@gammagrid.io>",
+      "usage": [
+        {
+          "model": "claude-opus-5-5",
+          "input_tokens": 148,
+          "output_tokens": 45873,
+          "cache_read_tokens": 8261657,
+          "cache_write_5m_tokens": 0,
+          "cache_write_1h_tokens": 228114,
+          "assistant_messages": 74,
+          "turns": 1,
+          "ai_wall_ms": 220825,
+          "first_ts": "2026-11-12T04:25:10.407Z",
+          "last_ts": "2026-11-12T04:42:14.959Z",
+          "session_total_output_tokens": 45873
+        }
+      ],
+      "tools": [
+        {
+          "tool": "Bash",
+          "model": "claude-opus-5-5",
+          "calls": 41,
+          "result_chars": 168489,
+          "result_input_tokens": 76,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 104851,
+          "call_output_tokens": 26094
+        }
+      ],
+      "context_at_start_tokens": 42240,
+      "accepted_lines": 582,
+      "overridden_lines": 0
+    }
+  },
+  "install_id": "28c9ea98-f828-46d5-aadb-a21d4164fb17"
+}
