@@ -1,0 +1,54 @@
+CHANGELOG.md
+  s_406eface2c4948::t_f84435b10a1960 10-11,915-916
+UPGRADING.md
+  s_406eface2c4948::t_f84435b10a1960 42
+ROADMAP.md
+  s_406eface2c4948::t_f84435b10a1960 12,26-27,29-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "0.0.68",
+  "base_commit_sha": "94c2daff5ef3bd9707d2f867b4e8653d87cd2148",
+  "prompts": {},
+  "sessions": {
+    "s_406eface2c4948": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "99e83f58-4458-4cb7-8271-f7cf006a84b7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ggrid-io <hello@gammagrid.io>",
+      "usage": [
+        {
+          "model": "claude-opus-5-5",
+          "input_tokens": 18,
+          "output_tokens": 5833,
+          "cache_read_tokens": 1665123,
+          "cache_write_5m_tokens": 0,
+          "cache_write_1h_tokens": 8680,
+          "assistant_messages": 9,
+          "turns": 0,
+          "ai_wall_ms": 22737,
+          "first_ts": "2026-11-13T03:31:27.885Z",
+          "last_ts": "2026-11-13T03:31:51.139Z",
+          "session_total_output_tokens": 83827
+        }
+      ],
+      "tools": [
+        {
+          "tool": "Bash",
+          "model": "claude-opus-5-5",
+          "calls": 4,
+          "result_chars": 2335,
+          "result_input_tokens": 8,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 3631,
+          "call_output_tokens": 2582
+        }
+      ],
+      "accepted_lines": 10,
+      "overridden_lines": 0
+    }
+  },
+  "install_id": "28c9ea98-f828-46d5-aadb-a21d4164fb17"
+}
