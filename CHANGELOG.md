@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-13
+
 ### Changed
 - **The gamma flip is now found where other GEX tools look for it.** It is the
   price nearest the current one at which total dealer GEX would change sign if
@@ -910,7 +912,8 @@ Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.9.0...main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.10.0...main
+[0.10.0]: https://github.com/gammagrid/gammagrid/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/gammagrid/gammagrid/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/gammagrid/gammagrid/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/gammagrid/gammagrid/compare/v0.6.1...v0.7.0
