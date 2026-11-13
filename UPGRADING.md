@@ -58,6 +58,14 @@ touched by the move and is still the backup for those versions.)*
   the worker's next start, up to 45 days back (`DAY_SUMMARY_BACKFILL_DAYS`),
   so the upgrade does not show up in Changes as a flip that moved overnight.
   Days older than that keep the flip they were stored with.
+- **In-the-money contracts count again.** Contracts the data source filed
+  with a placeholder volatility (0.00001) now take the volatility of the
+  out-of-the-money side of their strike, so on chains heavy in in-the-money
+  open interest net GEX, the flip and the heatmap move, and the expected move
+  is no longer narrowed. Every screen solves volatility as it reads a chain,
+  so this shows at once. The stored volatility average of moments collected
+  before the upgrade is not recomputed; it is weighted by volume, which these
+  contracts carry little of, so the seam is small.
 - **The heatmap and the summary take a little longer.** Re-pricing the chain
   on a grid of prices costs about 50 ms more per summary on an SPX-sized
   chain and 20-80 ms more per heatmap slider move.

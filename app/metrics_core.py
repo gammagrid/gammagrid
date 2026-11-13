@@ -1047,6 +1047,7 @@ def _unsolved(snapshot: pd.DataFrame) -> pd.DataFrame:
     frame = snapshot.copy()
     frame["provider_implied_volatility"] = frame.get("implied_volatility")
     frame["iv_is_ours"] = False
+    frame["iv_is_filled"] = False
     return frame
 
 
@@ -1125,7 +1126,113 @@ def with_solved_iv(
         ours.where(ours.notna(), frame.get("implied_volatility")), errors="coerce"
     )
     frame["iv_is_ours"] = ours.notna()
+    filled = placeholder_iv_fill(frame, years)
+    frame["iv_is_filled"] = filled.notna()
+    frame["implied_volatility"] = frame["implied_volatility"].where(filled.isna(), filled)
     return frame
+
+
+# Strike keys are thousandths; one (moment, expiry) group spans this many.
+_FILL_KEY_SPAN = 10**9
+
+
+def _mean_by_key(keys: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Sorted unique keys and the mean value at each — duplicates of a contract
+    within one moment are averaged rather than one of them winning by order."""
+    unique, inverse = np.unique(keys, return_inverse=True)
+    return unique, np.bincount(inverse, weights=values) / np.bincount(inverse)
+
+
+def placeholder_iv_fill(frame: pd.DataFrame, years: pd.Series | None = None) -> pd.Series:
+    """A volatility for every row whose implied volatility is a placeholder,
+    NaN for every other row.
+
+    THE PLACEHOLDER. A source files in-the-money contracts with an implied
+    volatility of 1e-5 — not a volatility, a "we have no number" written as
+    one. The solver cannot replace it: the price it would invert is the last
+    print, and on an in-the-money strike nobody traded today that print is
+    stale and usually sits at or below intrinsic value, where no positive
+    volatility reproduces it. Left in place, the placeholder gives the contract
+    a gamma of practically zero while its open interest is real, so net GEX,
+    the flip and the largest-GEX strike all lose the in-the-money side of the
+    chain. Measured on a live chain of 24 tickers over six moments: 3.5% of the
+    rows with open interest, all of them in the money, all at 1e-5, up to 15%
+    of a ticker's open interest and more around the open; net GEX moved by up
+    to 9% of gross GEX once they were priced.
+
+    THE REPLACEMENT is the expiry's out-of-the-money smile at the contract's
+    strike: the usable volatilities of the same moment and expiry, calls above
+    the price and puts below it, interpolated linearly in strike and flat
+    beyond the outermost one. For an in-the-money contract the other side of
+    its own strike is always out of the money, so where that side carries a
+    volatility the smile returns exactly it — put-call parity, which makes the
+    two equal up to the dividend and early exercise. That is the convention
+    every volatility surface is built on: the out-of-the-money side is the one
+    the market actually quotes. Interpolation only covers the strikes that
+    have no other side.
+    An expiry with no usable out-of-the-money volatility keeps its
+    placeholder, and with it a gamma of practically zero: there is nothing in
+    it to borrow from. In-the-money volatilities are not borrowed — they are
+    the ones least determined by their price — and neither is another expiry's,
+    which would invent a term structure.
+
+    The filled rows are flagged `iv_is_filled` and stay `iv_is_ours` False:
+    nothing was solved for them, and a comparison of our model with the
+    provider's must not count them as either.
+
+    Measured on the same chain, holding out the in-the-money contracts that do
+    carry a usable volatility and predicting them: open-interest-weighted mean
+    absolute error 0.080 for this rule, 0.099 for the expiry's at-the-money
+    volatility, 0.135 for a smile of the same option type. Solving against
+    intrinsic value as a price floor was also tried and rejected: it returns
+    a volatility near zero, which is the placeholder's gamma again.
+
+    `years` is the time to expiry per row, if the caller already has it; rows
+    that have expired are never filled."""
+    result = np.full(len(frame), np.nan)
+    if frame.empty or "implied_volatility" not in frame:
+        return pd.Series(result, index=frame.index)
+    iv = pd.to_numeric(frame["implied_volatility"], errors="coerce").to_numpy(dtype=float)
+    placeholder = np.isfinite(iv) & (iv <= _IV_FLOOR)
+    if years is not None:
+        placeholder &= pd.to_numeric(pd.Series(years), errors="coerce").to_numpy(dtype=float) > 0
+    if not placeholder.any():
+        return pd.Series(result, index=frame.index)
+
+    strike = pd.to_numeric(frame["strike"], errors="coerce").to_numpy(dtype=float)
+    spot = pd.to_numeric(frame["underlying_price"], errors="coerce").to_numpy(dtype=float)
+    is_call = (frame["option_type"] == "call").to_numpy()
+    usable = (iv > _IV_FLOOR) & np.isfinite(strike)
+    # ONE INTEGER KEY PER (moment, expiry, strike), so that the lookup below
+    # is a sort and a binary search rather than a Python loop over expiries —
+    # the loop cost more than the solver itself on a full chain. Strikes are
+    # keyed to a thousandth, which no listed strike is finer than.
+    # Factorised as stored, not parsed: parsing the moment column again costs
+    # as much as the rest of this function.
+    moment_code, _ = pd.factorize(frame["collected_at"])
+    expiry_code, expiries = pd.factorize(frame["expiry"])
+    group = moment_code.astype(np.int64) * max(len(expiries), 1) + expiry_code
+    key = group * _FILL_KEY_SPAN + np.round(np.nan_to_num(strike) * 1000).astype(np.int64)
+    wanted = np.flatnonzero(placeholder & np.isfinite(strike))
+    out_of_money = usable & ((is_call & (strike >= spot)) | (~is_call & (strike <= spot)))
+    if len(wanted) and out_of_money.any():
+        smile_keys, smile_iv = _mean_by_key(key[out_of_money], iv[out_of_money])
+        smile_strike = (smile_keys % _FILL_KEY_SPAN) / 1000.0
+        smile_group = smile_keys // _FILL_KEY_SPAN
+        right = np.searchsorted(smile_keys, key[wanted])
+        left = right - 1
+        last = len(smile_keys) - 1
+        has_right = (right <= last) & (smile_group[np.minimum(right, last)] == group[wanted])
+        has_left = (left >= 0) & (smile_group[np.maximum(left, 0)] == group[wanted])
+        r, lft = np.minimum(right, last), np.maximum(left, 0)
+        span = smile_strike[r] - smile_strike[lft]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            weight = np.where(span > 0, (strike[wanted] - smile_strike[lft]) / span, 1.0)
+        between = smile_iv[lft] + np.clip(weight, 0.0, 1.0) * (smile_iv[r] - smile_iv[lft])
+        result[wanted] = np.select(
+            [has_left & has_right, has_right, has_left], [between, smile_iv[r], smile_iv[lft]], np.nan
+        )
+    return pd.Series(np.where(placeholder, result, np.nan), index=frame.index)
 
 
 def screener_table(

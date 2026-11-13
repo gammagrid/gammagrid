@@ -2025,6 +2025,128 @@ def check_the_solver_stands_aside_where_it_should():
     print("IV solver checks passed (VIX and a missing spot keep the source's number)")
 
 
+def check_placeholder_iv_is_filled():
+    """In-the-money contracts filed at the source's 1e-5 get the expiry's
+    out-of-the-money smile at their strike — the other side of the same strike
+    where it exists (parity), interpolation where it does not.
+
+    WHAT BREAKS SILENTLY. The placeholder gives a contract with real open
+    interest a gamma of practically zero, and nothing on the screen says so:
+    net GEX, the flip and the largest-GEX strike just lose the in-the-money
+    side of the chain. Each answer below is known without our code: a flat
+    smile returns its own sigma, parity returns the other side's number
+    exactly, a linear smile returns the midpoint."""
+    from app import metrics_core as core
+
+    # --- 1. A flat smile, end to end through with_solved_iv ------------------
+    moment = pd.Timestamp("2026-08-20 15:00:00")
+    expiry = pd.Timestamp("2026-09-18")
+    sigma = 0.20
+    rows = []
+    years = core.years_to_expiry(expiry, moment, ticker="FILLTEST")
+    rate = core.PricingInputs().rate_for(years)
+    for strike in (80.0, 85.0, 90.0, 95.0, 100.0, 105.0, 110.0, 115.0, 120.0):
+        for kind in ("call", "put"):
+            is_call = kind == "call"
+            price = float(core._bs_price(100.0, strike, years, sigma, rate, is_call, 0.0))
+            itm = (strike < 100.0) if is_call else (strike > 100.0)
+            intrinsic = max(100.0 - strike, 0.0) if is_call else max(strike - 100.0, 0.0)
+            rows.append({
+                "ticker": "FILLTEST", "collected_at": moment, "expiry": expiry, "strike": strike,
+                "option_type": kind, "underlying_price": 100.0, "open_interest": 1000,
+                "bid": np.nan, "ask": np.nan,
+                # In the money: a stale print below intrinsic and the placeholder.
+                "last_price": intrinsic - 0.5 if itm else price,
+                "implied_volatility": 1e-5 if itm else 0.33,
+            })
+    chain = pd.DataFrame(rows)
+    solved = metrics.with_solved_iv(chain, metrics.PricingInputs(), ticker="FILLTEST")
+    itm = ((solved["option_type"] == "call") & (solved["strike"] < 100)) | (
+        (solved["option_type"] == "put") & (solved["strike"] > 100))
+    assert list(solved["iv_is_filled"]) == list(itm), "exactly the placeholder rows are filled"
+    assert not solved.loc[itm, "iv_is_ours"].any(), (
+        "a filled row was not solved — counting it as ours mixes it into the model comparison"
+    )
+    assert (solved.loc[itm, "provider_implied_volatility"] == 1e-5).all(), "the source's number survives"
+    error = (solved["implied_volatility"] - sigma).abs().max()
+    assert error < 1e-6, f"a flat smile of {sigma} must come back as {sigma} everywhere, worst {error:.1e}"
+    truth = chain.assign(implied_volatility=sigma)
+    gex, gex_true = (core._contract_gex(f, core.PricingInputs(), "FILLTEST") for f in (solved, truth))
+    worst = (gex - gex_true).abs().max() / gex_true.abs().max()
+    assert worst <= 1e-5, (
+        f"every contract's GEX with the placeholder filled must equal the flat-sigma chain's, worst rel {worst:.1e}"
+    )
+    assert gex_true[itm].abs().min() > 0, "the in-the-money rows carry real gamma in the reference"
+
+    # --- 2. The other side, the smile between strikes, then nothing ----------
+    def row(strike, kind, iv, at=moment, exp=expiry):
+        return {"collected_at": at, "expiry": exp, "strike": strike, "option_type": kind,
+                "underlying_price": 100.0, "implied_volatility": iv}
+
+    later = moment + pd.Timedelta(minutes=15)
+    other_expiry = pd.Timestamp("2026-10-16")
+    frame = pd.DataFrame([
+        row(90.0, "put", 0.30), row(95.0, "put", 0.25), row(100.0, "put", 0.20),
+        row(100.0, "call", 0.20), row(105.0, "call", 0.18), row(110.0, "call", 0.16),
+        row(105.0, "put", 1e-5),    # parity: the 105 call -> 0.18
+        row(90.0, "call", 1e-5),    # parity: the 90 put -> 0.30
+        row(107.5, "put", 1e-5),    # no 107.5 call: smile midway 105-110 -> 0.17
+        row(115.0, "put", 1e-5),    # beyond the last strike: flat -> 0.16
+        row(105.0, "call", 0.40, at=later),        # another moment: must not leak
+        row(105.0, "put", 1e-5, exp=other_expiry),  # its expiry has no OTM volatility ...
+        row(95.0, "call", 0.22, exp=other_expiry),  # ... only an in-the-money one
+    ])
+    # A frame glued together without a fresh index must not confuse positions.
+    frame.index = [0] * len(frame)
+    fill = core.placeholder_iv_fill(frame).to_numpy()
+    expected = [np.nan] * 6 + [0.18, 0.30, 0.17, 0.16, np.nan, np.nan, np.nan]
+    assert np.allclose(fill, expected, equal_nan=True, atol=1e-12), (
+        f"the out-of-the-money smile of the same moment and expiry, else nothing; got {fill}"
+    )
+
+    # An expired row is never filled: it carries no volatility to borrow.
+    expired = core.placeholder_iv_fill(frame, years=pd.Series([-1.0] * len(frame), index=frame.index))
+    assert expired.isna().all()
+    # Nothing to fill is the common case and must not touch anything.
+    assert core.placeholder_iv_fill(frame.iloc[:6]).isna().all()
+    assert core.placeholder_iv_fill(frame.iloc[:0]).empty
+
+    # The marker exists on the path that solves nothing as well.
+    vix = metrics.with_solved_iv(chain.assign(ticker="VIX"), metrics.PricingInputs(), ticker="VIX")
+    assert "iv_is_filled" in vix and not vix["iv_is_filled"].any()
+    print("Placeholder IV fill checks passed")
+
+
+def check_expected_move_ignores_the_placeholder():
+    """The at-the-money volatility behind the expected move counts only
+    volatilities above the solver's floor, as `wall_reach` already does.
+
+    One of the two contracts at the money is always slightly in the money,
+    and a source files it at 1e-5; averaged in, it halved the move. Own data:
+    a call at 0.15 and a put at the placeholder, then both at 0.15 and 0.25.
+    """
+    moment = pd.Timestamp("2026-08-20 15:00:00")
+    expiry = pd.Timestamp("2026-09-18")
+
+    def at_the_money(call_iv, put_iv):
+        return pd.DataFrame([
+            {"collected_at": moment, "expiry": expiry, "strike": strike, "option_type": kind,
+             "underlying_price": 100.4, "implied_volatility": iv}
+            for strike in (95.0, 100.0, 105.0)
+            for kind, iv in (("call", call_iv), ("put", put_iv))
+        ])
+
+    got = metrics.atm_implied_volatility(at_the_money(0.15, 1e-5), expiry)
+    assert got is not None and abs(got - 0.15) < 1e-12, (
+        f"the 1e-5 placeholder was averaged into the at-the-money volatility — the move "
+        f"comes out half as wide, got {got}"
+    )
+    got = metrics.atm_implied_volatility(at_the_money(0.15, 0.25), expiry)
+    assert got is not None and abs(got - 0.20) < 1e-12, got
+    assert metrics.atm_implied_volatility(at_the_money(1e-5, 1e-5), expiry) is None
+    print("Expected move ignores the placeholder volatility")
+
+
 def check_the_directory_parse_survives_the_real_header():
     """The header is what breaks this, and the failure is silent.
 
@@ -3128,6 +3250,8 @@ def main():
     check_expiry_moments_are_the_row_map()
     check_the_strike_count_actually_decides_what_is_drawn()
     check_the_solver_stands_aside_where_it_should()
+    check_placeholder_iv_is_filled()
+    check_expected_move_ignores_the_placeholder()
     check_a_stopped_collection_does_not_look_healthy()
     check_the_run_log_answers_how_collection_is_going()
     check_a_closed_market_is_not_a_failure()

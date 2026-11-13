@@ -28,6 +28,7 @@ import pandas as pd
 
 from app.metrics_core import (
     _GREEK_KEYS,
+    _IV_FLOOR,
     _YEAR_SECONDS,
     ATTRIBUTION_TERMS,
     DEFAULT_PRICING,
@@ -281,7 +282,12 @@ def atm_implied_volatility(
     nearest = strikes.iloc[(strikes - spot).abs().argsort().iloc[0]]
     at_money = chain[strikes == nearest]
     iv = pd.to_numeric(at_money["implied_volatility"], errors="coerce").dropna()
-    iv = iv[iv > 0]
+    # Above the solver floor, not merely above zero — the same rule as
+    # `wall_reach`. A source files in-the-money contracts at 1e-5, and one of
+    # the two at the money is always slightly in the money: averaged in, it
+    # halved the move. `with_solved_iv` now fills that placeholder from the
+    # other side of the strike; this keeps a raw frame honest too.
+    iv = iv[iv > _IV_FLOOR]
     return float(iv.mean()) if not iv.empty else None
 
 
@@ -374,6 +380,7 @@ __all__ = [
     "PROVIDER_GREEKS",
     "PricingInputs",
     "_GREEK_KEYS",
+    "_IV_FLOOR",
     "_YEAR_SECONDS",
     "_as_naive_utc",
     "_black_scholes_greeks",

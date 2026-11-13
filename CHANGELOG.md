@@ -32,12 +32,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   per summary on an SPX-sized chain, and on the heatmap 20-80 ms more per
   slider move depending on how many expiries are shown.
 
-The change is in the shared formulas (`app/metrics_core.py`, sha256 `a3543076…`):
-`gamma_flip_from_matrix` is removed, `gamma_flip_by_depth` takes a chain and
-a list of expiries instead of a matrix, and `gamma_flip_grid` and
-`repriced_gex_by_group` are new. Day rows written by the previous formulas are
-rebuilt by the worker on its next daily pass, as far back as
-`DAY_SUMMARY_BACKFILL_DAYS` reaches (45 days by default).
+### Fixed
+- **In-the-money contracts no longer drop out of GEX.** The data source files
+  many in-the-money contracts with an implied volatility of 0.00001 — a
+  placeholder meaning "no number", not a volatility — and the solver could not
+  replace it: the last trade of such a contract usually sits at or below its
+  intrinsic value, where no volatility reproduces the price. With the
+  placeholder in place the contract had practically no gamma while its open
+  interest was real, so net GEX, the gamma flip and the largest-GEX strike
+  quietly lost the in-the-money side of the chain. On a live sample of 24
+  tickers that was a few percent of open interest on a typical ticker, far
+  more on some (15% on MO) and more around the open, and net GEX moved by up
+  to 9% of gross GEX once those contracts were priced. Such a contract now
+  takes the volatility of the expiry's out-of-the-money smile at its strike:
+  the other side of the same strike where it is listed, interpolated between
+  neighbouring strikes where it is not, flat beyond the last one. An expiry
+  with no out-of-the-money volatility to borrow keeps the placeholder.
+  **What you will see:** net GEX, the gamma flip and the heatmap shift on
+  chains heavy in in-the-money open interest, most at the open; on SPY, QQQ and SPX during the day the change is small. The screener,
+  the contract view and the volatility average show the filled volatility for
+  those contracts; the source's own number is kept alongside it, and filled
+  rows are flagged as filled rather than counted as solved.
+- **The expected move is no longer narrowed by that placeholder.** The
+  at-the-money volatility behind it averaged the call and the put at the
+  strike nearest the price, and one of the two is always slightly in the
+  money — at the placeholder, it halved the move. Only volatilities above the
+  solver's floor are counted now, as the walls' reach already did.
+
+Both changes are in the shared formulas (`app/metrics_core.py`, sha256
+`0b85ba9a…`): `gamma_flip_from_matrix` is removed, `gamma_flip_by_depth`
+takes a chain and a list of expiries instead of a matrix, `gamma_flip_grid`,
+`repriced_gex_by_group` and `placeholder_iv_fill` are new, and
+`with_solved_iv` adds an `iv_is_filled` column. Day rows written by the
+previous formulas are rebuilt by the worker on its next daily pass, as far
+back as `DAY_SUMMARY_BACKFILL_DAYS` reaches (45 days by default).
 
 ## [0.9.0] - 2026-11-10
 
