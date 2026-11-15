@@ -3200,6 +3200,175 @@ def check_stored_chains_reach_the_am_rule():
     print("Stored chains carry their ticker into the AM settlement rule")
 
 
+def _exposure_chain(at, ivs, oi, spot=100.0, expiry="2026-12-18"):
+    """One expiry of synthetic contracts at moment `at` (both dates literal and
+    in the same frame: nothing here is compared with the real clock)."""
+    return pd.DataFrame([dict(ticker="UNITDEX", expiry=pd.Timestamp(expiry), strike=float(k), option_type=t,
+                              underlying_price=spot, collected_at=pd.Timestamp(at), implied_volatility=ivs[k],
+                              open_interest=oi[t][k])
+                         for k in ivs for t in ("call", "put")])
+
+
+def check_dealer_exposures_in_one_greeks_batch():
+    """`dealer_exposures`: GEX, DEX, vanna, charm by (expiry, strike) from one
+    greeks call. Nothing in this product calls it yet; it is part of the shared
+    core, so it is checked here. The totals are frozen reference values
+    computed independently from the definitions, not values read back from
+    this code."""
+    from app import metrics_core as core
+
+    par = 2 * (np.exp(0.04 / 2) - 1) * 100        # BEY par that is exactly 4 % continuous
+    close = pd.Timestamp("2026-12-18 21:00")       # 16:00 ET in December
+    ivs = {90: .28, 95: .23, 100: .20, 105: .21, 110: .24}
+    oi = {"call": {90: 500, 95: 1500, 100: 4000, 105: 6000, 110: 3000},
+          "put": {90: 5000, 95: 7000, 100: 4000, 105: 1500, 110: 500}}
+    chain = _exposure_chain(close - pd.Timedelta(days=30), ivs, oi)
+
+    def pricing(q):
+        return core.PricingInputs(curve={0.0: par, 30.0: par}, dividend_yield=q)
+
+    def gex_grouped(frame, p):
+        gex = core._contract_gex(frame, p, "UNITDEX")
+        return frame.assign(g=gex).groupby(["expiry", "strike"])["g"].sum().to_numpy()
+
+    # REFERENCE TOTALS (abs 0.01). dex is the market convention in dollars:
+    # shares x S, from the unrounded share count.
+    reference = {0.01: {"gex": -301511.25, "dex": 1399519.71, "vanna": 1602688.19, "charm": -632625.63},
+               0.0: {"gex": -232607.03, "dex": 2618992.52, "vanna": 1602605.65, "charm": -635440.29}}
+    for q, want in reference.items():
+        got = core.dealer_exposures(chain, pricing(q), "UNITDEX")
+        assert list(got.columns) == ["expiry", "strike", "gex", "dex", "vanna", "charm"], list(got.columns)
+        assert list(got["strike"]) == [90.0, 95.0, 100.0, 105.0, 110.0], list(got["strike"])
+        totals = got[list(core.EXPOSURE_COLUMNS)].sum()
+        bad = {k: float(totals[k]) for k, v in want.items() if abs(totals[k] - v) > 0.01}
+        assert not bad, f"q={q}: totals off the reference values: {bad} (want {want})"
+        # GEX does not move: exactly the grouped `_contract_gex`, not "close to".
+        diff = float(np.abs(gex_grouped(chain, pricing(q)) - got["gex"].to_numpy()).max())
+        assert diff == 0.0, f"q={q}: GEX parity broken, max |delta| {diff}"
+        # Strike 100, equal OI on both sides: GEX and vanna cancel exactly; market
+        # DEX is OI*100*S*(delta_call + delta_put), not zero (no dealer sign).
+        atm = got[got["strike"] == 100.0].iloc[0]
+        g = core._black_scholes_greeks_batch(pd.Series([100.0, 100.0]), pd.Series([100.0, 100.0]),
+                                             pd.Series([30 / 365] * 2), pd.Series([0.2, 0.2]), 0.04,
+                                             pd.Series(["call", "put"]), dividend_yield=q)
+        assert atm["gex"] == 0.0 and atm["vanna"] == 0.0, atm.to_dict()
+        assert abs(atm["dex"] - 4000 * 100 * 100.0 * float(g["delta"].sum())) < 1e-6, atm.to_dict()
+
+    # LONG-DATED PER CONTRACT: the definitions, rel 1e-12. Charm is the dealer
+    # DEX of the same chain one calendar day later minus today's — re-priced
+    # through the batch kernel, not through the function under test.
+    per = core._contract_exposures(chain, pricing(0.01), "UNITDEX")
+    years = pd.Series([30 / 365] * len(chain))
+    g = core._black_scholes_greeks_batch(chain["underlying_price"], chain["strike"], years,
+                                         chain["implied_volatility"], 0.04, chain["option_type"], dividend_yield=0.01)
+    g1 = core._black_scholes_greeks_batch(chain["underlying_price"], chain["strike"], years - 1 / 365,
+                                          chain["implied_volatility"], 0.04, chain["option_type"], dividend_yield=0.01)
+    s = np.where(chain["option_type"] == "put", -1.0, 1.0)
+    n = chain["open_interest"].to_numpy(float) * 100 * 100.0
+    for col, want in (("dex", g["delta"] * n), ("vanna", s * g["vanna"] * 0.01 * n),
+                      ("charm", s * (g1["delta"] - g["delta"]) * n)):
+        rel = float((np.abs(per[col] - want) / np.abs(want)).max())
+        assert rel < 1e-9, f"{col} per contract off its definition: rel {rel:.2e}"
+    # ... and on 30 days it is close to the analytic rate charm/365 (1.6 % on the
+    # total here), which is what makes it the same quantity.
+    analytic = float((s * g["charm"] / 365 * n).sum())
+    assert abs(float(per["charm"].sum()) / analytic - 1) < 0.03, (float(per["charm"].sum()), analytic)
+    # The delta-only helper is the batch's delta to the bit.
+    alone = core._black_scholes_delta(chain["underlying_price"].to_numpy(float), chain["strike"].to_numpy(float),
+                                      years.to_numpy(), chain["implied_volatility"].to_numpy(float), 0.04,
+                                      (chain["option_type"] == "put").to_numpy(), 0.01)
+    assert np.array_equal(alone, g["delta"].to_numpy()), np.abs(alone - g["delta"].to_numpy()).max()
+
+    # SIGN OF DEX: calls alone positive, puts alone negative.
+    calls = chain[chain["option_type"] == "call"]
+    puts = chain[chain["option_type"] == "put"]
+    assert (core.dealer_exposures(calls, pricing(0.01))["dex"] > 0).all()
+    assert (core.dealer_exposures(puts, pricing(0.01))["dex"] < 0).all()
+
+    # ONE BATCH per call — a second call would double the work.
+    calls_made = []
+    real = core._black_scholes_greeks_batch
+    core._black_scholes_greeks_batch = lambda *a, **k: calls_made.append(1) or real(*a, **k)
+    try:
+        core.dealer_exposures(chain, pricing(0.01), "UNITDEX")
+    finally:
+        core._black_scholes_greeks_batch = real
+    assert len(calls_made) == 1, f"{len(calls_made)} greeks batches per call, want 1"
+
+    # TWO EXPIRIES in one frame: grouped by (expiry, strike), GEX parity holds.
+    two = pd.concat([chain, _exposure_chain(close - pd.Timedelta(days=30), ivs, oi, expiry="2027-01-15")],
+                    ignore_index=True)
+    got = core.dealer_exposures(two, pricing(0.01), "UNITDEX")
+    assert len(got) == 10 and got["expiry"].nunique() == 2, got
+    assert float(np.abs(gex_grouped(two, pricing(0.01)) - got["gex"].to_numpy()).max()) == 0.0
+
+    # CHARM NEAR EXPIRY: the chain 99.85/100/100.15, 30 minutes before the close.
+    # Analytic charm/365 would be -232 M$ per day against a gross bound of
+    # 120 M$; the change to expiry is -6.42 M$ (the pinned strike
+    # 100 takes +-1/2 as its payoff delta, not 0, or it alone would add -20 M$).
+    ivs0 = {99.85: .20, 100.0: .20, 100.15: .20}
+    oi0 = {"call": {99.85: 1000, 100.0: 2000, 100.15: 3000}, "put": {99.85: 3000, 100.0: 2000, 100.15: 1000}}
+    zero = _exposure_chain(close - pd.Timedelta(minutes=30), ivs0, oi0)
+    got = core.dealer_exposures(zero, pricing(0.01), "UNITDEX")
+    gross = float(zero["open_interest"].sum()) * 100 * 100.0
+    total = float(got["charm"].sum())
+    assert abs(total) <= gross and abs(total - (-6_416_893.93)) < 0.01, f"0DTE charm {total:.2f}, gross {gross:.0f}"
+    assert float(np.abs(gex_grouped(zero, pricing(0.01)) - got["gex"].to_numpy()).max()) == 0.0
+    # Payoff delta per contract: ITM call 1, ITM put -1, ATM and OTM 0 — not the
+    # kernel's delta of an expired contract (0), which would flip the ITM call's sign.
+    per = core._contract_exposures(zero, pricing(0.01), "UNITDEX")
+    tau = 30 * 60 / core._YEAR_SECONDS
+    for i, row in zero.iterrows():
+        k, kind = row["strike"], row["option_type"]
+        delta = core._black_scholes_greeks_batch(pd.Series([100.0]), pd.Series([k]), pd.Series([tau]),
+                                                 pd.Series([0.2]), core.PricingInputs(curve={0.0: par, 30.0: par})
+                                                 .rate_for(tau), pd.Series([kind]), dividend_yield=0.01)["delta"][0]
+        payoff = (1.0 if k < 100 else 0.5 if k == 100 else 0.0) if kind == "call" else (
+            -1.0 if k > 100 else -0.5 if k == 100 else 0.0)
+        sign = 1.0 if kind == "call" else -1.0
+        want = sign * (payoff - delta) * row["open_interest"] * 100 * 100.0
+        assert abs(per.loc[i, "charm"] - want) <= 1e-9 * abs(want), (k, kind, per.loc[i, "charm"], want)
+    itm_call = per.loc[(zero["strike"] == 99.85) & (zero["option_type"] == "call"), "charm"].iloc[0]
+    assert itm_call > 0, f"ITM call near expiry: dealer delta still has to grow to 1, got {itm_call}"
+
+    # THE PIN: spot on the strike to the cent. A call-put pair with equal OI sums
+    # to (1 - e^(-qT)) * N whatever the spot — the same at 99.99, 100 and 100.01;
+    # a payoff delta of 0 for both at S = K made it -N (-10 M$ here) at 100 only.
+    pair = {}
+    for spot in (99.99, 100.0, 100.01):
+        pin = _exposure_chain(close - pd.Timedelta(minutes=30), {100.0: .20}, {"call": {100.0: 1000}, "put": {100.0: 1000}},
+                              spot=spot)
+        pair[spot] = float(core._contract_exposures(pin, pricing(0.01), "UNITDEX")["charm"].sum())
+    want = (1 - np.exp(-0.01 * 30 * 60 / core._YEAR_SECONDS)) * 1000 * 100
+    assert all(abs(v - want * k) < 1e-3 for k, v in pair.items()), (pair, want)
+
+    # CONTINUOUS AT ONE DAY: one second either side of the horizon moves charm
+    # by a hair, not by the x13 jump a switch from the rate to the difference
+    # made (OTM call 100.15: -0.31 M$ analytic against -4.49 M$ to expiry).
+    one = _exposure_chain(close - pd.Timedelta(days=1), {100.15: .20}, {"call": {100.15: 1000}, "put": {100.15: 0}})
+    around = [core._contract_exposures(one.assign(collected_at=close - pd.Timedelta(seconds=sec)), pricing(0.0),
+                                       "UNITDEX")["charm"].iloc[0] for sec in (86399, 86400, 86401)]
+    assert all(abs(a - around[1]) < 1e-5 * abs(around[1]) for a in around), around
+    assert abs(around[1] + 4_492_813.50) < 0.01, around
+
+    # ROWS THE KERNEL CANNOT PRICE give 0, as in GEX — including near expiry,
+    # where the payoff indicator alone must not produce a number.
+    bad = zero.copy()
+    bad.loc[0, "implied_volatility"] = np.nan          # 99.85 call, ITM: payoff 1 if unguarded
+    bad.loc[1, "implied_volatility"] = 0.0             # 99.85 put
+    bad.loc[2, "open_interest"] = np.nan               # 100 call
+    bad.loc[5, "collected_at"] = close + pd.Timedelta(minutes=1)   # 100.15 put, expired, ITM
+    per = core._contract_exposures(bad, pricing(0.01), "UNITDEX")
+    assert (per.loc[[0, 1, 2, 5]] == 0.0).all().all(), per.loc[[0, 1, 2, 5]]
+    nospot = zero.assign(underlying_price=np.nan)
+    got = core.dealer_exposures(nospot, pricing(0.01), "UNITDEX")
+    assert (got[list(core.EXPOSURE_COLUMNS)] == 0.0).all().all(), got
+
+    empty = core.dealer_exposures(chain.iloc[0:0], pricing(0.01), "UNITDEX")
+    assert empty.empty and list(empty.columns) == ["expiry", "strike", "gex", "dex", "vanna", "charm"], empty
+    print("dealer exposures: reference totals, GEX parity |delta| = 0, one batch, one-day charm continuous and bounded")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -3264,6 +3433,7 @@ def main():
     check_am_settlement_reaches_every_core_path()
     check_stored_chains_reach_the_am_rule()
     check_dealer_walls_side_and_window()
+    check_dealer_exposures_in_one_greeks_batch()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

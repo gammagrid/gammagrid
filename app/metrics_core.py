@@ -1325,6 +1325,136 @@ def _contract_gex(frame: pd.DataFrame, pricing: PricingInputs, ticker: str | Non
     return contract_gex.where(frame["option_type"] != "put", -contract_gex)
 
 
+# The charm horizon: one calendar day, in the same wall-clock years the greeks
+# use (see `_contract_exposures`).
+_CHARM_HORIZON_YEARS = 24 * 3600 / _YEAR_SECONDS
+
+EXPOSURE_COLUMNS = ("gex", "dex", "vanna", "charm")
+
+
+def _black_scholes_delta(spot, strike, years, iv, rate, is_put, dividend_yield) -> np.ndarray:
+    """Delta alone, on arrays, by the very expression `_black_scholes_greeks_batch`
+    uses (same d1, same operation order, so the same bits for the same inputs).
+    Callers pass only rows with years > 0, iv > 0 and spot > 0. A separate
+    function because the charm horizon needs a second delta for the whole
+    chain, and the full batch would compute six greeks to throw five away."""
+    q = dividend_yield
+    sqrt_t = np.sqrt(years)
+    d1 = (np.log(spot / strike) + (rate - q + iv ** 2 / 2) * years) / (iv * sqrt_t)
+    carry_discount = np.exp(-q * years)
+    return np.where(is_put, carry_discount * (_norm_cdf(d1) - 1), carry_discount * _norm_cdf(d1))
+
+
+def _contract_exposures(frame: pd.DataFrame, pricing: PricingInputs, ticker: str | None = None) -> pd.DataFrame:
+    """GEX, DEX, vanna and charm exposure for every row of `frame`, from ONE
+    batched greeks call — the batch already returns delta and vanna next to
+    gamma, so a second call would only double the work.
+
+    Columns, per contract, in dollars (multiplier 100, spot S, dealer sign
+    s = +1 call, -1 put — the same heuristic as GEX, not real positioning):
+
+      gex    s * gamma * OI * 100 * S       dollar delta change per $1 of spot.
+             Computed in exactly the operation order of `_contract_gex`, so the
+             two are equal to the last bit — the GEX numbers do not move.
+      dex    delta * OI * 100 * S           NO dealer sign: the net delta of open
+             interest in the market convention (put delta is negative). With s
+             it would be s * delta >= 0 on every contract — gross delta that
+             never changes sign — so the dealer version says nothing about
+             direction. Divide by S for shares.
+      vanna  s * vanna * 0.01 * OI * 100 * S   dealer dollar delta change per
+             +1 point of IV (the kernel's vanna is per 1.00 of sigma).
+      charm  s * (delta(T - h) - delta(T)) * OI * 100 * S,  h = min(1 day, T)
+             dealer dollar delta change over the next calendar day (or to
+             expiry, if that comes sooner) at unchanged spot, IV and dividend
+             yield; the rate is the curve's at T - h.
+
+    WHY CHARM IS A DIFFERENCE AND NOT THE ANALYTIC RATE. The analytic charm,
+    times 1/365, is the instantaneous rate of the delta's decay, and that rate
+    grows like 1/T in a band of strikes around the spot: 30 minutes before the
+    close a chain can show a "per day" rate several times larger than all the
+    delta it has left to lose. A one-day difference is bounded by OI * 100 * S
+    by construction, agrees with charm/365 on long-dated contracts, and is
+    continuous in T — a rule that switched from the rate to the difference at
+    one day would jump at that switch, and for index monthlies that settle at
+    the open the switch falls inside the trading session.
+
+    When h = T the later delta is the payoff indicator — 1 for an in-the-money
+    call, -1 for an in-the-money put, 0 out of the money — and is NOT taken
+    from the kernel: an expired contract gets delta 0 there, which is the wrong
+    answer for one that finishes in the money. With the spot exactly on the
+    strike it is +1/2 for the call and -1/2 for the put, the limit of delta as
+    T -> 0 there: 0 for both would break call-put parity (delta_call -
+    delta_put = 1 at expiry) and add -OI * 100 * S to the total of every
+    pinned pair — and strikes sit on whole dollars, spots on cents, so that
+    happens on real 0DTE snapshots.
+
+    Rows without IV or with T <= 0 give 0 in every column, as in GEX; missing
+    open interest counts as 0. A row without spot or strike gives NaN, again
+    as in GEX: a strike sum skips it, and grouping by strike drops a row that
+    has no strike."""
+    spot = pd.to_numeric(frame["underlying_price"], errors="coerce")
+    strike = pd.to_numeric(frame["strike"], errors="coerce")
+    iv = pd.to_numeric(frame["implied_volatility"], errors="coerce")
+    collected = pd.to_datetime(frame["collected_at"])
+    expiry_moments = _frame_expiry_moments(frame, ticker)
+    years = (expiry_moments - collected).dt.total_seconds() / _YEAR_SECONDS
+    greeks = _black_scholes_greeks_batch(
+        spot, strike, years, iv, pricing.rate_series(years), frame["option_type"],
+        dividend_yield=pricing.dividend_yield,
+    )
+    # Plain arrays from here on: the same floating-point operations as the
+    # pandas expressions in `_contract_gex`, in the same order (so the same
+    # bits), without a Series and an index alignment per operation — those
+    # cost more than the arithmetic on a whole SPX chain.
+    s_ = spot.to_numpy(dtype=float)
+    k_ = strike.to_numpy(dtype=float)
+    t_ = years.to_numpy(dtype=float)
+    iv_ = iv.to_numpy(dtype=float)
+    open_interest = pd.to_numeric(frame["open_interest"], errors="coerce").fillna(0).to_numpy(dtype=float)
+    is_put = (frame["option_type"] == "put").to_numpy()
+    delta = greeks["delta"].to_numpy()
+
+    contract_gex = greeks["gamma"].to_numpy() * open_interest * 100 * s_
+    gex = np.where(is_put, -contract_gex, contract_gex)
+
+    notional = open_interest * 100 * s_
+    sign = np.where(is_put, -1.0, 1.0)
+    dex = delta * notional
+    vanna = sign * greeks["vanna"].to_numpy() * 0.01 * notional
+
+    with np.errstate(invalid="ignore"):
+        valid = (t_ > 0) & (iv_ > 0) & (s_ > 0)
+    later_t = t_ - np.minimum(t_, _CHARM_HORIZON_YEARS)
+    priced = valid & (later_t > 0)
+    at_strike = 0.5 * (s_ == k_)
+    payoff_delta = np.where(is_put, -(s_ < k_).astype(float) - at_strike, (s_ > k_).astype(float) + at_strike)
+    later_delta = np.where(valid, payoff_delta, 0.0)
+    if priced.any():
+        rows = np.flatnonzero(priced)
+        later_delta[rows] = _black_scholes_delta(
+            s_[rows], k_[rows], later_t[rows], iv_[rows],
+            pricing.rate_series(pd.Series(later_t[rows])), is_put[rows], pricing.dividend_yield,
+        )
+    charm = sign * (later_delta - delta) * notional
+
+    return pd.DataFrame({"gex": gex, "dex": dex, "vanna": vanna, "charm": charm}, index=frame.index)
+
+
+def dealer_exposures(frame: pd.DataFrame, pricing: PricingInputs, ticker: str | None = None) -> pd.DataFrame:
+    """GEX, DEX, vanna and charm exposure by (expiry, strike) — the per-contract
+    columns of `_contract_exposures` summed within each strike of each expiry.
+
+    `frame` is one moment of a chain (any number of expiries); totals over a set
+    of expiries are sums of these rows. The `gex` column equals `_contract_gex`
+    grouped the same way, exactly — this is the same GEX, with three more
+    exposures from the same greeks call (plus one delta for the charm horizon)."""
+    exposures = _contract_exposures(frame, pricing, ticker)
+    exposures["expiry"] = frame["expiry"]
+    exposures["strike"] = pd.to_numeric(frame["strike"], errors="coerce")
+    by_strike = exposures.groupby(["expiry", "strike"], as_index=False, sort=True)[list(EXPOSURE_COLUMNS)].sum()
+    return by_strike
+
+
 def gamma_exposure_profile(
     df: pd.DataFrame,
     expiry: pd.Timestamp,
