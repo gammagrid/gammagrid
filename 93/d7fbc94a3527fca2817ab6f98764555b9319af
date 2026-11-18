@@ -1,0 +1,182 @@
+CHANGELOG.md
+  s_0c26f770ecd6d1::t_fd2593ee0bcddb 32-35
+  s_0c26f770ecd6d1::t_203a56427b9b5d 10-11,952-953
+UPGRADING.md
+  s_0c26f770ecd6d1::t_203a56427b9b5d 42-47,50-59,64
+  s_3e3b829c826e9e::t_4ac149fbe97b0c 48-49
+  s_0c26f770ecd6d1::t_fd2593ee0bcddb 60-63
+ROADMAP.md
+  s_0c26f770ecd6d1::t_203a56427b9b5d 12,27-28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "0.0.68",
+  "base_commit_sha": "93d7fbc94a3527fca2817ab6f98764555b9319af",
+  "prompts": {},
+  "sessions": {
+    "s_0c26f770ecd6d1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef6e9e18-3503-4909-bada-b501bf4ab9aa",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null,
+      "usage": [
+        {
+          "model": "claude-opus-5-5",
+          "input_tokens": 158,
+          "output_tokens": 52803,
+          "cache_read_tokens": 12402791,
+          "cache_write_5m_tokens": 0,
+          "cache_write_1h_tokens": 102397,
+          "assistant_messages": 61,
+          "turns": 0,
+          "ai_wall_ms": 206296,
+          "first_ts": "2026-11-18T04:24:50.617Z",
+          "last_ts": "2026-11-18T04:53:36.221Z",
+          "session_total_output_tokens": 153278
+        }
+      ],
+      "tools": [
+        {
+          "tool": "Bash",
+          "model": "claude-opus-5-5",
+          "calls": 22,
+          "result_chars": 46815,
+          "result_input_tokens": 50,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 37667,
+          "call_output_tokens": 17011
+        },
+        {
+          "tool": "SendMessage",
+          "model": "claude-opus-5-5",
+          "calls": 3,
+          "result_chars": 1011,
+          "result_input_tokens": 6,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 2894,
+          "call_output_tokens": 2458
+        },
+        {
+          "tool": "Write",
+          "model": "claude-opus-5-5",
+          "calls": 1,
+          "result_chars": 215,
+          "result_input_tokens": 2,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 1902,
+          "call_output_tokens": 1796
+        }
+      ],
+      "accepted_lines": 32,
+      "overridden_lines": 0
+    },
+    "s_3e3b829c826e9e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c3e429bd-da05-4799-a78a-d845c18da87e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null,
+      "usage": [
+        {
+          "model": "claude-opus-5-5",
+          "input_tokens": 320,
+          "output_tokens": 82181,
+          "cache_read_tokens": 18364033,
+          "cache_write_5m_tokens": 0,
+          "cache_write_1h_tokens": 168827,
+          "assistant_messages": 118,
+          "turns": 3,
+          "ai_wall_ms": 406555,
+          "first_ts": "2026-11-18T04:04:47.763Z",
+          "last_ts": "2026-11-18T04:51:19.389Z",
+          "session_total_output_tokens": 93844
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input_tokens": 42,
+          "output_tokens": 11663,
+          "cache_read_tokens": 1571301,
+          "cache_write_5m_tokens": 0,
+          "cache_write_1h_tokens": 191446,
+          "assistant_messages": 19,
+          "turns": 2,
+          "ai_wall_ms": 54474,
+          "first_ts": "2026-11-18T03:39:26.353Z",
+          "last_ts": "2026-11-18T04:04:00.533Z",
+          "skill": "coord",
+          "skill_invocations": 2,
+          "session_total_output_tokens": 93844
+        }
+      ],
+      "tools": [
+        {
+          "tool": "AskUserQuestion",
+          "model": "claude-opus-5-5",
+          "calls": 1,
+          "result_chars": 422,
+          "result_input_tokens": 4,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 3123,
+          "call_output_tokens": 661
+        },
+        {
+          "tool": "Bash",
+          "model": "claude-opus-5-5",
+          "calls": 43,
+          "result_chars": 55809,
+          "result_input_tokens": 86,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 67639,
+          "call_output_tokens": 27119
+        },
+        {
+          "tool": "CronCreate",
+          "model": "claude-opus-5-5",
+          "calls": 2,
+          "result_chars": 339,
+          "result_input_tokens": 2,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 1024,
+          "call_output_tokens": 1626
+        },
+        {
+          "tool": "Read",
+          "model": "claude-opus-5-5",
+          "calls": 4,
+          "result_chars": 0,
+          "result_input_tokens": 8,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 8703,
+          "call_output_tokens": 1073
+        },
+        {
+          "tool": "SendMessage",
+          "model": "claude-opus-5-5",
+          "calls": 18,
+          "result_chars": 6744,
+          "result_input_tokens": 22,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 11900,
+          "call_output_tokens": 15666
+        },
+        {
+          "tool": "ToolSearch",
+          "model": "claude-opus-5-5",
+          "calls": 2,
+          "result_chars": 0,
+          "result_input_tokens": 4,
+          "result_cache_write_5m_tokens": 0,
+          "result_cache_write_1h_tokens": 2248,
+          "call_output_tokens": 465
+        }
+      ],
+      "context_at_start_tokens": 70722,
+      "accepted_lines": 2,
+      "overridden_lines": 0
+    }
+  },
+  "install_id": "28c9ea98-f828-46d5-aadb-a21d4164fb17"
+}
