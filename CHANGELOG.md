@@ -26,7 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Computed on the page from the snapshot already loaded, like the GEX chart
     beside it: nothing new is stored and there is no migration.
 
+### Fixed
+- The Max Pain / GEX view measures time to expiry to the series' own
+  settlement: an AM-settled index monthly (SPX, NDX, RUT, DJX) is read to the
+  09:30 open, as its numbers are computed, so "no gamma left" and charm's "to
+  the close" no longer appear hours late or early on its expiration week.
+
 ### Changed
+- Streamlit 1.40 or later is required (was 1.35): the views already use
+  `st.segmented_control`, which first shipped in 1.40, and the new switch
+  aligns its row with `st.columns(vertical_alignment=...)` from 1.36.
 - The shared formulas (`app/metrics_core.py`, sha256 `723fddff…`) take an
   optional charm horizon in `dealer_exposures`; without it the result is
   unchanged to the bit. Day rows written by the previous formulas are rebuilt

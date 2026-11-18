@@ -1496,11 +1496,17 @@ if active_view == "Max Pain / GEX":
     # right above it showed a number (it needs only open interest). Default to
     # the first expiry that still has time left instead; the others stay in the
     # list, labelled, because looking at them is legitimate.
-    has_time_left = [e for e in expiries if metrics.years_to_expiry(e, latest_date) > 0]
+    # Measured with the ticker, as the core prices it: an AM-settled index
+    # monthly (SPX, NDX, RUT, DJX) settles at the 09:30 open, not the 16:00
+    # close, so without it the labels below and charm's "to the close" would
+    # be read against a moment the numbers were not computed for.
+    has_time_left = [
+        e for e in expiries if metrics.years_to_expiry(e, latest_date, ticker=selected_ticker) > 0
+    ]
     default_expiry_index = expiries.index(has_time_left[0]) if has_time_left else 0
 
     def format_gex_expiry(expiry) -> str:
-        if metrics.years_to_expiry(expiry, latest_date) > 0:
+        if metrics.years_to_expiry(expiry, latest_date, ticker=selected_ticker) > 0:
             return format_date(expiry)
         return f"{format_date(expiry)}  ⚠️ no gamma left"
 
@@ -1511,7 +1517,7 @@ if active_view == "Max Pain / GEX":
         # ticker doesn't trade that date every chart below filters to nothing.
         key=f"expiry_pain_gex_{selected_ticker}",
     )
-    years_left = metrics.years_to_expiry(selected_expiry, latest_date)
+    years_left = metrics.years_to_expiry(selected_expiry, latest_date, ticker=selected_ticker)
 
     st.subheader("Max Pain")
     mp = metrics.max_pain(latest_df, selected_expiry)
