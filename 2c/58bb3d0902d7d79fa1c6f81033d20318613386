@@ -1,0 +1,22 @@
+requirements.txt
+  s_0c26f770ecd6d1::t_a7458aa710a0bc 11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "0.0.68",
+  "base_commit_sha": "2c58bb3d0902d7d79fa1c6f81033d20318613386",
+  "prompts": {},
+  "sessions": {
+    "s_0c26f770ecd6d1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef6e9e18-3503-4909-bada-b501bf4ab9aa",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ggrid-io <hello@gammagrid.io>",
+      "accepted_lines": 1,
+      "overridden_lines": 0
+    }
+  },
+  "install_id": "28c9ea98-f828-46d5-aadb-a21d4164fb17"
+}
