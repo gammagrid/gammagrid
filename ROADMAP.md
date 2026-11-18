@@ -9,7 +9,7 @@ page is about direction.
 
 ## Shipped so far
 
-Through v0.10.0. The list below is what the tool does today, not a history —
+Through v0.11.0. The list below is what the tool does today, not a history —
 the changelog has the history.
 
 - Multi-ticker watchlist, collected on demand or on a schedule you choose —
@@ -24,7 +24,8 @@ the changelog has the history.
   and DJX alongside the ETFs
 - Put/Call Ratio, Max Pain, approximate dealer GEX (profile + strike × expiry
   heatmap with Call/Put Walls on their own side of the price, a Gamma Flip
-  found by re-pricing the chain at nearby prices, Replay)
+  found by re-pricing the chain at nearby prices, Replay), with DEX, vanna and
+  charm by strike beside the GEX profile
 - IV surface, skew slice, volume-weighted average IV — with implied volatility
   solved from the contract's price rather than taken from the data source, and
   the source's in-the-money placeholders filled from the smile

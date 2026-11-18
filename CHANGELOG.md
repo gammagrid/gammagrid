@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-18
+
 ### Added
 - **DEX, vanna and charm next to GEX.** The Max Pain / GEX view has a switch
   above the by-strike chart — GEX · DEX · Vanna · Charm — for the selected
@@ -27,10 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     beside it: nothing new is stored and there is no migration.
 
 ### Fixed
-- The Max Pain / GEX view measures time to expiry to the series' own
-  settlement: an AM-settled index monthly (SPX, NDX, RUT, DJX) is read to the
-  09:30 open, as its numbers are computed, so "no gamma left" and charm's "to
-  the close" no longer appear hours late or early on its expiration week.
+- Charm's "to the close" now follows the 09:30 settlement of SPX, NDX, RUT and
+  DJX monthlies, as the numbers are computed: on the Thursday before such an
+  expiry, from 09:30 to 16:00 ET, the view said "per day" for a charm already
+  counted to the next morning's open.
 
 ### Changed
 - Streamlit 1.40 or later is required (was 1.35): the views already use
@@ -947,7 +949,8 @@ Initial public release — see the [Roadmap](ROADMAP.md) for what's next.
 - Docker / Docker Compose quick start; GammaGrid brand theme (`.streamlit/config.toml`)
 - AGPL-3.0 license
 
-[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.10.0...main
+[Unreleased]: https://github.com/gammagrid/gammagrid/compare/v0.11.0...main
+[0.11.0]: https://github.com/gammagrid/gammagrid/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/gammagrid/gammagrid/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/gammagrid/gammagrid/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/gammagrid/gammagrid/compare/v0.7.0...v0.8.0

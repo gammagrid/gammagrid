@@ -39,6 +39,29 @@ touched by the move and is still the backup for those versions.)*
 | **One-way** | The database is changed in a way an older version does not understand. Going back needs the backup. Your collected rows are still there and still correct. |
 | **Destructive** | Something is rewritten or removed. Back up first, read the entry in full. **No release has been in this category, and the project's first rule is that collected data is never deleted** — if one ever appears here, it will say exactly what goes. |
 
+## v0.10.0 → v0.11.0
+
+**Risk: safe. No migration; nothing in the database is rewritten or deleted.**
+
+**What you may notice on the first run.**
+
+- **Streamlit 1.40 or later.** `docker compose up --build` installs it with
+  the image. Running from a virtualenv, upgrade it with
+  `pip install -r requirements.txt`; an older Streamlit cannot draw the view
+  switch, which already needed 1.40.
+- **The Max Pain / GEX view has a DEX · Vanna · Charm switch.** It is computed
+  on the page from the snapshot already loaded, as the GEX chart is, so there
+  is nothing to backfill: every snapshot you have shows the three at once. GEX
+  stays the default and looks as before.
+- **The worker rebuilds the Changes rows once.** This release changes the
+  shared formulas, so rows recorded with the older `CODE_SHA` are rebuilt from
+  the stored snapshots at the worker's next start, up to 45 days back
+  (`DAY_SUMMARY_BACKFILL_DAYS`). Nothing they show changes meaning.
+- **Charm on an index monthly's eve.** Charm's "to the close" now follows the
+  09:30 settlement of SPX, NDX, RUT and DJX monthlies: on the Thursday before
+  one, from 09:30 to 16:00 ET, the Charm switch reads "to the close" where it
+  read "per day".
+
 ## v0.9.0 → v0.10.0
 
 **Risk: safe. No migration; nothing in the database is rewritten or deleted.**
