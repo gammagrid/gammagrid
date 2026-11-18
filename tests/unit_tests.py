@@ -3415,6 +3415,13 @@ def check_dealer_greeks_profile_is_one_expiry_of_the_core():
     assert not metrics.charm_to_the_close(day)          # a full day: per day, as everywhere else
     assert not metrics.charm_to_the_close(30 * day)
     assert not metrics.charm_to_the_close(0.0)          # settled: nothing left to count
+    # Read with the ticker, as the view does: an AM-settled monthly is under a
+    # day from its 09:30 open on Thursday afternoon, while the same date read
+    # to the 16:00 close is still over a day away.
+    thursday = pd.Timestamp("2026-11-19 18:00")         # 13:00 ET
+    monthly = pd.Timestamp("2026-11-20")                # third Friday, SPX settles at the open
+    assert metrics.charm_to_the_close(metrics.years_to_expiry(monthly, thursday, ticker="SPX"))
+    assert not metrics.charm_to_the_close(metrics.years_to_expiry(monthly, thursday))
     print("ok  dealer greeks by strike for one expiry, charm to the close under a day")
 
 
