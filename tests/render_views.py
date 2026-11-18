@@ -530,6 +530,62 @@ def check_dealer_greeks_on_screen(AppTest, db) -> list[str]:
     return failures
 
 
+def check_am_monthly_charm_on_screen(AppTest, db) -> list[str]:
+    """An SPX monthly settles at the 09:30 open, and the view's words follow
+    the core's horizon rather than the 16:00 close. Three collections, all
+    literals, the latest one read each time: Thursday 09:00 ET (25.5 hours to
+    the open — a full day, "per day"), Thursday 13:00 ET (20.5 hours to the
+    open, 27 to the close — counted to settlement), Friday 08:00 ET (before the
+    open — counted to settlement), Friday 11:00 ET (the monthly has settled;
+    what is still listed for the date is the PM weekly, five hours to the
+    close — still the default expiry, not "no gamma left"). The ticker has to
+    be SPX itself: the settlement rule is keyed by the index, and this
+    database is disposable."""
+    failures = []
+    conn = db.get_connection()
+    db.add_ticker(conn, "SPX")
+    expiry = "2026-11-20"                                   # third Friday of November
+    rows = [{"expiry": listed, "strike": strike, "option_type": option_type,
+             "last_price": 20.0, "bid": 19.5, "ask": 20.5, "volume": 100, "open_interest": 1000,
+             "implied_volatility": 0.15,
+             "in_the_money": strike < 6000 if option_type == "call" else strike > 6000}
+            for listed in (expiry, "2026-11-27")
+            for strike in (5950.0, 6000.0, 6050.0) for option_type in ("call", "put")]
+    cases = (
+        (datetime(2026, 11, 19, 14, 0), "per day", False),       # Thursday 09:00 ET
+        (datetime(2026, 11, 19, 18, 0), "to the close", True),   # Thursday 13:00 ET
+        (datetime(2026, 11, 20, 13, 0), "to the close", True),   # Friday 08:00 ET, before the open
+        (datetime(2026, 11, 20, 16, 0), "to the close", True),   # Friday 11:00 ET, after the open
+    )
+    for moment, words, noted in cases:
+        db.insert_snapshot(conn, "SPX", moment, 6000.0, pd.DataFrame(rows))
+        conn.commit()
+        app = AppTest.from_file(DASHBOARD, default_timeout=300)
+        app.session_state["selected_ticker"] = "SPX"
+        app.session_state["active_view"] = "Max Pain / GEX"
+        app.session_state["exposure_metric"] = "Charm"
+        app.run()
+        label = f"SPX monthly · {moment:%a %H:%M} UTC"
+        if app.exception:
+            failures.append(f"{label}: {app.exception[0].value}")
+            continue
+        box = app.selectbox(key="expiry_pain_gex_SPX")
+        chosen = str(box.value)[:10]
+        shown = box.format_func(box.value) if box.format_func else str(box.value)
+        line = next((i.value for i in app.info if "Net charm" in i.value), "")
+        has_note = any("counted to the close" in c.value for c in app.caption)
+        before = len(failures)
+        if chosen != expiry or "no gamma left" in shown:
+            failures.append(f"{label}: default expiry {chosen} shown as {shown!r}, want {expiry} with time left")
+        if words not in line:
+            failures.append(f"{label}: charm should read {words!r} (settles 09:30 ET), got {line!r}")
+        if has_note != noted:
+            failures.append(f"{label}: the 'counted to the close' note is {'missing' if noted else 'shown'}")
+        print(f"  {label:<26} {'ok' if len(failures) == before else 'WRONG'}")
+    conn.close()
+    return failures
+
+
 def main():
     problems = check_no_cross_view_names()
     if problems:
@@ -658,6 +714,7 @@ def main():
 
         # The same view, held to its numbers on a fixture of its own.
         failures.extend(check_dealer_greeks_on_screen(AppTest, db))
+        failures.extend(check_am_monthly_charm_on_screen(AppTest, db))
 
     if failures:
         print("\nRENDER CHECKS FAILED:")
