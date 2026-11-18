@@ -1345,7 +1345,12 @@ def _black_scholes_delta(spot, strike, years, iv, rate, is_put, dividend_yield) 
     return np.where(is_put, carry_discount * (_norm_cdf(d1) - 1), carry_discount * _norm_cdf(d1))
 
 
-def _contract_exposures(frame: pd.DataFrame, pricing: PricingInputs, ticker: str | None = None) -> pd.DataFrame:
+def _contract_exposures(
+    frame: pd.DataFrame,
+    pricing: PricingInputs,
+    ticker: str | None = None,
+    charm_horizon_years: float | None = None,
+) -> pd.DataFrame:
     """GEX, DEX, vanna and charm exposure for every row of `frame`, from ONE
     batched greeks call — the batch already returns delta and vanna next to
     gamma, so a second call would only double the work.
@@ -1366,7 +1371,12 @@ def _contract_exposures(frame: pd.DataFrame, pricing: PricingInputs, ticker: str
       charm  s * (delta(T - h) - delta(T)) * OI * 100 * S,  h = min(1 day, T)
              dealer dollar delta change over the next calendar day (or to
              expiry, if that comes sooner) at unchanged spot, IV and dividend
-             yield; the rate is the curve's at T - h.
+             yield; the rate is the curve's at T - h. `charm_horizon_years`
+             replaces the one day with another horizon in the same wall-clock
+             years (a scalar for the moment, or one per row) — for example the
+             time to the next regular-session open, which the caller takes
+             from its own exchange calendar; h stays min(horizon, T). None
+             keeps one calendar day, to the bit.
 
     WHY CHARM IS A DIFFERENCE AND NOT THE ANALYTIC RATE. The analytic charm,
     times 1/365, is the instantaneous rate of the delta's decay, and that rate
@@ -1424,7 +1434,8 @@ def _contract_exposures(frame: pd.DataFrame, pricing: PricingInputs, ticker: str
 
     with np.errstate(invalid="ignore"):
         valid = (t_ > 0) & (iv_ > 0) & (s_ > 0)
-    later_t = t_ - np.minimum(t_, _CHARM_HORIZON_YEARS)
+    horizon = _CHARM_HORIZON_YEARS if charm_horizon_years is None else charm_horizon_years
+    later_t = t_ - np.minimum(t_, horizon)
     priced = valid & (later_t > 0)
     at_strike = 0.5 * (s_ == k_)
     payoff_delta = np.where(is_put, -(s_ < k_).astype(float) - at_strike, (s_ > k_).astype(float) + at_strike)
@@ -1440,15 +1451,21 @@ def _contract_exposures(frame: pd.DataFrame, pricing: PricingInputs, ticker: str
     return pd.DataFrame({"gex": gex, "dex": dex, "vanna": vanna, "charm": charm}, index=frame.index)
 
 
-def dealer_exposures(frame: pd.DataFrame, pricing: PricingInputs, ticker: str | None = None) -> pd.DataFrame:
+def dealer_exposures(
+    frame: pd.DataFrame,
+    pricing: PricingInputs,
+    ticker: str | None = None,
+    charm_horizon_years: float | None = None,
+) -> pd.DataFrame:
     """GEX, DEX, vanna and charm exposure by (expiry, strike) — the per-contract
     columns of `_contract_exposures` summed within each strike of each expiry.
 
     `frame` is one moment of a chain (any number of expiries); totals over a set
     of expiries are sums of these rows. The `gex` column equals `_contract_gex`
     grouped the same way, exactly — this is the same GEX, with three more
-    exposures from the same greeks call (plus one delta for the charm horizon)."""
-    exposures = _contract_exposures(frame, pricing, ticker)
+    exposures from the same greeks call (plus one delta for the charm horizon).
+    `charm_horizon_years` is passed through to `_contract_exposures`."""
+    exposures = _contract_exposures(frame, pricing, ticker, charm_horizon_years)
     exposures["expiry"] = frame["expiry"]
     exposures["strike"] = pd.to_numeric(frame["strike"], errors="coerce")
     by_strike = exposures.groupby(["expiry", "strike"], as_index=False, sort=True)[list(EXPOSURE_COLUMNS)].sum()
