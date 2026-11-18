@@ -3550,7 +3550,9 @@ def check_dealer_exposures_charm_horizon():
     base = core._contract_exposures(chain, pricing, _QA_TICKER)
     for i, row in chain.iterrows():
         want = _qa_expected(row, rate, q, three)["charm"]
-        assert abs(per.loc[i, "charm"] - want) <= 1e-9 * abs(want), (row["strike"], per.loc[i, "charm"], want)
+        assert abs(per.loc[i, "charm"] - want) <= 1e-9 * abs(want), (
+            f"three-day horizon, K={row['strike']} {row['option_type']}: charm {per.loc[i, 'charm']!r}, "
+            f"the definition over three days gives {want!r}")
     for col in ("gex", "dex", "vanna"):
         assert np.array_equal(per[col].to_numpy(), base[col].to_numpy()), f"the horizon moved {col}"
     assert not np.allclose(per["charm"], base["charm"]), "a three-day horizon gave the one-day charm"
@@ -3559,7 +3561,9 @@ def check_dealer_exposures_charm_horizon():
     beyond = core._contract_exposures(chain, pricing, _QA_TICKER, charm_horizon_years=60 * _QA_DAY)
     for i, row in chain.iterrows():
         want = _qa_expected(row, rate, q, 1e9)["charm"]
-        assert abs(beyond.loc[i, "charm"] - want) <= 1e-9 * abs(want), (row["strike"], beyond.loc[i, "charm"], want)
+        assert abs(beyond.loc[i, "charm"] - want) <= 1e-9 * abs(want), (
+            f"horizon past expiry, K={row['strike']} {row['option_type']}: charm {beyond.loc[i, 'charm']!r}, "
+            f"the payoff delta gives {want!r}")
 
     # One horizon per row is the same as each row's scalar.
     horizons = np.array([_QA_DAY, 2 * _QA_DAY, 0.5 * _QA_DAY, 3 * _QA_DAY, 7 * _QA_DAY])
@@ -3658,15 +3662,18 @@ def check_day_rows_follow_the_shared_core():
 
     from app import day_summary
 
+    # Named here, not read from `_FORMULA_FILES`: the list itself is what is
+    # under test, and a core dropped from it must fail this check.
+    formula_files = ("metrics_core.py", "metrics.py", "day_summary.py")
     with tempfile.TemporaryDirectory() as folder:
         copy = Path(folder)
-        for name in day_summary._FORMULA_FILES:
+        for name in formula_files:
             shutil.copy(day_summary._HERE / name, copy / name)
         real = day_summary._HERE
         try:
             day_summary._HERE = copy
             assert day_summary._code_sha() == day_summary.CODE_SHA, "the copy is not the running code"
-            for name in day_summary._FORMULA_FILES:
+            for name in formula_files:
                 original = (copy / name).read_bytes()
                 (copy / name).write_bytes(original + b"\n")
                 changed = day_summary._code_sha()
