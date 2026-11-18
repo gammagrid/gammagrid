@@ -48,6 +48,7 @@ from app.metrics_core import (
     contract_greeks_history,
     contract_price_for_iv,
     contracts_backing_expiry,
+    dealer_exposures,
     dealer_walls,
     expiry_rollup,
     gamma_exposure_profile,
@@ -356,6 +357,50 @@ def wall_label(level, side: str, spec: str = ",.2f") -> str:
     return format(float(level), spec)
 
 
+# --- dealer greeks by strike -------------------------------------------------
+# DEX, vanna and charm next to GEX on the Max Pain / GEX view. GEX itself is
+# not read from here: that chart keeps `gamma_exposure_profile`, so the view
+# a person already knows does not move by a single dollar.
+DEALER_GREEKS = ("dex", "vanna", "charm")
+
+
+def dealer_greeks_profile(
+    df: pd.DataFrame,
+    expiry,
+    pricing: PricingInputs = DEFAULT_PRICING,
+    as_of: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """DEX, vanna and charm exposure by strike for one expiry of one snapshot,
+    in dollars — columns `strike`, `dex`, `vanna`, `charm`.
+
+    One call of the core's `dealer_exposures` on that expiry's rows: the four
+    exposures come out of a single greeks batch, so the three shown here cost
+    one extra delta per contract (charm's horizon), not three more passes.
+
+    DEX is the net delta of open interest in the market convention (put delta
+    negative, no dealer sign); vanna and charm are in the same dealer model as
+    GEX — dealers assumed long calls and short puts — per +1 point of implied
+    volatility and over min(one calendar day, time to expiry). Divide DEX by
+    the underlying price for shares. Empty when the snapshot holds no rows for
+    the expiry, the same as `gamma_exposure_profile`."""
+    columns = ["strike", *DEALER_GREEKS]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+    moment = as_of if as_of is not None else df["collected_at"].max()
+    snapshot = df[(df["collected_at"] == moment) & (df["expiry"] == expiry)]
+    if snapshot.empty:
+        return pd.DataFrame(columns=columns)
+    return dealer_exposures(snapshot, pricing)[columns].reset_index(drop=True)
+
+
+def charm_to_the_close(years_left: float) -> bool:
+    """Whether charm for an expiry is counted to its settlement rather than over
+    a full day: the core's horizon is min(one calendar day, time to expiry), so
+    an expiry settling within a day — and still alive — is measured to the
+    close, and its bars near the price grow sharply in the last hours."""
+    return 0 < years_left * 365 < 1
+
+
 # Re-exports, including the underscore-prefixed helpers: `app.metrics` stays the
 # single entry point for callers and tests, so moving a function into the core
 # must not force every call site to learn where it went. Listing them here is
@@ -367,7 +412,10 @@ __all__ = [
     "WEATHER_RAIN",
     "WEATHER_STORM",
     "WEATHER_UNSETTLED",
+    "DEALER_GREEKS",
     "atm_implied_volatility",
+    "charm_to_the_close",
+    "dealer_greeks_profile",
     "expected_move",
     "gamma_weather",
     "weather_expiries",
@@ -392,6 +440,7 @@ __all__ = [
     "contract_greeks_history",
     "contract_price_for_iv",
     "contracts_backing_expiry",
+    "dealer_exposures",
     "dealer_walls",
     "expiry_rollup",
     "gamma_exposure_profile",

@@ -8,7 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- core: dealer exposures function (not yet shown)
+- **DEX, vanna and charm next to GEX.** The Max Pain / GEX view has a switch
+  above the by-strike chart — GEX · DEX · Vanna · Charm — for the selected
+  expiry, with the net figure as a sentence, its unit, and a "How to read
+  this" for each. GEX is the default and the view looks as before until you
+  switch.
+  - **DEX** is the net delta of open interest in dollars of stock (shares on
+    hover): calls count positive, puts negative, with no dealer assumption.
+    Under the dealer model GEX uses (long calls, short puts) dealer delta is
+    never negative, so it would say nothing about direction.
+  - **Vanna** is how much dealer delta changes, in dollars, if implied
+    volatility rises one point; **charm** is how much it changes over one
+    calendar day with price and volatility held. Both use the same dealer sign
+    heuristic as GEX and do not reflect actual market-maker positioning.
+  - For an expiry that settles within a day, charm is counted to the close
+    rather than over a day, which keeps it bounded on expiration day.
+  - Computed on the page from the snapshot already loaded, like the GEX chart
+    beside it: nothing new is stored and there is no migration.
+
+### Changed
+- The shared formulas (`app/metrics_core.py`, sha256 `723fddff…`) take an
+  optional charm horizon in `dealer_exposures`; without it the result is
+  unchanged to the bit. Day rows written by the previous formulas are rebuilt
+  by the worker on its next daily pass, as far back as
+  `DAY_SUMMARY_BACKFILL_DAYS` reaches (45 days by default).
 
 ## [0.10.0] - 2026-11-13
 

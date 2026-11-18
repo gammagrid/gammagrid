@@ -191,6 +191,8 @@ gets longer.
 
 - **Dealer gamma exposure (GEX)** — per-expiry profile and a strike × expiry
   heatmap, with Call Wall / Put Wall, Gamma Flip level, and historical Replay
+- **DEX, vanna and charm** by strike next to GEX — net delta of open
+  interest, and how dealer delta would move with implied volatility and with time
 - **Max Pain** for any expiry
 - **Open interest**, including day-over-day OI Delta sorted by the size of the move
 - **IV surface** (3D volatility surface) plus per-expiry skew and
@@ -248,7 +250,7 @@ And, because every snapshot is kept:
    without you, pick an interval under **Collect automatically** (see below).
 3. Pick a ticker in the dropdown above the tabs to open the metrics:
    - **Overview** — Put/Call Ratio over time and the IV surface
-   - **Max Pain / GEX** — max pain and the approximate gamma-exposure profile for a selected expiry
+   - **Max Pain / GEX** — max pain and the approximate gamma-exposure profile for a selected expiry, switchable to DEX, vanna or charm
    - **GEX Heatmap** — strike × expiry GEX matrix with Call/Put Walls, Gamma Flip, and snapshot Replay
    - **Volatility (IV)** — ticker-average IV over time and a chain skew slice
    - **Contract** — price, IV, and greeks history for a specific contract, with pinning

@@ -3211,8 +3211,9 @@ def _exposure_chain(at, ivs, oi, spot=100.0, expiry="2026-12-18"):
 
 def check_dealer_exposures_in_one_greeks_batch():
     """`dealer_exposures`: GEX, DEX, vanna, charm by (expiry, strike) from one
-    greeks call. Nothing in this product calls it yet; it is part of the shared
-    core, so it is checked here. The totals are frozen reference values
+    greeks call. The Max Pain / GEX view reads it through
+    `metrics.dealer_greeks_profile` (checked below); the core function itself is
+    checked here. The totals are frozen reference values
     computed independently from the definitions, not values read back from
     this code."""
     from app import metrics_core as core
@@ -3369,6 +3370,54 @@ def check_dealer_exposures_in_one_greeks_batch():
     print("dealer exposures: reference totals, GEX parity |delta| = 0, one batch, one-day charm continuous and bounded")
 
 
+def check_dealer_greeks_profile_is_one_expiry_of_the_core():
+    """`dealer_greeks_profile`: the core's DEX, vanna and charm for the rows of
+    one expiry at one moment — the same numbers as `dealer_exposures` on the
+    whole chain, filtered afterwards, on the same strikes as the GEX chart
+    beside it. And `charm_to_the_close`: under a day left, and still alive."""
+    from app import metrics
+    from app import metrics_core as core
+
+    close = pd.Timestamp("2026-12-18 21:00")
+    ivs = {95: .23, 100: .20, 105: .21}
+    oi = {"call": {95: 1500, 100: 4000, 105: 6000}, "put": {95: 7000, 100: 4000, 105: 1500}}
+    expiry = pd.Timestamp("2026-12-18")                 # the date the chain lists
+    now = close - pd.Timedelta(days=30)
+    chain = pd.concat([
+        _exposure_chain(now - pd.Timedelta(days=1), ivs, oi),   # an older moment, ignored
+        _exposure_chain(now, ivs, oi),
+        _exposure_chain(now, ivs, oi, expiry="2027-01-15"),
+    ], ignore_index=True)
+    pricing = core.PricingInputs(curve={0.0: 4.0, 60.0: 4.0}, dividend_yield=0.01)
+
+    got = metrics.dealer_greeks_profile(chain, expiry, pricing)
+    assert list(got.columns) == ["strike", "dex", "vanna", "charm"], list(got.columns)
+    latest = chain[chain["collected_at"] == now]
+    whole = core.dealer_exposures(latest, pricing)
+    want = whole[whole["expiry"] == expiry].reset_index(drop=True)
+    assert got["strike"].tolist() == [95.0, 100.0, 105.0], got["strike"].tolist()
+    for column in metrics.DEALER_GREEKS:
+        assert np.allclose(got[column].to_numpy(), want[column].to_numpy(), rtol=0, atol=1e-6), column
+    # The bars line up with the GEX chart's: the same strikes, in the same order.
+    gex = metrics.gamma_exposure_profile(chain, expiry, pricing)
+    assert gex["strike"].tolist() == got["strike"].tolist()
+    # DEX is the market convention: calls positive, puts negative.
+    calls = metrics.dealer_greeks_profile(latest[latest["option_type"] == "call"], expiry, pricing)
+    puts = metrics.dealer_greeks_profile(latest[latest["option_type"] == "put"], expiry, pricing)
+    assert (calls["dex"] > 0).all() and (puts["dex"] < 0).all()
+    # A choice the snapshot does not hold, and no snapshot at all, are empty.
+    for empty in (metrics.dealer_greeks_profile(chain, pd.Timestamp("2030-01-18"), pricing),
+                  metrics.dealer_greeks_profile(chain.iloc[0:0], expiry, pricing)):
+        assert empty.empty and list(empty.columns) == ["strike", "dex", "vanna", "charm"]
+
+    day = 1 / 365
+    assert metrics.charm_to_the_close(0.5 * day)
+    assert not metrics.charm_to_the_close(day)          # a full day: per day, as everywhere else
+    assert not metrics.charm_to_the_close(30 * day)
+    assert not metrics.charm_to_the_close(0.0)          # settled: nothing left to count
+    print("ok  dealer greeks by strike for one expiry, charm to the close under a day")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -3434,6 +3483,7 @@ def main():
     check_stored_chains_reach_the_am_rule()
     check_dealer_walls_side_and_window()
     check_dealer_exposures_in_one_greeks_batch()
+    check_dealer_greeks_profile_is_one_expiry_of_the_core()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

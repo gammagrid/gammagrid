@@ -405,6 +405,168 @@ def style_gex_matrix(matrix: pd.DataFrame, atm_strike: float | None = None):
     return styler
 
 
+# --- dealer greeks on the Max Pain / GEX view --------------------------------
+# Headings, captions and explanations per metric. GEX keeps its own words.
+EXPOSURE_TITLE = {
+    "GEX": "Approximate Gamma Exposure (GEX)",
+    "DEX": "Net delta of open interest (DEX)",
+    "Vanna": "Vanna exposure",
+    "Charm": "Charm exposure",
+}
+EXPOSURE_CAPTION = {
+    "GEX": (
+        "Estimated via the Black-Scholes formula and a sign heuristic (puts contribute "
+        "negatively). Does not reflect actual market-maker positioning — an approximation only."
+    ),
+    "DEX": (
+        "Delta of every open call minus every open put, in dollars of stock — calls count "
+        "positive, puts negative, no dealer assumption. Unit: delta × open interest × 100 × "
+        "price; hover a bar for shares."
+    ),
+    "Vanna": (
+        "Estimated via Black-Scholes and the same sign heuristic as GEX (dealers long calls, "
+        "short puts) — not actual market-maker positioning. Unit: dollars of dealer delta per "
+        "1-point rise in implied volatility."
+    ),
+    "Charm": (
+        "Estimated via Black-Scholes and the same sign heuristic as GEX — not actual "
+        "market-maker positioning. Unit: change in dollars of dealer delta over one calendar "
+        "day, price and IV held; for a contract expiring today, over the time left to the close."
+    ),
+}
+EXPOSURE_HOW_TO_READ = {
+    "GEX": (
+        "Positive total gamma — the market as a whole is more \"sticky\", range-bound: "
+        "dealer hedging dampens sharp moves. Negative — moves can accelerate, since "
+        "hedging works in the same direction as the trend. On the by-strike chart, the "
+        "largest bars by magnitude often become support/resistance levels created by "
+        "hedging flows, especially closer to the expiry date."
+    ),
+    "DEX": (
+        "Net delta of open interest shows which way the open contracts lean. Positive — open "
+        "interest leans to calls; negative — to puts. It counts every contract the same way "
+        "whoever holds it, so it describes positioning, not who will hedge. The tallest bars "
+        "are the strikes where most of that delta sits; as price crosses them, the total can "
+        "swing quickly."
+    ),
+    "Vanna": (
+        "Vanna shows how hedging would move if implied volatility changed while price stood "
+        "still. Positive bars: a rise in IV leaves dealers longer and they sell to rebalance; a "
+        "fall in IV makes them buy back — the reason a volatility crush can push price up. "
+        "Negative bars work the other way. Dealer sign is a heuristic: dealers are assumed long "
+        "calls and short puts."
+    ),
+    "Charm": (
+        "Charm shows how hedging drifts with time alone. Negative — dealer delta shrinks by "
+        "tomorrow and they buy to stay hedged; positive — it grows and they sell. The effect "
+        "builds toward expiry: on the expiry day the horizon is the close, so bars near the "
+        "price get much larger. Dealer sign is a heuristic: dealers are assumed long calls and "
+        "short puts."
+    ),
+}
+_GREEK_COLUMN = {"DEX": "dex", "Vanna": "vanna", "Charm": "charm"}
+
+
+def signed_money(value: float) -> str:
+    """A dollar figure with its sign always shown and a real minus: +$1.60M,
+    −$12.40K — the unit following the size, as net GEX does in the summary."""
+    return f"{'−' if value < 0 else '+'}${weather.format_gex(abs(value), signed=False)}"
+
+
+def exposure_units(metric: str, closing: bool) -> str:
+    """What one unit of a dealer greek is, as the words after its number."""
+    if metric == "Vanna":
+        return " per 1 IV pt"
+    if metric == "Charm":
+        return " to the close" if closing else " per day"
+    return ""
+
+
+def exposure_sign_words(metric: str, value: float, closing: bool) -> str:
+    """What the sign of a net figure means. For vanna and charm that is what
+    hedging does about the change — the opposite of the change in dealer delta."""
+    up = value >= 0
+    if metric == "DEX":
+        return "open interest leans to calls" if up else "open interest leans to puts"
+    if metric == "Vanna":
+        return (
+            "if IV rises, dealer delta grows and hedging sells; if IV falls, it buys" if up
+            else "if IV rises, dealer delta shrinks and hedging buys; if IV falls, it sells"
+        )
+    when = "by the close" if closing else "by tomorrow"
+    return (
+        f"with price and IV unchanged, dealer delta grows {when} and hedging sells" if up
+        else f"with price and IV unchanged, dealer delta shrinks {when} and hedging buys"
+    )
+
+
+def render_dealer_greek(metric: str, frame: pd.DataFrame, expiry, years_left: float, as_of) -> None:
+    """DEX, vanna or charm of one expiry: the net figure as a sentence and the
+    bars by strike, coloured by sign like GEX. Computed here from the snapshot
+    already in hand, as the GEX chart beside it is."""
+    if years_left <= 0:
+        st.info(
+            f"⚠️ This expiry ({format_date(expiry)}) has no time left as of the latest "
+            f"collection ({format_datetime(as_of)}), so DEX, vanna and charm are not computed. "
+            "Pick a later expiry. Max Pain above is unaffected: it is computed from open "
+            "interest alone."
+        )
+        return
+    column = _GREEK_COLUMN[metric]
+    profile = metrics.dealer_greeks_profile(frame, expiry)
+    values = pd.to_numeric(profile[column], errors="coerce")
+    if not values.notna().any():
+        st.info(f"No data to compute {metric} for the selected expiry.")
+        return
+    closing = metric == "Charm" and metrics.charm_to_the_close(years_left)
+    net = float(values.sum())
+    snapshot = frame[frame["collected_at"] == frame["collected_at"].max()]
+    spot = float(pd.to_numeric(snapshot["underlying_price"], errors="coerce").iloc[0])
+    held = (
+        f" (≈ {weather.format_gex(abs(net / spot), signed=False)} shares)"
+        if metric == "DEX" and spot > 0 else ""
+    )
+    model = " Model: dealers assumed long calls and short puts." if metric != "DEX" else ""
+    # `$` is escaped: Streamlit reads a pair of them as inline maths.
+    st.info(
+        f"Net {metric if metric == 'DEX' else metric.lower()} "
+        f"**{signed_money(net)}**{held}{exposure_units(metric, closing)} — "
+        f"{exposure_sign_words(metric, net, closing)}.{model}".replace("$", "\\$")
+    )
+    if closing:
+        st.caption(
+            "This expiry settles within a day, so charm is counted to the close, not over a "
+            "full day — bars near the price grow sharply in the last hours."
+        )
+    unit = {"DEX": "DEX ($)", "Vanna": "Vanna ($ per 1 IV pt)",
+            "Charm": "Charm ($ to the close)" if closing else "Charm ($ per day)"}[metric]
+    values = values.fillna(0.0)
+    chart = profile.assign(
+        value=values,
+        sign=np.where(values >= 0, "Positive", "Negative"),
+        shown=[
+            signed_money(v) + (f" · {weather.format_gex(abs(v / spot), signed=False)} shares"
+                               if metric == "DEX" and spot > 0 else "")
+            for v in values
+        ],
+    )
+    st.altair_chart(
+        alt.Chart(chart)
+        .mark_bar()
+        .encode(
+            x=alt.X("strike:O", title="Strike"),
+            y=alt.Y("value:Q", title=unit),
+            color=alt.Color(
+                "sign:N",
+                scale=alt.Scale(domain=["Positive", "Negative"], range=[BRAND_GREEN, BRAND_PURPLE]),
+                legend=None,
+            ),
+            tooltip=[alt.Tooltip("strike:O", title="Strike"), alt.Tooltip("shown:N", title=metric)],
+        ),
+        use_container_width=True,
+    )
+
+
 def render_tradingview_widget(ticker: str, height: int = 300) -> str:
     """Auxiliary visualization (not a data source for the app — the focus stays
     on options analytics). The ticker is passed as-is, with no exchange-prefix
@@ -1363,57 +1525,68 @@ if active_view == "Max Pain / GEX":
             "tendency that fundamental news can override."
         )
 
-    st.subheader("Approximate Gamma Exposure (GEX)")
-    gex = metrics.gamma_exposure_profile(latest_df, selected_expiry)
-    if years_left <= 0:
-        # Say why, instead of drawing a flat line at zero. Gamma is undefined
-        # once there is no time left, so this is a property of the contract,
-        # not a gap in the data — which is also why Max Pain above still shows
-        # a number: it is computed from open interest alone.
-        st.info(
-            f"⚠️ This expiry ({format_date(selected_expiry)}) has no time left as of the "
-            f"latest collection ({format_datetime(latest_date)}), so gamma — and therefore "
-            "GEX — is zero by definition, not missing. Pick a later expiry to see a profile."
+    # GEX, DEX, VANNA, CHARM — ONE CHART, FOUR READINGS. All four are summed
+    # by strike over the same expiry and drawn on the same axis, so they share
+    # the expiry picker above instead of each getting a view of its own, and
+    # "where the gamma sits" can be compared with "where the vanna sits" by
+    # flipping one switch. GEX stays the default and stays the block it was:
+    # the view looks exactly as before until somebody switches.
+    title_col, switch_col = st.columns([3, 2], vertical_alignment="bottom")
+    with switch_col:
+        exposure_metric = st.segmented_control(
+            "Exposure", list(EXPOSURE_TITLE), default="GEX", key="exposure_metric",
+            label_visibility="collapsed",
         )
-    elif not gex.empty:
-        net_gex = metrics.net_gamma_exposure(gex)
-        if net_gex >= 0:
-            st.success(f"Net GEX: {net_gex:,.0f} — positive gamma: dealers dampen price moves")
-        else:
-            st.warning(f"Net GEX: {net_gex:,.0f} — negative gamma: dealers amplify price moves")
-        # Colored by sign (green/purple), matching the same diverging language
-        # as the GEX Heatmap — st.bar_chart can't condition color on a row's
-        # own value, so this one chart uses Altair directly instead of the
-        # thin st.bar_chart wrapper.
-        gex_chart_data = gex.assign(sign=np.where(gex["gex"] >= 0, "Positive", "Negative"))
-        st.altair_chart(
-            alt.Chart(gex_chart_data)
-            .mark_bar()
-            .encode(
-                x=alt.X("strike:O", title="Strike"),
-                y=alt.Y("gex:Q", title="GEX"),
-                color=alt.Color(
-                    "sign:N",
-                    scale=alt.Scale(domain=["Positive", "Negative"], range=[BRAND_GREEN, BRAND_PURPLE]),
-                    legend=None,
+    # Deselecting the current pill returns None; that gesture never means
+    # "show nothing".
+    exposure_metric = exposure_metric or "GEX"
+    with title_col:
+        st.subheader(EXPOSURE_TITLE[exposure_metric])
+
+    if exposure_metric == "GEX":
+        gex = metrics.gamma_exposure_profile(latest_df, selected_expiry)
+        if years_left <= 0:
+            # Say why, instead of drawing a flat line at zero. Gamma is undefined
+            # once there is no time left, so this is a property of the contract,
+            # not a gap in the data — which is also why Max Pain above still shows
+            # a number: it is computed from open interest alone.
+            st.info(
+                f"⚠️ This expiry ({format_date(selected_expiry)}) has no time left as of the "
+                f"latest collection ({format_datetime(latest_date)}), so gamma — and therefore "
+                "GEX — is zero by definition, not missing. Pick a later expiry to see a profile."
+            )
+        elif not gex.empty:
+            net_gex = metrics.net_gamma_exposure(gex)
+            if net_gex >= 0:
+                st.success(f"Net GEX: {net_gex:,.0f} — positive gamma: dealers dampen price moves")
+            else:
+                st.warning(f"Net GEX: {net_gex:,.0f} — negative gamma: dealers amplify price moves")
+            # Colored by sign (green/purple), matching the same diverging language
+            # as the GEX Heatmap — st.bar_chart can't condition color on a row's
+            # own value, so this one chart uses Altair directly instead of the
+            # thin st.bar_chart wrapper.
+            gex_chart_data = gex.assign(sign=np.where(gex["gex"] >= 0, "Positive", "Negative"))
+            st.altair_chart(
+                alt.Chart(gex_chart_data)
+                .mark_bar()
+                .encode(
+                    x=alt.X("strike:O", title="Strike"),
+                    y=alt.Y("gex:Q", title="GEX"),
+                    color=alt.Color(
+                        "sign:N",
+                        scale=alt.Scale(domain=["Positive", "Negative"], range=[BRAND_GREEN, BRAND_PURPLE]),
+                        legend=None,
+                    ),
                 ),
-            ),
-            use_container_width=True,
-        )
+                use_container_width=True,
+            )
+        else:
+            st.info("No data to compute GEX for the selected expiry.")
     else:
-        st.info("No data to compute GEX for the selected expiry.")
-    st.caption(
-        "Estimated via the Black-Scholes formula and a sign heuristic (puts contribute "
-        "negatively). Does not reflect actual market-maker positioning — an approximation only."
-    )
+        render_dealer_greek(exposure_metric, latest_df, selected_expiry, years_left, latest_date)
+    st.caption(EXPOSURE_CAPTION[exposure_metric])
     with st.expander("ℹ️ How to read this"):
-        st.write(
-            "Positive total gamma — the market as a whole is more \"sticky\", range-bound: "
-            "dealer hedging dampens sharp moves. Negative — moves can accelerate, since "
-            "hedging works in the same direction as the trend. On the by-strike chart, the "
-            "largest bars by magnitude often become support/resistance levels created by "
-            "hedging flows, especially closer to the expiry date."
-        )
+        st.write(EXPOSURE_HOW_TO_READ[exposure_metric])
 
 if active_view == "GEX Heatmap":
     st.subheader("GEX Heatmap: strike × expiry")

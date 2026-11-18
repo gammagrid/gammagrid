@@ -382,6 +382,39 @@ def main():
             else:
                 print(f"  {view:<18} ok ({drawn} elements{', guide link' if links else ''})")
 
+        # THE METRIC SWITCH ON MAX PAIN / GEX. The pass above draws the view at
+        # its default, GEX; each of the other three is a different branch with
+        # its own sentence, chart and caption, so each is drawn on its own.
+        for metric, title, words in (
+            ("DEX", "Net delta of open interest (DEX)", "Net DEX"),
+            ("Vanna", "Vanna exposure", "Net vanna"),
+            ("Charm", "Charm exposure", "Net charm"),
+        ):
+            app = AppTest.from_file(DASHBOARD, default_timeout=300)
+            app.session_state["selected_ticker"] = "RENDERTEST"
+            app.session_state["active_view"] = "Max Pain / GEX"
+            app.session_state["exposure_metric"] = metric
+            app.run()
+            label = f"Max Pain / GEX · {metric}"
+            if app.exception:
+                detail = (app.exception[0].value or "").splitlines()
+                failures.append(f"{label}: {detail[0] if detail else app.exception[0]}")
+                print(f"  {label:<24} FAILED")
+                continue
+            headings = [h.value for h in app.subheader]
+            sentences = [i.value for i in app.info]
+            charts = len(app.get("vega_lite_chart"))
+            if title not in headings:
+                failures.append(f"{label}: no {title!r} heading (found {headings})")
+            elif not any(words in line for line in sentences):
+                failures.append(f"{label}: no {words!r} line (found {sentences})")
+            elif charts < 1:
+                failures.append(f"{label}: no by-strike chart")
+            else:
+                print(f"  {label:<24} ok")
+                continue
+            print(f"  {label:<24} WRONG")
+
     if failures:
         print("\nRENDER CHECKS FAILED:")
         for line in failures:
