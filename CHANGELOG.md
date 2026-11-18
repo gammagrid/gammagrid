@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the close" no longer appear hours late or early on its expiration week.
 
 ### Changed
+- Streamlit 1.40 or later is required (was 1.35): the views already use
+  `st.segmented_control`, which first shipped in 1.40, and the new switch
+  aligns its row with `st.columns(vertical_alignment=...)` from 1.36.
 - The shared formulas (`app/metrics_core.py`, sha256 `723fddff…`) take an
   optional charm horizon in `dealer_exposures`; without it the result is
   unchanged to the bit. Day rows written by the previous formulas are rebuilt
