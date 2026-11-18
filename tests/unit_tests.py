@@ -3418,6 +3418,265 @@ def check_dealer_greeks_profile_is_one_expiry_of_the_core():
     print("ok  dealer greeks by strike for one expiry, charm to the close under a day")
 
 
+# ---------------------------------------------------------------------------
+# Dealer exposures, checked from the outside: a Black-Scholes written out here
+# with scipy's normal, not the core's kernels, so a slip shared by the kernel
+# and the aggregation cannot agree with itself. Every moment is a literal next
+# to its expiry; nothing below reads the clock.
+
+_QA_TICKER = "TESTDEALER"
+_QA_CLOSE = pd.Timestamp("2026-12-18 21:00")      # 16:00 ET on a December expiry
+_QA_DAY = 24 * 3600 / (365 * 24 * 3600)
+
+
+def _qa_reference(spot, strike, years, iv, rate, q, kind):
+    """delta, gamma and vanna (per 1.00 of sigma) by the textbook formulas;
+    an expired contract gets its payoff delta (+-1/2 on the strike)."""
+    if years <= 0:
+        if kind == "call":
+            return (1.0 if spot > strike else 0.5 if spot == strike else 0.0), 0.0, 0.0
+        return (-1.0 if spot < strike else -0.5 if spot == strike else 0.0), 0.0, 0.0
+    root = iv * np.sqrt(years)
+    d1 = (np.log(spot / strike) + (rate - q + iv * iv / 2) * years) / root
+    d2 = d1 - root
+    carry = np.exp(-q * years)
+    delta = carry * norm.cdf(d1) if kind == "call" else carry * (norm.cdf(d1) - 1)
+    gamma = carry * norm.pdf(d1) / (spot * root)
+    vanna = -carry * norm.pdf(d1) * d2 / iv
+    return delta, gamma, vanna
+
+
+def _qa_expected(row, rate, q, horizon_years):
+    """One contract's four exposures straight from the definitions."""
+    years = (_QA_CLOSE - row["collected_at"]).total_seconds() / (365 * 24 * 3600)
+    spot, strike, iv, kind = row["underlying_price"], row["strike"], row["implied_volatility"], row["option_type"]
+    if not (years > 0 and iv > 0 and spot > 0):
+        return dict(gex=0.0, dex=0.0, vanna=0.0, charm=0.0)
+    sign = 1.0 if kind == "call" else -1.0
+    notional = row["open_interest"] * 100 * spot
+    delta, gamma, vanna = _qa_reference(spot, strike, years, iv, rate, q, kind)
+    later, _g, _v = _qa_reference(spot, strike, years - min(horizon_years, years), iv, rate, q, kind)
+    return dict(gex=sign * gamma * notional, dex=delta * notional, vanna=sign * vanna * 0.01 * notional,
+                charm=sign * (later - delta) * notional)
+
+
+def _qa_chain(before_close, rows, spot=100.0):
+    """Contracts (strike, type, iv, oi) of the one expiry, all collected
+    `before_close` ahead of the close."""
+    return pd.DataFrame([dict(ticker=_QA_TICKER, expiry=pd.Timestamp(_QA_CLOSE.date()), strike=float(k),
+                              option_type=t, underlying_price=spot, collected_at=_QA_CLOSE - before_close,
+                              implied_volatility=iv, open_interest=oi) for k, t, iv, oi in rows])
+
+
+def check_dealer_exposures_match_an_independent_black_scholes():
+    """Each exposure per contract equals its definition computed here (rel
+    1e-9), the strike sum equals the contract sum, and the documented signs
+    hold: calls-only DEX > 0 and puts-only DEX < 0 (no dealer sign), vanna of
+    an out-of-the-money contract on either side > 0 (dealer sign included),
+    charm of a far-OTM call < 0 and of a deep-ITM call > 0."""
+    from app import config
+    from app import metrics_core as core
+
+    rate, q = config.RISK_FREE_RATE, 0.013
+    pricing = core.PricingInputs(dividend_yield=q)
+    rows = [(80, "call", .30, 700), (95, "call", .22, 1200), (100, "call", .20, 900), (100, "put", .20, 900),
+            (112, "call", .19, 2500), (88, "put", .27, 3100), (104, "put", .21, 400), (125, "put", .26, 50)]
+    for before in (pd.Timedelta(days=45), pd.Timedelta(days=3, hours=5)):
+        chain = _qa_chain(before, rows)
+        per = core._contract_exposures(chain, pricing, _QA_TICKER)
+        for i, row in chain.iterrows():
+            want = _qa_expected(row, rate, q, _QA_DAY)
+            for col, value in want.items():
+                got = float(per.loc[i, col])
+                assert abs(got - value) <= 1e-9 * max(abs(value), 1.0), (
+                    f"{before} K={row['strike']} {row['option_type']}: {col} {got!r}, definition gives {value!r}")
+        grouped = core.dealer_exposures(chain, pricing, _QA_TICKER)
+        assert list(grouped.columns) == ["expiry", "strike", *core.EXPOSURE_COLUMNS], list(grouped.columns)
+        assert grouped["strike"].is_unique and len(grouped) == chain["strike"].nunique(), grouped
+        for col in core.EXPOSURE_COLUMNS:
+            assert abs(grouped[col].sum() - per[col].sum()) <= 1e-6 * max(abs(per[col].sum()), 1.0), col
+
+    chain = _qa_chain(pd.Timedelta(days=45), rows)
+    per = core._contract_exposures(chain, pricing, _QA_TICKER)
+    calls, puts = chain["option_type"] == "call", chain["option_type"] == "put"
+    assert (per.loc[calls, "dex"] > 0).all() and (per.loc[puts, "dex"] < 0).all(), per["dex"].tolist()
+    at = {(r["strike"], r["option_type"]): i for i, r in chain.iterrows()}
+    assert per.loc[at[(112.0, "call")], "vanna"] > 0, "OTM call: dealer vanna must be positive"
+    assert per.loc[at[(88.0, "put")], "vanna"] > 0, "OTM put: dealer vanna must be positive (sign -1 x negative)"
+    assert per.loc[at[(80.0, "call")], "vanna"] < 0, "deep ITM call: dealer vanna must be negative"
+    assert per.loc[at[(112.0, "call")], "charm"] < 0, "OTM call loses delta with time: charm must be negative"
+    assert per.loc[at[(80.0, "call")], "charm"] > 0, "deep ITM call gains delta with time: charm must be positive"
+    # The ATM pair with equal OI: dealer GEX and vanna cancel to the bit, DEX does not.
+    pair = core.dealer_exposures(chain[chain["strike"] == 100.0], pricing, _QA_TICKER).iloc[0]
+    assert pair["gex"] == 0.0 and pair["vanna"] == 0.0, pair.to_dict()
+    assert pair["dex"] > 0, f"ATM call delta beats ATM put |delta| at r > q: {pair['dex']}"
+    # Two rows on one strike and side are summed, not deduplicated.
+    twice = core.dealer_exposures(pd.concat([chain, chain], ignore_index=True), pricing, _QA_TICKER)
+    once = core.dealer_exposures(chain, pricing, _QA_TICKER)
+    for col in core.EXPOSURE_COLUMNS:
+        assert np.allclose(twice[col], 2 * once[col], rtol=1e-12, atol=0), col
+    print("dealer exposures: every contract equals its textbook definition, signs as documented")
+
+
+def check_dealer_exposures_charm_horizon():
+    """`charm_horizon_years`: None is the one-day horizon to the bit; a given
+    horizon h prices the later delta at T - min(h, T); a horizon past expiry
+    lands on the payoff delta; one horizon per row equals the scalar calls."""
+    from app import config
+    from app import metrics_core as core
+
+    rate, q = config.RISK_FREE_RATE, 0.0
+    pricing = core.PricingInputs(dividend_yield=q)
+    rows = [(90, "call", .25, 300), (100, "call", .2, 800), (100, "put", .2, 800), (108, "put", .23, 600),
+            (115, "call", .22, 1000)]
+    frames = {
+        "30 days": _qa_chain(pd.Timedelta(days=30), rows),
+        "30 minutes": _qa_chain(pd.Timedelta(minutes=30), rows, spot=100.0),
+        "two expiries": pd.concat([_qa_chain(pd.Timedelta(days=30), rows),
+                                   _qa_chain(pd.Timedelta(days=30), rows).assign(
+                                       expiry=pd.Timestamp("2027-01-15"))], ignore_index=True),
+    }
+    for name, frame in frames.items():
+        default = core.dealer_exposures(frame, pricing, _QA_TICKER)
+        none = core.dealer_exposures(frame, pricing, _QA_TICKER, charm_horizon_years=None)
+        day = core.dealer_exposures(frame, pricing, _QA_TICKER, charm_horizon_years=24 * 3600 / core._YEAR_SECONDS)
+        for col in core.EXPOSURE_COLUMNS:
+            assert np.array_equal(default[col].to_numpy(), none[col].to_numpy()), f"{name}: None moved {col}"
+            assert np.array_equal(default[col].to_numpy(), day[col].to_numpy()), f"{name}: None is not one day ({col})"
+
+    chain = frames["30 days"]
+    three = 3 * _QA_DAY
+    per = core._contract_exposures(chain, pricing, _QA_TICKER, charm_horizon_years=three)
+    base = core._contract_exposures(chain, pricing, _QA_TICKER)
+    for i, row in chain.iterrows():
+        want = _qa_expected(row, rate, q, three)["charm"]
+        assert abs(per.loc[i, "charm"] - want) <= 1e-9 * abs(want), (row["strike"], per.loc[i, "charm"], want)
+    for col in ("gex", "dex", "vanna"):
+        assert np.array_equal(per[col].to_numpy(), base[col].to_numpy()), f"the horizon moved {col}"
+    assert not np.allclose(per["charm"], base["charm"]), "a three-day horizon gave the one-day charm"
+
+    # Past expiry: clipped to T, so the later delta is the payoff indicator.
+    beyond = core._contract_exposures(chain, pricing, _QA_TICKER, charm_horizon_years=60 * _QA_DAY)
+    for i, row in chain.iterrows():
+        want = _qa_expected(row, rate, q, 1e9)["charm"]
+        assert abs(beyond.loc[i, "charm"] - want) <= 1e-9 * abs(want), (row["strike"], beyond.loc[i, "charm"], want)
+
+    # One horizon per row is the same as each row's scalar.
+    horizons = np.array([_QA_DAY, 2 * _QA_DAY, 0.5 * _QA_DAY, 3 * _QA_DAY, 7 * _QA_DAY])
+    rowwise = core._contract_exposures(chain, pricing, _QA_TICKER, charm_horizon_years=horizons)
+    for i, h in enumerate(horizons):
+        alone = core._contract_exposures(chain, pricing, _QA_TICKER, charm_horizon_years=float(h))
+        assert rowwise["charm"].iloc[i] == alone["charm"].iloc[i], (i, rowwise["charm"].iloc[i], alone["charm"].iloc[i])
+    print("dealer exposures: charm horizon None is one day to the bit, a given horizon is honoured and clipped")
+
+
+def check_dealer_exposures_at_the_edges():
+    """Expiry day, expired, no IV, no spot, one contract, nothing at all."""
+    from app import config
+    from app import metrics_core as core
+
+    rate, q = config.RISK_FREE_RATE, 0.0
+    pricing = core.PricingInputs(dividend_yield=q)
+    rows = [(99.8, "call", .2, 2000), (99.8, "put", .2, 500), (100, "call", .2, 3000), (100, "put", .2, 3000),
+            (100.2, "call", .2, 400), (100.2, "put", .2, 2500)]
+    zero = _qa_chain(pd.Timedelta(minutes=45), rows)
+    per = core._contract_exposures(zero, pricing, _QA_TICKER)
+    gross = float((zero["open_interest"] * 100 * zero["underlying_price"]).sum())
+    assert abs(per["charm"].sum()) <= gross, (per["charm"].sum(), gross)
+    for i, row in zero.iterrows():
+        want = _qa_expected(row, rate, q, _QA_DAY)["charm"]       # min(1 day, 45 min) -> to the close
+        assert abs(per.loc[i, "charm"] - want) <= 1e-9 * max(abs(want), 1.0), (row["strike"], row["option_type"])
+    itm_call = per.loc[(zero["strike"] == 99.8) & (zero["option_type"] == "call"), "charm"].iloc[0]
+    assert itm_call > 0, f"ITM call on its expiry day still gains delta to the close, got {itm_call}"
+
+    expired = _qa_chain(-pd.Timedelta(minutes=1), rows)
+    got = core.dealer_exposures(expired, pricing, _QA_TICKER)
+    assert (got[list(core.EXPOSURE_COLUMNS)] == 0.0).all().all(), got
+
+    for blank in (np.nan, 0.0):
+        no_iv = core.dealer_exposures(zero.assign(implied_volatility=blank), pricing, _QA_TICKER)
+        values = no_iv[list(core.EXPOSURE_COLUMNS)].to_numpy()
+        assert np.isfinite(values).all() and (values == 0.0).all(), (blank, no_iv)
+    no_spot = core.dealer_exposures(zero.assign(underlying_price=np.nan), pricing, _QA_TICKER)
+    assert (no_spot[list(core.EXPOSURE_COLUMNS)] == 0.0).all().all(), no_spot
+
+    one = _qa_chain(pd.Timedelta(days=10), [(105, "put", .24, 77)])
+    got = core.dealer_exposures(one, pricing, _QA_TICKER)
+    want = _qa_expected(one.iloc[0], rate, q, _QA_DAY)
+    assert len(got) == 1 and got["strike"].iloc[0] == 105.0, got
+    for col, value in want.items():
+        assert abs(got[col].iloc[0] - value) <= 1e-9 * abs(value), (col, got[col].iloc[0], value)
+
+    empty = core.dealer_exposures(one.iloc[0:0], pricing, _QA_TICKER)
+    assert empty.empty and list(empty.columns) == ["expiry", "strike", *core.EXPOSURE_COLUMNS], empty
+    print("dealer exposures: expiry day bounded and to the close, expired/no IV/no spot are zeros, one row, none")
+
+
+def check_dealer_greeks_profile_is_the_gex_charts_twin():
+    """The view draws GEX from `gamma_exposure_profile` and the other three from
+    `dealer_greeks_profile`: on one chain at one moment the core's gex column
+    for that expiry equals the GEX chart to the bit, so the four bars stand on
+    the same model. And the chain's own ticker reaches the AM settlement rule:
+    an SPX monthly the evening before is priced to the open, not the close."""
+    from app import metrics
+    from app import metrics_core as core
+
+    rows = [(95, "call", .22, 900), (95, "put", .24, 3000), (100, "call", .2, 2500), (100, "put", .2, 2600),
+            (105, "call", .19, 4000), (105, "put", .21, 700)]
+    chain = pd.concat([_qa_chain(pd.Timedelta(days=9), rows),
+                       _qa_chain(pd.Timedelta(days=9), rows).assign(expiry=pd.Timestamp("2027-01-15"))],
+                      ignore_index=True)
+    expiry = pd.Timestamp(_QA_CLOSE.date())
+    gex = metrics.gamma_exposure_profile(chain, expiry)
+    whole = metrics.dealer_exposures(chain, metrics.DEFAULT_PRICING)
+    mine = whole[whole["expiry"] == expiry].reset_index(drop=True)
+    assert gex["strike"].tolist() == mine["strike"].tolist()
+    diff = float(np.abs(gex["gex"].to_numpy() - mine["gex"].to_numpy()).max())
+    assert diff == 0.0, f"GEX chart and dealer exposures disagree by {diff}"
+
+    at = pd.Timestamp("2026-11-19 18:00")                      # Thursday 13:00 ET
+    monthly = pd.Timestamp("2026-11-20")                        # third Friday: SPX settles 09:30 ET
+    spx = pd.DataFrame([dict(ticker="SPX", expiry=monthly, strike=k, option_type=t, underlying_price=6000.0,
+                             collected_at=at, implied_volatility=.15, open_interest=1000)
+                        for k in (5950.0, 6000.0, 6050.0) for t in ("call", "put")])
+    got = metrics.dealer_greeks_profile(spx, monthly)
+    by_open = core.dealer_exposures(spx, metrics.DEFAULT_PRICING, "SPX")
+    by_close = core.dealer_exposures(spx.assign(ticker="SPY"), metrics.DEFAULT_PRICING, "SPY")
+    for col in metrics.DEALER_GREEKS:
+        assert np.array_equal(got[col].to_numpy(), by_open[col].to_numpy()), f"{col}: the AM rule was lost"
+    assert not np.allclose(by_open["charm"], by_close["charm"]), "fixture cannot tell the open from the close"
+    print("dealer greeks profile: GEX parity with the chart |delta| = 0, AM settlement reached")
+
+
+def check_day_rows_follow_the_shared_core():
+    """`day_summary.CODE_SHA` changes with every byte of the shared core (and of
+    the two other formula files) — the trigger that makes the worker rebuild
+    day rows after an upgrade of the core."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from app import day_summary
+
+    with tempfile.TemporaryDirectory() as folder:
+        copy = Path(folder)
+        for name in day_summary._FORMULA_FILES:
+            shutil.copy(day_summary._HERE / name, copy / name)
+        real = day_summary._HERE
+        try:
+            day_summary._HERE = copy
+            assert day_summary._code_sha() == day_summary.CODE_SHA, "the copy is not the running code"
+            for name in day_summary._FORMULA_FILES:
+                original = (copy / name).read_bytes()
+                (copy / name).write_bytes(original + b"\n")
+                changed = day_summary._code_sha()
+                (copy / name).write_bytes(original)
+                assert changed != day_summary.CODE_SHA, f"a change to {name} leaves CODE_SHA as it was"
+        finally:
+            day_summary._HERE = real
+    print("CODE_SHA follows every byte of the shared core and the formula files")
+
+
 def main():
     # Start from an empty database, like the other two suites already do. This
     # one did not, and got away with it only because nothing it left behind
@@ -3484,6 +3743,11 @@ def main():
     check_dealer_walls_side_and_window()
     check_dealer_exposures_in_one_greeks_batch()
     check_dealer_greeks_profile_is_one_expiry_of_the_core()
+    check_dealer_exposures_match_an_independent_black_scholes()
+    check_dealer_exposures_charm_horizon()
+    check_dealer_exposures_at_the_edges()
+    check_dealer_greeks_profile_is_the_gex_charts_twin()
+    check_day_rows_follow_the_shared_core()
     print("\nALL UNIT CHECKS PASSED")
 
 if __name__ == "__main__":

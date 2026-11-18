@@ -289,6 +289,247 @@ def check_every_view_links_its_lesson() -> list[str]:
             problems.append(f"view {view!r}: its first explanation is not howto({view!r}) (found {opened[:1]})")
     return problems
 
+# ---------------------------------------------------------------------------
+# DEX, vanna and charm on the Max Pain / GEX view, held to numbers. The pass in
+# main() proves each branch draws; this proves what it draws: the figure in
+# the sentence is the expiry's total, its unit and words follow the expiry,
+# the bars are coloured by their own sign, and GEX is still the default.
+#
+# THE FIXTURE DOES NOT CARRY THE CALENDAR. Every moment is a literal: one
+# collection on Friday 2026-11-13 at 13:00 New York time, and expiries the day
+# before (no time left), the same day (three hours to the close) and five weeks
+# out. The view measures time from the collection, not from the clock, so the
+# expiry-day branch is reached whatever day the check runs on.
+
+QA_TICKER = "RENDERQA"
+QA_MOMENT = datetime(2026, 11, 13, 18, 0)           # 13:00 ET, a Friday session
+QA_EXPIRIES = ("2026-11-12", "2026-11-13", "2026-12-18")
+QA_SPOT = 100.0
+
+
+def _bs_price(spot, strike, years, iv, kind, rate=0.05):
+    """Black-Scholes price at the config's flat rate, no dividend — only so that
+    the solved IV the view runs on is a sensible number, not to check anything."""
+    from math import erf, exp, log, sqrt
+
+    def cdf(x):
+        return 0.5 * (1 + erf(x / sqrt(2)))
+
+    if years <= 0:
+        return max(0.0, spot - strike) if kind == "call" else max(0.0, strike - spot)
+    d1 = (log(spot / strike) + (rate + iv * iv / 2) * years) / (iv * sqrt(years))
+    d2 = d1 - iv * sqrt(years)
+    if kind == "call":
+        return spot * cdf(d1) - strike * exp(-rate * years) * cdf(d2)
+    return strike * exp(-rate * years) * cdf(-d2) - spot * cdf(-d1)
+
+
+def seed_dealer_greeks(db) -> None:
+    """Strikes 90-110; calls heavy above the spot and puts heavy below, except
+    at 105 and 107.5, where puts outweigh calls — so both signs of vanna appear
+    among the bars, as they do on a real chain."""
+    conn = db.get_connection()
+    db.add_ticker(conn, QA_TICKER)
+    close = {e: datetime.fromisoformat(e).replace(hour=21) for e in QA_EXPIRIES}   # 16:00 ET in November
+    rows = []
+    for expiry in QA_EXPIRIES:
+        years = (close[expiry] - QA_MOMENT).total_seconds() / (365 * 24 * 3600)
+        for strike in (90.0, 92.5, 95.0, 97.5, 100.0, 102.5, 105.0, 107.5, 110.0):
+            for option_type in ("call", "put"):
+                above = strike > QA_SPOT
+                oi = 4000 if (option_type == "call") == above else 600
+                if strike in (105.0, 107.5):
+                    oi = 5000 if option_type == "put" else 300
+                iv = 0.18 + abs(strike - QA_SPOT) / 200
+                price = max(_bs_price(QA_SPOT, strike, years, iv, option_type), 0.01)
+                rows.append({
+                    "expiry": expiry, "strike": strike, "option_type": option_type,
+                    "last_price": round(price, 2), "bid": round(price * 0.98, 2), "ask": round(price * 1.02, 2),
+                    "volume": 100, "open_interest": oi, "implied_volatility": iv,
+                    "in_the_money": strike < QA_SPOT if option_type == "call" else strike > QA_SPOT,
+                })
+    db.insert_snapshot(conn, QA_TICKER, QA_MOMENT, QA_SPOT, pd.DataFrame(rows))
+    conn.close()
+
+
+def _qa_expected(db, metrics, expiry: str) -> dict:
+    """The expiry's totals from the core, on the chain the view itself reads
+    (the stored snapshot with IV solved by our model, the default pricing)."""
+    conn = db.get_connection()
+    frame = metrics.with_solved_iv(db.get_latest_snapshot(conn, QA_TICKER), metrics.DEFAULT_PRICING,
+                                   ticker=QA_TICKER)
+    conn.close()
+    rows = frame[pd.to_datetime(frame["expiry"]) == pd.Timestamp(expiry)]
+    assert rows["implied_volatility"].notna().mean() > 0.9, "the fixture's prices did not solve to an IV"
+    totals = metrics.dealer_exposures(rows, metrics.DEFAULT_PRICING, QA_TICKER)
+    gex = metrics.gamma_exposure_profile(frame, rows["expiry"].iloc[0])
+    gross = float((pd.to_numeric(rows["open_interest"]) * 100 * QA_SPOT).sum())
+    return {"DEX": float(totals["dex"].sum()), "Vanna": float(totals["vanna"].sum()),
+            "Charm": float(totals["charm"].sum()), "GEX": float(metrics.net_gamma_exposure(gex)), "gross": gross}
+
+
+_SCALE = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9}
+
+
+def _printed_money(line: str, metric: str) -> float:
+    """The signed dollar figure after 'Net <metric>' in the sentence."""
+    import re
+
+    word = "DEX" if metric == "DEX" else metric.lower()
+    found = re.search(rf"Net {word} \*\*([+−])\\?\$([0-9.]+)([KMB]?)\*\*", line)
+    assert found, f"no 'Net {word} ±$…' figure in {line!r}"
+    value = float(found.group(2)) * _SCALE[found.group(3)]
+    return -value if found.group(1) == "−" else value
+
+
+def _same_printed(shown: float, want: float) -> bool:
+    """Equal to the two decimals of the unit the figure is printed in."""
+    size = abs(want)
+    unit = 1e9 if size >= 1e9 else 1e6 if size >= 1e6 else 1e3 if size >= 1e3 else 1.0
+    return abs(shown - want) <= 0.005 * unit + 1e-9 * size
+
+
+def _chart_bars(app) -> list[tuple[float, str]]:
+    """(value, sign label) of every bar of the view's one bar chart."""
+    import json
+
+    charts = app.get("vega_lite_chart")
+    assert len(charts) == 1, f"{len(charts)} charts on the view, want the one by-strike chart"
+    spec = json.loads(charts[0].proto.spec)
+    datasets = spec.get("datasets") or {}
+    rows = [row for data in datasets.values() for row in data]
+    if not rows:                                   # Streamlit can pass the frame beside the spec
+        import pyarrow as pa
+        for dataset in charts[0].proto.datasets:
+            table = pa.ipc.open_stream(dataset.data.data).read_all().to_pandas()
+            rows.extend(table.to_dict("records"))
+    field = spec["encoding"]["y"]["field"]
+    return [(float(row[field]), row["sign"]) for row in rows]
+
+
+def check_dealer_greeks_on_screen(AppTest, db) -> list[str]:
+    from app import metrics
+
+    seed_dealer_greeks(db)
+    failures = []
+    calls = []
+    real = metrics.dealer_exposures
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    def run(metric=None, expiry_index=None):
+        app = AppTest.from_file(DASHBOARD, default_timeout=300)
+        app.session_state["selected_ticker"] = QA_TICKER
+        app.session_state["active_view"] = "Max Pain / GEX"
+        if metric is not None:
+            app.session_state["exposure_metric"] = metric
+        app.run()
+        if expiry_index is not None:
+            calls.clear()                          # count the run on the chosen expiry only
+            app.selectbox(key=f"expiry_pain_gex_{QA_TICKER}").select_index(expiry_index).run()
+        assert not app.exception, app.exception[0].value if app.exception else ""
+        return app
+
+    metrics.dealer_exposures = counted
+    try:
+        five_weeks, expiry_day, expired = 2, 1, 0
+        want = _qa_expected(db, metrics, QA_EXPIRIES[five_weeks])
+        signs = {m: v > 0 for m, v in want.items()}
+        assert signs["Vanna"] != signs["Charm"], f"fixture must give vanna and charm opposite signs: {want}"
+
+        # GEX IS THE DEFAULT, AND IT IS THE BLOCK IT WAS: its heading, its net
+        # figure in its old colour by sign, its caption — and nothing of the
+        # other three, and no call into the dealer exposures.
+        app = run(expiry_index=five_weeks)
+        headings = [h.value for h in app.subheader]
+        box = app.success if want["GEX"] >= 0 else app.warning
+        if "Approximate Gamma Exposure (GEX)" not in headings:
+            failures.append(f"default: not the GEX heading ({headings})")
+        if not any(f"Net GEX: {want['GEX']:,.0f}" in b.value for b in box):
+            failures.append(f"default: no 'Net GEX: {want['GEX']:,.0f}' in the box of its sign")
+        if any("Net " in i.value for i in app.info):
+            failures.append("default: a dealer greek sentence on the GEX block")
+        if calls:
+            failures.append(f"default GEX called dealer_exposures {len(calls)} time(s); it reads gamma_exposure_profile")
+        print(f"  {'GEX default':<26} {'ok' if not failures else 'WRONG'}")
+
+        for metric in ("DEX", "Vanna", "Charm"):
+            before = len(failures)
+            app = run(metric, five_weeks)
+            label = f"{metric} · five weeks"
+            if len(calls) != 1:
+                failures.append(f"{label}: dealer_exposures called {len(calls)} times per render, want 1")
+            lines = [i.value for i in app.info if "Net " in i.value]
+            if len(lines) != 1:
+                failures.append(f"{label}: {len(lines)} net sentences")
+                continue
+            shown = _printed_money(lines[0], metric)
+            if not _same_printed(shown, want[metric]):
+                failures.append(f"{label}: screen says {shown:,.0f}, the expiry's total is {want[metric]:,.2f}")
+            words = {"DEX": "open interest leans to calls" if want["DEX"] >= 0 else "open interest leans to puts",
+                     "Vanna": "if IV rises, dealer delta grows" if want["Vanna"] >= 0 else "if IV rises, dealer delta shrinks",
+                     "Charm": ("dealer delta grows by tomorrow" if want["Charm"] >= 0
+                               else "dealer delta shrinks by tomorrow")}[metric]
+            if words not in lines[0]:
+                failures.append(f"{label}: sign words {words!r} missing from {lines[0]!r}")
+            unit_words = {"DEX": "shares", "Vanna": "per 1 IV pt", "Charm": "per day"}[metric]
+            if unit_words not in lines[0]:
+                failures.append(f"{label}: unit {unit_words!r} missing from {lines[0]!r}")
+            if metric == "DEX":
+                import re
+                held = re.search(r"≈ ([0-9.]+)([KMB]?) shares", lines[0])
+                if not held or abs(float(held.group(1)) * _SCALE[held.group(2)] - abs(want["DEX"]) / QA_SPOT) > \
+                        0.005 * _SCALE[held.group(2)]:
+                    failures.append(f"{label}: shares are not |DEX| / spot in {lines[0]!r}")
+            if any("counted to the close" in c.value for c in app.caption):
+                failures.append(f"{label}: 'counted to the close' on a five-week expiry")
+            bars = _chart_bars(app)
+            wrong = [(v, s) for v, s in bars if (s == "Positive") != (v >= 0)]
+            if wrong:
+                failures.append(f"{label}: bars coloured against their sign: {wrong[:3]}")
+            if metric == "Vanna" and {s for _, s in bars} != {"Positive", "Negative"}:
+                failures.append(f"{label}: the fixture's bars should carry both signs, got {sorted({s for _, s in bars})}")
+            print(f"  {label:<26} {'ok' if len(failures) == before else 'WRONG'}")
+
+        # EXPIRY DAY: charm is counted to the close and says so; the other two
+        # keep their units and get no such note.
+        day = _qa_expected(db, metrics, QA_EXPIRIES[expiry_day])
+        for metric in ("DEX", "Vanna", "Charm"):
+            before = len(failures)
+            app = run(metric, expiry_day)
+            label = f"{metric} · expiry day"
+            line = next((i.value for i in app.info if "Net " in i.value), "")
+            noted = any("counted to the close" in c.value for c in app.caption)
+            if metric == "Charm":
+                if "to the close" not in line or "per day" in line or "by the close" not in line:
+                    failures.append(f"{label}: sentence not counted to the close: {line!r}")
+                if not noted:
+                    failures.append(f"{label}: no 'counted to the close' note")
+                if abs(day["Charm"]) > day["gross"]:
+                    failures.append(f"{label}: |charm| above the chain's whole notional")
+            elif noted:
+                failures.append(f"{label}: 'counted to the close' note on {metric}")
+            if line and not _same_printed(_printed_money(line, metric), day[metric]):
+                failures.append(f"{label}: screen {line!r}, total {day[metric]:,.2f}")
+            print(f"  {label:<26} {'ok' if len(failures) == before else 'WRONG'}")
+
+        # NO TIME LEFT: said in words, no chart of zeros, no figure.
+        for metric in ("DEX", "Vanna", "Charm"):
+            before = len(failures)
+            app = run(metric, expired)
+            label = f"{metric} · expired"
+            if not any("no time left" in i.value and "not computed" in i.value for i in app.info):
+                failures.append(f"{label}: no 'no time left … not computed' line")
+            if any("Net " in i.value for i in app.info) or app.get("vega_lite_chart"):
+                failures.append(f"{label}: a figure or a chart for an expiry with no time left")
+            print(f"  {label:<26} {'ok' if len(failures) == before else 'WRONG'}")
+    finally:
+        metrics.dealer_exposures = real
+    return failures
+
+
 def main():
     problems = check_no_cross_view_names()
     if problems:
@@ -414,6 +655,9 @@ def main():
                 print(f"  {label:<24} ok")
                 continue
             print(f"  {label:<24} WRONG")
+
+        # The same view, held to its numbers on a fixture of its own.
+        failures.extend(check_dealer_greeks_on_screen(AppTest, db))
 
     if failures:
         print("\nRENDER CHECKS FAILED:")
