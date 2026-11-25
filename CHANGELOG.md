@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **The volatility surface no longer fails on a chain it cannot draw.** Two
+  points, or points that all lie on one diagonal line, have distinct strikes
+  and expiries but cannot be triangulated, and building the surface from them
+  raised an error. The view now says there is not enough data for a surface,
+  as it does for an empty chain, rather than filling in a surface the chain
+  does not have.
+
 ## [0.11.0] - 2026-11-18
 
 ### Added

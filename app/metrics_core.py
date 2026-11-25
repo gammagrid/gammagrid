@@ -39,6 +39,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
+from scipy.spatial import QhullError
 from scipy.special import ndtr
 
 from app import config
@@ -2415,7 +2416,11 @@ def iv_surface_grid(
     edges) — those are filled with nearest-neighbor so the surface has no
     holes/NaNs. Returns None when there aren't enough points to interpolate
     (needs ≥2 distinct strikes and ≥2 distinct expiries — otherwise the points
-    lie on a line, not a surface)."""
+    lie on a line, not a surface). Distinct strikes and expiries are not
+    enough on their own: two points, or any number of points on one diagonal
+    line, still cannot be triangulated, and Qhull refuses them — that is also
+    None. Nearest-neighbor fill is not used there on purpose: from points on a
+    line it would draw a surface the chain does not have."""
     if surface.empty or surface["strike"].nunique() < 2 or surface["years_to_expiry"].nunique() < 2:
         return None
 
@@ -2425,7 +2430,10 @@ def iv_surface_grid(
     points = (surface["strike"].to_numpy(), surface["years_to_expiry"].to_numpy())
     values = surface["implied_volatility"].to_numpy()
 
-    grid_z = griddata(points, values, (grid_x, grid_y), method="linear")
+    try:
+        grid_z = griddata(points, values, (grid_x, grid_y), method="linear")
+    except QhullError:
+        return None
     nan_mask = np.isnan(grid_z)
     if nan_mask.any():
         grid_z_nearest = griddata(points, values, (grid_x, grid_y), method="nearest")

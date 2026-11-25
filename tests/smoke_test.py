@@ -1156,6 +1156,20 @@ def main():
     # fewer than 2 distinct strikes or expiries — a line, not a surface; must return None, not crash
     assert metrics.iv_surface_grid(iv_surface_points[iv_surface_points["strike"] == 90.0]) is None
 
+    # distinct strikes and expiries are not enough: points Qhull cannot
+    # triangulate (two points, points on one diagonal, four points stacked on
+    # two nodes) are also None, not a QhullError and not a made-up surface
+    def degenerate(rows):
+        return pd.DataFrame(rows, columns=["strike", "years_to_expiry", "implied_volatility"])
+
+    assert metrics.iv_surface_grid(degenerate([(90.0, 0.1, 0.30), (110.0, 0.2, 0.35)])) is None
+    assert metrics.iv_surface_grid(
+        degenerate([(90.0, 0.1, 0.30), (100.0, 0.2, 0.32), (110.0, 0.3, 0.35)])
+    ) is None
+    assert metrics.iv_surface_grid(
+        degenerate([(90.0, 0.1, 0.30), (90.0, 0.1, 0.31), (110.0, 0.2, 0.35), (110.0, 0.2, 0.36)])
+    ) is None
+
     # screener_table (spec FR25) — flat table of the latest snapshot with greeks
     screener = metrics.screener_table(df)
     assert len(screener) == 10, f"latest snapshot has 5 strikes x 2 types = 10 rows, got {len(screener)}"
